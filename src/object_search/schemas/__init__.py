@@ -11,6 +11,15 @@ Import from this package, not from the submodules::
 """
 
 from object_search.schemas.geometry import BBox, ExemplarBox, Point
+from object_search.schemas.records import (
+    FPSource,
+    MatchVerdict,
+    Provenance,
+    Rating,
+    RatingCompleteness,
+    RunRecord,
+    SliceMetadata,
+)
 from object_search.schemas.search import (
     Candidate,
     Correspondence,
@@ -30,12 +39,19 @@ __all__ = [
     "Correspondence",
     "Diagnostics",
     "ExemplarBox",
+    "FPSource",
     "HeatmapPayload",
     "HoughPeak",
     "LatencyBreakdown",
     "Match",
+    "MatchVerdict",
     "MethodError",
     "Point",
+    "Provenance",
+    "Rating",
+    "RatingCompleteness",
+    "RunRecord",
     "SearchOutcome",
     "SearchResult",
+    "SliceMetadata",
 ]

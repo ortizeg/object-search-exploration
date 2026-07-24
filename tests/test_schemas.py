@@ -18,14 +18,21 @@ from object_search.schemas import (
     Correspondence,
     Diagnostics,
     ExemplarBox,
+    FPSource,
     HeatmapPayload,
     HoughPeak,
     LatencyBreakdown,
     Match,
+    MatchVerdict,
     MethodError,
     Point,
+    Provenance,
+    Rating,
+    RatingCompleteness,
+    RunRecord,
     SearchOutcome,
     SearchResult,
+    SliceMetadata,
 )
 
 ZERO_LATENCY = LatencyBreakdown(preprocess_ms=0.0, inference_ms=0.0, postprocess_ms=0.0)
@@ -321,3 +328,294 @@ def test_search_result_is_frozen():
     result = _result()
     with pytest.raises(ValidationError):
         result.method = "other"  # type: ignore[misc]
+
+
+# -------------------------------------------------------------------------- SliceMetadata
+
+
+def test_slice_metadata_is_all_none_by_default_because_unknown_is_not_zero():
+    meta = SliceMetadata()
+    assert meta.model_dump() == dict.fromkeys(SliceMetadata.model_fields, None)
+
+
+def test_slice_metadata_is_exact_for_a_synthetic_image():
+    meta = SliceMetadata(
+        true_instance_count=12,
+        instance_scale_min=1.0,
+        instance_scale_max=1.0,
+        rotation_min_deg=0.0,
+        rotation_max_deg=0.0,
+        clutter_level=0.0,
+    )
+    assert meta.true_instance_count == 12
+    assert meta.exemplar_keypoint_count is None  # not known until a method runs
+
+
+# ----------------------------------------------------------------------------- Provenance
+
+
+def test_provenance_capture_fills_code_config_and_environment():
+    record = Provenance.capture(
+        method_version="1.0.0", config_hash="deadbeef", model_hashes={"dinov2-small": "abc"}
+    )
+    assert record.method_version == "1.0.0"
+    assert record.config_hash == "deadbeef"
+    assert dict(record.model_hashes) == {"dinov2-small": "abc"}
+    # The environment half -- the fields a git SHA does not capture, and without which
+    # ratings from before and after a dependency bump would be silently pooled.
+    assert record.git_sha  # a real sha here, or "unknown" outside a checkout
+    assert record.cv2_version.startswith("4.")
+    assert record.onnxruntime_version
+    assert record.numpy_version.startswith("2.")
+    assert "ExecutionProvider" in record.ort_providers
+    assert len(record.pixi_lock_sha256) == 64  # sha256 hex of the committed lockfile
+    assert record.created_at.tzinfo is not None  # tz-aware, so it sorts correctly
+
+
+def test_provenance_environment_fields_cannot_be_forgotten():
+    """They are required, so a hand-built Provenance that omits them fails loudly."""
+    with pytest.raises(ValidationError):
+        Provenance(git_sha="abc", method_version="1.0.0", config_hash="d")  # type: ignore[call-arg]
+
+
+def test_provenance_is_frozen():
+    record = Provenance.capture(method_version="1.0.0", config_hash="d")
+    with pytest.raises(ValidationError):
+        record.git_sha = "tampered"  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------------------ RunRecord
+
+
+def test_run_record_has_no_id_before_insert():
+    record = RunRecord(
+        image_id="synthetic/lattice-plain.png",
+        exemplar=ExemplarBox(box=BBox(x=1, y=1, w=4, h=4)),
+        method="ncc",
+        config_json='{"threshold":0.7}',
+        config_hash="cafe",
+        result=_result(),
+        provenance=Provenance.capture(method_version="1.0.0", config_hash="cafe"),
+    )
+    assert record.id is None
+    assert record.slice_metadata.true_instance_count is None
+
+
+# --------------------------------------------------------------------------------- Rating
+# EVAL-17 lives or dies here.
+
+
+def test_rating_counts_are_none_when_unassessed():
+    """The single most important assertion in the schema suite (EVAL-17).
+
+    If this ever fails because someone added a numeric default, every unreviewed run in the
+    store starts claiming perfect precision and recall.
+    """
+    rating = Rating(run_id=1, thumbs_up=True)
+    assert rating.wrong_count is None
+    assert rating.missed_count is None
+    assert rating.false_positives is None
+    assert rating.fp_source is None
+    assert rating.completeness is RatingCompleteness.NONE
+
+
+def test_rating_counts_survive_a_json_round_trip_as_null_not_zero():
+    """A serialisation layer is a classic place for a 0 to appear from nowhere."""
+    rating = Rating(run_id=1, thumbs_up=False)
+    payload = rating.model_dump(mode="json")
+    assert payload["wrong_count"] is None
+    assert payload["missed_count"] is None
+    assert Rating.model_validate_json(rating.model_dump_json()).wrong_count is None
+
+
+def test_rating_schema_declares_no_numeric_default_for_either_count():
+    """Guards the JSON Schema too -- the UI form is generated from it (EVAL-17)."""
+    schema = Rating.model_json_schema()
+    for field in ("wrong_count", "missed_count"):
+        assert schema["properties"][field]["default"] is None
+        assert field not in schema.get("required", [])
+
+
+def test_rating_zero_is_a_real_assessment_distinct_from_none():
+    assessed = Rating(run_id=1, thumbs_up=True, wrong_count=0, missed_count=0)
+    assert assessed.false_positives == 0
+    assert assessed.fp_source is FPSource.COUNT
+    assert assessed.completeness is RatingCompleteness.COMPLETE
+
+
+def test_rating_rejects_negative_counts():
+    with pytest.raises(ValidationError):
+        Rating(run_id=1, thumbs_up=True, wrong_count=-1)
+    with pytest.raises(ValidationError):
+        Rating(run_id=1, thumbs_up=True, missed_count=-1)
+
+
+@pytest.mark.parametrize(
+    ("wrong", "missed", "expected"),
+    [
+        (None, None, RatingCompleteness.NONE),
+        (2, None, RatingCompleteness.PRECISION_ONLY),
+        (None, 3, RatingCompleteness.RECALL_ONLY),
+        (2, 3, RatingCompleteness.COMPLETE),
+    ],
+)
+def test_rating_completeness_tiers(wrong, missed, expected):
+    rating = Rating(run_id=1, thumbs_up=True, wrong_count=wrong, missed_count=missed)
+    assert rating.completeness is expected
+
+
+def test_unconfirmed_per_match_verdicts_are_ignored_entirely():
+    """UI-08: an untouched checkbox grid is not a judgement.
+
+    "Looked at every box and approved them" must stay distinguishable from "never opened
+    the panel", so unconfirmed verdicts contribute nothing at all.
+    """
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        per_match_verdicts=(
+            MatchVerdict(match_index=0, correct=False),
+            MatchVerdict(match_index=1, correct=True),
+        ),
+        verdicts_confirmed=False,
+    )
+    assert rating.fp_source is None
+    assert rating.false_positives is None
+    assert rating.completeness is RatingCompleteness.NONE
+    assert rating.has_fp_discrepancy is False
+
+
+def test_confirmed_per_match_verdicts_provide_false_positives():
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        per_match_verdicts=(
+            MatchVerdict(match_index=0, correct=False),
+            MatchVerdict(match_index=1, correct=True),
+            MatchVerdict(match_index=2, correct=False),
+        ),
+        verdicts_confirmed=True,
+    )
+    assert rating.fp_source is FPSource.PER_MATCH
+    assert rating.false_positives == 2
+    assert rating.completeness is RatingCompleteness.PRECISION_ONLY
+
+
+def test_per_match_verdicts_win_over_a_conflicting_wrong_count_and_the_clash_is_flagged():
+    """EVAL-18: per-match wins, and the disagreement is surfaced rather than reconciled."""
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        wrong_count=1,
+        per_match_verdicts=(
+            MatchVerdict(match_index=0, correct=False),
+            MatchVerdict(match_index=1, correct=False),
+        ),
+        verdicts_confirmed=True,
+    )
+    assert rating.fp_source is FPSource.PER_MATCH
+    assert rating.false_positives == 2  # not the typed 1
+    assert rating.has_fp_discrepancy is True
+
+
+def test_agreeing_per_match_and_count_are_not_a_discrepancy():
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        wrong_count=1,
+        per_match_verdicts=(
+            MatchVerdict(match_index=0, correct=False),
+            MatchVerdict(match_index=1, correct=True),
+        ),
+        verdicts_confirmed=True,
+    )
+    assert rating.has_fp_discrepancy is False
+
+
+def test_discrepancy_needs_both_sides_present():
+    only_verdicts = Rating(
+        run_id=1,
+        thumbs_up=True,
+        per_match_verdicts=(MatchVerdict(match_index=0, correct=False),),
+        verdicts_confirmed=True,
+    )
+    assert only_verdicts.has_fp_discrepancy is False
+
+
+def test_rating_is_frozen_and_forbids_extra_fields():
+    rating = Rating(run_id=1, thumbs_up=True)
+    with pytest.raises(ValidationError):
+        rating.wrong_count = 0  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        Rating(run_id=1, thumbs_up=True, precision=1.0)  # type: ignore[call-arg]
+
+
+def test_unratable_is_the_explicit_skip_path():
+    rating = Rating(run_id=1, thumbs_up=False, unratable=True)
+    assert rating.unratable is True
+    assert rating.completeness is RatingCompleteness.NONE
+
+
+# ------------------------------------------------------- Rating.validate_against_retrieved
+
+
+def test_validate_against_retrieved_accepts_a_consistent_rating():
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        wrong_count=2,
+        per_match_verdicts=(
+            MatchVerdict(match_index=0, correct=False),
+            MatchVerdict(match_index=1, correct=False),
+        ),
+        verdicts_confirmed=True,
+    )
+    assert rating.validate_against_retrieved(3) == (True, None)
+
+
+def test_validate_against_retrieved_rejects_wrong_count_above_the_returned_count():
+    rating = Rating(run_id=1, thumbs_up=True, wrong_count=5)
+    ok, reason = rating.validate_against_retrieved(3)
+    assert ok is False
+    assert reason is not None
+    assert "exceeds" in reason
+
+
+def test_validate_against_retrieved_rejects_too_many_verdicts():
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        per_match_verdicts=tuple(MatchVerdict(match_index=i, correct=True) for i in range(4)),
+    )
+    ok, reason = rating.validate_against_retrieved(2)
+    assert ok is False
+    assert reason is not None
+    assert "per-match verdicts" in reason
+
+
+def test_validate_against_retrieved_rejects_an_out_of_range_index():
+    rating = Rating(
+        run_id=1, thumbs_up=True, per_match_verdicts=(MatchVerdict(match_index=7, correct=True),)
+    )
+    ok, reason = rating.validate_against_retrieved(3)
+    assert ok is False
+    assert reason is not None
+    assert "outside" in reason
+
+
+def test_validate_against_retrieved_rejects_duplicate_indices():
+    rating = Rating(
+        run_id=1,
+        thumbs_up=True,
+        per_match_verdicts=(
+            MatchVerdict(match_index=0, correct=True),
+            MatchVerdict(match_index=0, correct=False),
+        ),
+    )
+    ok, reason = rating.validate_against_retrieved(2)
+    assert ok is False
+    assert reason == "duplicate per-match verdict indices"
+
+
+def test_validate_against_retrieved_is_fine_when_nothing_was_assessed():
+    assert Rating(run_id=1, thumbs_up=True).validate_against_retrieved(0) == (True, None)
