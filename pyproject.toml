@@ -1,0 +1,92 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "object-search"
+version = "0.1.0"
+description = "Exemplar-based object search: draw one box, find every other instance"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Enrique G. Ortiz", email = "ortizeg@gmail.com" }]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/object_search"]
+
+# ----------------------------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Keep `select` EXPLICIT. ruff raised its default rule set from 59 to 413 rules in 0.16.0;
+# an explicit `select` is immune to that change, an `extend-select` is not.
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "I",    # isort
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "S",    # flake8-bandit
+  "B",    # flake8-bugbear
+  "A",    # flake8-builtins
+  "C4",   # flake8-comprehensions
+  "T20",  # flake8-print -- makes print() a lint ERROR (INFRA-05)
+  "SIM",  # flake8-simplify
+  "ANN",  # flake8-annotations -- keeps mypy strict honest
+  "RUF",  # ruff-specific
+  "TID",  # flake8-tidy-imports -- carries the banned-api check below (INFRA-05)
+  "PTH",  # flake8-use-pathlib
+]
+
+# Second half of INFRA-05. T20 only catches print(); this bans stdlib logging outright.
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"logging".msg = "Use loguru: `from loguru import logger`. stdlib logging is banned (INFRA-05)."
+"logging.config".msg = "Use loguru: `from loguru import logger`. stdlib logging is banned (INFRA-05)."
+"logging.handlers".msg = "Use loguru: `from loguru import logger`. stdlib logging is banned (INFRA-05)."
+
+[tool.ruff.lint.per-file-ignores]
+# assert is the point of a test; return/arg annotations on test functions are noise.
+"tests/**/*.py" = ["S101", "ANN201", "ANN001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["object_search"]
+
+# ----------------------------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unreachable = true
+# Deliberately NOT set globally -- see the narrowly-scoped overrides below.
+ignore_missing_imports = false
+
+# cv2, onnxruntime, sklearn and scipy ship absent or incomplete stubs. Scope the escape
+# hatch to exactly those modules so strict mode stays honest everywhere else.
+[[tool.mypy.overrides]]
+module = ["cv2.*", "onnxruntime.*", "sklearn.*", "scipy.*"]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --cov targets the INSTALLED package (object_search), not the src/ directory.
+# --cov-fail-under=80 is the INFRA-06 hard gate.
+addopts = "--cov=object_search --cov-report=term-missing --cov-report=xml --cov-fail-under=80"
+
+# ------------------------------------------------------------------------------- coverage
+[tool.coverage.run]
+source = ["src/object_search"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
+]
