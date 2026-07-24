@@ -1,1 +1,44 @@
+# --- pixi -------------------------------------------------------------------
+# The environment itself is generated; pixi.lock is NOT ignored -- this is an
+# application, so the lockfile is committed and CI installs with --locked.
+.pixi/
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# --- test / tooling caches --------------------------------------------------
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- model weights (INFRA-11) ----------------------------------------------
+# Weights are never committed; they arrive only via `pixi run fetch-models`.
+models/
+*.onnx
+*.pt
+*.pth
+
+# --- local data stores ------------------------------------------------------
+runs.db
+runs.db-journal
+runs.db-wal
+runs.db-shm
+
+# --- os ---------------------------------------------------------------------
 .DS_Store
+
+# --- scratch ----------------------------------------------------------------
+.tmp-probe/
+
+# Deliberately NOT ignored, do not add:
+#   pixi.lock       -- committed on purpose (application, reproducible CI)
+#   docs/samples/   -- pre-rendered sample runs are committed (DOC-02)
+#   assets/demo/    -- demo images are committed (DOC-01)

@@ -1,0 +1,42 @@
+# Local half of the quality gates (INFRA-04). CI re-runs the same checks server-side, so a
+# bypassed hook cannot merge -- these exist to catch problems a second earlier, not to be
+# the only line of defence.
+#
+# VERSION-COUPLING RULE: the ruff `rev` below MUST equal the ruff version pinned in
+# pixi.toml [feature.dev.pypi-dependencies]. If they drift, the hook and `pixi run lint`
+# disagree about what is an error and CI becomes the tiebreaker for no good reason.
+# Currently: ruff 0.16.0.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      # `ruff-check` is the current id; the bare `ruff` id is deprecated as of 0.16.
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # mypy runs as a LOCAL hook through pixi, deliberately not via pre-commit/mirrors-mypy.
+  # The mirror builds its own isolated venv that cannot see onnxruntime, pydantic, fastapi
+  # or the conda-forge numpy, so strict mode there reports a different (and largely bogus)
+  # set of errors than `pixi run typecheck`. One environment, one source of truth.
+  # pass_filenames: false because strict mode must see the whole package to be meaningful.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (pixi env, strict)
+        entry: pixi run typecheck
+        language: system
+        types: [python]
+        pass_filenames: false

@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to the same ref makes the in-flight run irrelevant. Cancel it rather than
+# burning runner minutes on a result nobody will read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The job name is the status-check name that branch protection requires on main.
+  # Renaming this job silently disables the required check -- don't.
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          # Pin the pixi version explicitly. The default floats to latest, and a pixi
+          # release can change solver behaviour or lockfile format and turn a green PR red
+          # with no code change. This is the version that produced the committed lock.
+          pixi-version: v0.62.2
+          environments: default
+          # locked: true => `pixi install --locked`, which verifies pixi.lock is consistent
+          # with pixi.toml and fails loudly when it is not. This turns "edited pixi.toml,
+          # forgot to commit the lock" into a red build instead of a silent re-solve that
+          # would have CI testing a different environment than the developer did.
+          # Never combine with `frozen`, which installs a stale lock without checking.
+          locked: true
+          cache: true
+          # PR branches read the cache; only main writes it, so N concurrent PRs don't each
+          # push a fresh multi-hundred-MB entry.
+          cache-write: ${{ github.ref == 'refs/heads/main' }}
+
+      # The four gates, run separately so a red build names the gate that failed instead of
+      # collapsing all four into one opaque step. These are the same task names a developer
+      # runs locally, so local green and CI green are provably the same commands.
+      - name: Lint (ruff)
+        run: pixi run lint
+
+      - name: Format check (ruff)
+        run: pixi run format-check
+
+      - name: Type check (mypy strict)
+        run: pixi run typecheck
+
+      - name: Tests (pytest, >=80% coverage floor)
+        run: pixi run test
+
+      - name: Upload coverage
+        # Upload even when the tests fail -- the coverage report is most useful precisely
+        # when the run went red.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+          retention-days: 14
