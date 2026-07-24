@@ -161,10 +161,14 @@ Local gate output, all exit 0: `All checks passed!` / `6 files already formatted
 
 ## CI
 
-- First run, green on the first attempt:
+Three runs, all green — CI has never been red on this branch:
+
+- Run 1, green on the first attempt:
   <https://github.com/ortizeg/object-search-exploration/actions/runs/30116711957>
-- Final run, green:
-  <https://github.com/ortizeg/object-search-exploration/actions/runs/30116790235>
+- Run 2, green after the `upload-artifact` v4 → v7 bump cleared the Node 20 deprecation
+  annotation: <https://github.com/ortizeg/object-search-exploration/actions/runs/30116790235>
+- Run 3 (latest, on the summary commit), green:
+  <https://github.com/ortizeg/object-search-exploration/actions/runs/30117087999>
 
 On linux-64 CI: `platform linux -- Python 3.12.13`, `10 passed`,
 `Required test coverage of 80% reached. Total coverage: 100.00%`. The environment guard tests
