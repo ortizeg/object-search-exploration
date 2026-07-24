@@ -135,8 +135,29 @@ ranges, and docstrings.
 
 ### Reproducibility
 
-Same image + box + method + config ⇒ identical results. Every stochastic step (RANSAC, SAM
-prompt sampling) takes an explicit seed from config. There is no unseeded randomness.
+Same image + box + method + config ⇒ identical results.
+
+Every stochastic step takes an explicit seed from config — **but only where a seed genuinely
+controls anything.** Never add a seed parameter that does nothing; a control that is advertised
+and inert is worse than no control.
+
+Verified specifics (see `.planning/research/PITFALLS.md`):
+
+- **`cv2.setRNGSeed` does NOT affect RANSAC.** OpenCV hardcodes `RNG rng((uint64)-1)` in
+  `ptsetreg.cpp`, deliberately. OpenCV's RANSAC is therefore already deterministic, but its seed
+  is **not user-controllable**. Do not expose a `ransac_seed` config field for
+  `cv2.estimateAffinePartial2D` et al. Where explicit seeding matters, implement the sampling in
+  NumPy with `np.random.default_rng(config.seed)` inside the method module — which also makes it
+  visible in the one file the reader is meant to read.
+- **Thread counts do not affect output.** ORT, OpenCV, and BLAS thread counts and argmax tie
+  order were all measured bit-identical, and `use_deterministic_compute` is a no-op on the CPU
+  EP. Do not describe thread pinning as a determinism measure.
+- **What actually threatens reproducibility, and so what gets pinned:** set/dict iteration order,
+  NMS tie-breaking (sort by `(-score, y, x)`, never score alone), config-hash key ordering
+  (serialize with sorted keys), and library-version drift (guarded by the committed `pixi.lock`
+  and the model SHA-256 in provenance).
+- **`cv2.matchTemplate` output depends on the search extent** — cropping the search region changes
+  ~73% of the returned floats. Always correlate over the full scene.
 
 ### Evaluation — two rules that are easy to regress
 
