@@ -30,9 +30,18 @@ The verified export contract (runtime-verified in ``.planning/research/MODELS.md
 * ``output1`` f32 ``[batch, 32, mask_h, mask_w]`` -- mask prototypes at stride 4.
 
 At the 1024x1024 operating point ``anchors == 21504`` and ``mask_h == mask_w == 256``:
-``output0 [1, 37, 21504]``, ``output1 [1, 32, 256, 256]``. The channel dims (37, 32) are
-**static in the graph** and are asserted here; the anchor/mask spatial dims are symbolic
-(dynamic axes) and so are verified against the synthetic-tensor decoding tests instead.
+``output0 [1, 37, 21504]``, ``output1 [1, 32, 256, 256]`` (confirmed by the Ultralytics export
+log, which reports ``output shape(s) ((1, 37, 21504), (1, 32, 256, 256))``).
+
+What is static in the graph vs. what is symbolic (verified empirically at export)
+--------------------------------------------------------------------------------
+Under ``dynamic=True``, ``output0``'s dims export as ``['batch', <symbolic>, 'anchors']`` -- the
+**channel dim (37) is symbolic**, not static, because it is produced by a ``Concat`` the exporter
+marks dynamic. ``output1`` exports as ``['batch', 32, 'mask_height', 'mask_width']`` -- its
+**channel dim (32) IS static**. So this verifier asserts only what the graph actually pins: two
+outputs, ranks 3 and 4, and ``output1``'s 32 prototypes. The concrete ``37`` / ``21504`` / ``256``
+values are pinned instead by the model-free decoding tests, which feed exactly
+``[1, 37, 21504]`` / ``[1, 32, 256, 256]`` tensors.
 """
 
 from __future__ import annotations
@@ -56,10 +65,11 @@ _EXPECTED_OUTPUT1_CHANNELS = 32  # mask prototypes
 def _verify_graph(onnx_path: Path) -> None:
     """Load the exported graph with ``onnx`` and assert its output contract, or raise.
 
-    Only the pieces that are STATIC in the graph are asserted: two outputs, ranks 3 and 4, and
-    the channel dims 37 and 32. The anchor count and mask resolution are dynamic axes and cannot
-    be read as concrete integers from the graph -- they are pinned by the model-free decoding
-    tests, which feed exactly ``[1, 37, 21504]`` / ``[1, 32, 256, 256]`` tensors.
+    Asserts only what the graph actually pins under ``dynamic=True`` (see the module docstring):
+    two outputs, ``output0`` rank 3, ``output1`` rank 4 with a **static** 32-channel dim. The
+    ``output0`` channel dim (37) exports as symbolic and so is NOT asserted here -- it, the anchor
+    count, and the mask resolution are pinned by the model-free decoding tests which feed exactly
+    ``[1, 37, 21504]`` / ``[1, 32, 256, 256]`` tensors.
     """
     import onnx  # export env only; not a runtime dependency
 
@@ -76,24 +86,23 @@ def _verify_graph(onnx_path: Path) -> None:
         return [d.dim_value if d.HasField("dim_value") else d.dim_param for d in dims]
 
     out0_dims, out1_dims = _dims(0), _dims(1)
-    logger.info(f"output0 dims: {out0_dims}")
+    logger.info(f"output0 dims: {out0_dims} (channel dim {_EXPECTED_OUTPUT0_CHANNELS} is symbolic)")
     logger.info(f"output1 dims: {out1_dims}")
 
     problems: list[str] = []
-    if len(out0_dims) != 3 or out0_dims[1] != _EXPECTED_OUTPUT0_CHANNELS:
-        problems.append(
-            f"output0 must be rank-3 with {_EXPECTED_OUTPUT0_CHANNELS} channels; got {out0_dims}"
-        )
+    if len(out0_dims) != 3:
+        problems.append(f"output0 must be rank-3 [batch, 37, anchors]; got {out0_dims}")
     if len(out1_dims) != 4 or out1_dims[1] != _EXPECTED_OUTPUT1_CHANNELS:
         problems.append(
-            f"output1 must be rank-4 with {_EXPECTED_OUTPUT1_CHANNELS} channels; got {out1_dims}"
+            f"output1 must be rank-4 with a static {_EXPECTED_OUTPUT1_CHANNELS}-channel dim; "
+            f"got {out1_dims}"
         )
     if problems:
         raise SystemExit("FastSAM export verification failed:\n  - " + "\n  - ".join(problems))
 
     logger.info(
-        f"FastSAM export verified: output0 [batch, {_EXPECTED_OUTPUT0_CHANNELS}, anchors], "
-        f"output1 [batch, {_EXPECTED_OUTPUT1_CHANNELS}, mask_h, mask_w] "
+        f"FastSAM export verified: output0 [batch, {_EXPECTED_OUTPUT0_CHANNELS}, anchors] "
+        f"(37 symbolic), output1 [batch, {_EXPECTED_OUTPUT1_CHANNELS}, mask_h, mask_w] "
         f"(anchors=21504, mask=256x256 at the 1024 operating point)"
     )
 
