@@ -1,0 +1,134 @@
+{
+  "boxes": [
+    {
+      "h": 73,
+      "w": 73,
+      "x": 124,
+      "y": 84
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 337,
+      "y": 84
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 551,
+      "y": 84
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 764,
+      "y": 84
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 124,
+      "y": 217
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 337,
+      "y": 217
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 551,
+      "y": 217
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 764,
+      "y": 217
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 124,
+      "y": 351
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 337,
+      "y": 351
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 551,
+      "y": 351
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 764,
+      "y": 351
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 124,
+      "y": 484
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 337,
+      "y": 484
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 551,
+      "y": 484
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 764,
+      "y": 484
+    }
+  ],
+  "image": "lattice-touching.png",
+  "slice_metadata": {
+    "clutter_level": 0.0,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": -0.0,
+    "rotation_min_deg": -0.0,
+    "true_instance_count": 16
+  },
+  "spec": {
+    "bg_color": [
+      235,
+      235,
+      235
+    ],
+    "clutter": 0.0,
+    "fg_color": [
+      40,
+      90,
+      220
+    ],
+    "height": 640,
+    "instance_size": 72,
+    "mode": "lattice",
+    "n_distractors": 0,
+    "n_instances": 16,
+    "position_jitter": 0.0,
+    "rotation_jitter_deg": 0.0,
+    "scale_jitter": 0.0,
+    "seed": 2,
+    "shape": "rect",
+    "width": 960
+  }
+}

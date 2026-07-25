@@ -306,7 +306,7 @@ def save(out: SyntheticImage, image_path: Path) -> Path:
         "slice_metadata": out.slice_metadata.model_dump(mode="json"),
         "boxes": [box.model_dump(mode="json") for box in out.boxes],
     }
-    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     logger.info(f"wrote {image_path.name} with {len(out.boxes)} ground-truth boxes")
     return image_path
 

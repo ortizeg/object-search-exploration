@@ -219,7 +219,7 @@ def write_chipset(out_dir: Path, *, force: bool = False, exemplar_index: int = 0
             "exemplar_index": exemplar_index,
             "boxes": [box.model_dump(mode="json") for box in result.boxes],
         }
-        sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         logger.info(
             f"{spec.image_id}: {spec.width}x{spec.height}, {len(result.boxes)} chips "
             f"(requested {spec.n_instances})"
