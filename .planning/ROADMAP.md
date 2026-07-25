@@ -28,7 +28,7 @@ checkpoints in each phase.
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 - [ ] **Phase 1: Foundation** - Scaffold, quality gates, CI, schemas, registry, ONNXInferencer, demo assets
-- [ ] **Phase 2: Method 1 + shared primitives** - `ncc`, calibration/peaks/nms/viz, sample-run renderer
+- [x] **Phase 2: Method 1 + shared primitives** - `ncc`, calibration/peaks/nms/viz, sample-run renderer
 - [ ] **Phase 3: Backend API** - FastAPI endpoints and the SQLite run + rating store
 - [ ] **Phase 4: Web UI** - Canvas box drawing, schema-driven config, overlays, rating widget, stats
 - [ ] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
@@ -107,14 +107,14 @@ extraction) — and the first committed sample runs.
   5. `ncc` returns a `diagnostics` payload, carries a `ROBUSTNESS BACKLOG` docstring section,
      and documents its pre/post-processing in both the module docstring and
      `docs/methods/ncc.md`.
-**Plans**: 2 plans
+**Plans**: 2/2 plans executed
 
 Plans:
 
-- [ ] 02-01: `search/common/` — `calibration.py`, `peaks.py`, `nms.py`, `viz.py` with their
+- [x] 02-01: `search/common/` — `calibration.py`, `peaks.py`, `nms.py`, `viz.py` with their
       selectable strategies and tests
 
-- [ ] 02-02: `ncc.py` with pyramid scale search and optional rotation bank, the sample-run
+- [x] 02-02: `ncc.py` with pyramid scale search and optional rotation bank, the sample-run
       renderer CLI, first committed sample runs, `docs/methods/ncc.md`
 
 ### Phase 3: Backend API
