@@ -38,6 +38,14 @@ runs.db-shm
 # --- scratch ----------------------------------------------------------------
 .tmp-probe/
 
+# --- benchmark output (EVAL-04) ---------------------------------------------
+# results.json is a regenerable benchmark artifact (`pixi run bench` / `bench-ci`); the
+# COMMITTED deliverable is the derived charts/tables (EVAL-06, plan 08-02), not this raw dump.
+# The full run also depends on fetched weights, so the file's contents vary by environment.
+docs/benchmark/results.json
+# Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
+benchmark.log
+
 # Deliberately NOT ignored, do not add:
 #   pixi.lock       -- committed on purpose (application, reproducible CI)
 #   docs/samples/   -- pre-rendered sample runs are committed (DOC-02)

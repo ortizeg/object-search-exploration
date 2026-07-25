@@ -337,8 +337,8 @@ cold.
 
 Plans:
 
-- [ ] 08-01: Ground-truth labels for the demo set, benchmark runner (Hydra-driven CLI),
-      paired-comparison mode, Bradley-Terry ranking, metrics module
+- [x] 08-01: Ground-truth labels for the demo set, benchmark runner (Hydra-driven CLI),
+      paired-comparison mode, Bradley-Terry ranking, metrics module (PR #15)
 
 - [ ] 08-02: Committed charts and tables, README with side-by-side sample runs, per-method
       doc pages, `docs/ROBUSTNESS-BACKLOG.md`, `docs/MILESTONE-2.md`

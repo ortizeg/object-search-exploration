@@ -1,0 +1,54 @@
+# The benchmark defaults (EVAL-04). Hydra composes this into a DictConfig, which
+# object_search.eval.benchmark validates into a frozen BenchmarkConfig before anything runs.
+
+# Silence Hydra's own file/console logging: the app logs through Loguru (the project's only
+# logging path), so Hydra's default `${job_name}.log` sink would both duplicate output and
+# scatter a stray log file into the repo root.
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+  - _self_
+#
+# Override on the CLI, e.g.:
+#   pixi run bench ci=true                 # model-free chipset subset (no ONNX weights)
+#   pixi run bench methods=[ncc,sparse-geo]
+#   pixi run bench iou_threshold=0.75
+#
+# The full sweep also implicitly includes every chipset image alongside image_ids, so the
+# NCC-vs-sparse-geo crossover has both the fixed-scale (chipset) and scale-varied (synthetic)
+# sides present and is reported per slice rather than pooled away.
+
+# Registry keys to run in the full sweep. The learned methods need fetched weights; a method
+# whose weights are absent records an error for that image rather than aborting the sweep.
+methods:
+  - ncc
+  - sparse-geo
+  - dino-dense
+  - propose-retrieve
+
+# Scale/pose-varied synthetic scenes (the learned-favourable side of the crossover). The
+# chipset ids are added automatically inside resolve_run_set().
+image_ids:
+  - scatter-scaled
+  - cluttered-distractors
+
+# The model-free CI subset switch: ncc + classical sparse-geo over the chipset, no weights.
+ci: false
+
+# IoU at which a prediction counts as a true positive.
+iou_threshold: 0.5
+
+# Where results.json lands (resolved against the repo root when relative).
+out: docs/benchmark/results.json
+
+# Cap on chipset images in the CI subset, bounding CI runtime while still spanning canvas sizes.
+ci_image_limit: 6
+
+# Keep Hydra from chdir-ing into a per-run output dir or scattering .hydra folders in the repo;
+# the benchmark resolves its own paths against the repo root.
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

@@ -138,14 +138,14 @@ which kind of image, and at what latency.
 ### Store & Evaluation (EVAL)
 
 - [x] **EVAL-01**: SQLite store for runs and ratings, with a versioned and migratable schema
-- [ ] **EVAL-02**: Ground-truth box labels for the demo image set
+- [x] **EVAL-02**: Ground-truth box labels for the demo image set
 - [x] **EVAL-03**: Synthetic image generator with **exact** ground truth — lattices, clutter,
       distractors, scale and rotation variation
 
-- [ ] **EVAL-04**: Benchmark runner covering every method × every image × default config,
+- [x] **EVAL-04**: Benchmark runner covering every method × every image × default config,
       producing precision, recall, F1, AP, and latency
 
-- [ ] **EVAL-05**: Paired comparison mode — the **same** exemplar box run through all four
+- [x] **EVAL-05**: Paired comparison mode — the **same** exemplar box run through all four
       methods, so ratings are directly comparable rather than confounded by different boxes
 
 - [ ] **EVAL-06**: Benchmark results rendered as committed charts and tables
@@ -179,7 +179,7 @@ which kind of image, and at what latency.
 - [x] **EVAL-14**: Stats dashboard reports **n and confidence intervals** (Wilson interval for
       thumbs-up rate) alongside every rate
 
-- [ ] **EVAL-15**: Paired comparisons produce a win/loss/tie record and a Bradley-Terry (or
+- [x] **EVAL-15**: Paired comparisons produce a win/loss/tie record and a Bradley-Terry (or
       Elo) ranking, not just a comparison of independent means
 
 - [x] **EVAL-16**: The duplicate/fragment convention is defined once and shown in the UI —
@@ -315,7 +315,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-14 | Phase 3 | Complete |
 | EVAL-17 | Phase 3 | Complete |
 | EVAL-18 | Phase 3 | Complete |
-| EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Phase 1 generator complete; Phase 8 consumption pending |
+| EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Complete — generator (Phase 1) consumed by the model-free CI benchmark (plan 08-01) |
 | UI-01 | Phase 4 | Complete |
 | UI-02 | Phase 4 | Complete |
 | UI-03 | Phase 4 | Complete |
@@ -333,11 +333,11 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | METHOD-04c | Phase 5 | Complete |
 | METHOD-05 | Phase 6 | Complete |
 | METHOD-06 | Phase 7 | Complete |
-| EVAL-02 | Phase 8 | Pending |
-| EVAL-04 | Phase 8 | Pending |
-| EVAL-05 | Phase 8 | Pending |
-| EVAL-06 | Phase 8 | Pending |
-| EVAL-15 | Phase 8 | Pending |
+| EVAL-02 | Phase 8 | Complete (plan 08-01) |
+| EVAL-04 | Phase 8 | Complete (plan 08-01) |
+| EVAL-05 | Phase 8 | Complete (plan 08-01) |
+| EVAL-06 | Phase 8 | Pending (plan 08-02: charts) |
+| EVAL-15 | Phase 8 | Complete (plan 08-01) |
 | DOC-03 | Phase 8 | Pending |
 | DOC-04 | Phase 8 | Pending |
 | DOC-05 | Phase 8 | Pending |

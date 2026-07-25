@@ -134,9 +134,20 @@ def render_samples(
 
 @app.command("benchmark")
 def benchmark() -> None:
-    """Placeholder: the benchmark runner arrives in Phase 8 (EVAL-04)."""
-    logger.error("benchmark is not implemented until Phase 8 (EVAL-04)")
-    typer.echo("benchmark: implemented in Phase 8 (EVAL-04). Nothing run.", err=True)
+    """Redirect: the benchmark is a Hydra entry point, not a Typer subcommand (EVAL-04).
+
+    ``@hydra.main`` takes over ``sys.argv`` and cannot compose with Typer's parser, so the
+    benchmark lives at ``object_search.eval.benchmark`` and is invoked via ``pixi run bench``
+    (full sweep) or ``pixi run bench-ci`` (model-free chipset subset). This shim exits
+    non-zero so a stale ``object-search benchmark`` invocation fails loudly with the right
+    command rather than silently doing nothing.
+    """
+    logger.error("benchmark moved to object_search.eval.benchmark (Hydra owns sys.argv)")
+    typer.echo(
+        "benchmark is a Hydra entry point, not a Typer subcommand. "
+        "Run `pixi run bench` (full) or `pixi run bench-ci` (model-free chipset subset).",
+        err=True,
+    )
     raise typer.Exit(code=1)
 
 
