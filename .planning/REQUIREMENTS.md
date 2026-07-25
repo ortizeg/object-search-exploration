@@ -202,6 +202,13 @@ which kind of image, and at what latency.
       This is the parameter-tuning and method-comparison harness: an objective, zero-cost
       signal that can be re-run after every config change.
 
+- [ ] **EVAL-20**: **Textured benchmark set** — richly-textured, distinct instances pasted with
+      scale / rotation / brightness variation at non-overlapping positions, with exact
+      ground-truth boxes. Deliberately favours the keypoint method (SIFT finds ≥20 keypoints per
+      instance, so sparse-geo does not abstain) and the deep-feature methods (appearance varies),
+      complementing the NCC-favourable chipset so the four-method comparison spans both regimes.
+      No hand-labeling, no licensing — same exact-GT-by-construction contract as EVAL-19.
+
 ### Demo Assets & Docs (DOC)
 
 - [x] **DOC-01**: Demo image set — basketball broadcast frames from the sibling project,
