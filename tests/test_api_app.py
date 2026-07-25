@@ -17,7 +17,7 @@ from object_search.api.app import create_app
 from object_search.store.db import connect
 
 
-def test_lifespan_migrates_store_and_builds_empty_session_registry(
+def test_lifespan_migrates_store_and_loads_present_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -51,10 +51,22 @@ def test_lifespan_migrates_store_and_builds_empty_session_registry(
         finally:
             conn.close()
         assert version == 1
-        # The session registry is a real dict on app.state, empty because no ONNX weights are
-        # present here -- the wiring exists, the load list is simply empty (API-07).
-        assert isinstance(app.state.sessions, dict)
-        assert app.state.sessions == {}
+        # The session registry is a real dict on app.state (API-07). Phase 6 lands the first
+        # ONNX weight (dinov2_small.onnx) and Phase 5 lands superpoint.onnx, so the registry is
+        # no longer inherently empty: it holds a session for exactly the registered models whose
+        # weights are present, and skips the absent ones. models_dir is monkeypatched to an empty
+        # temp dir above so the outcome is deterministic (present == {}) regardless of what the
+        # developer has fetched; the assertion expresses the general "registry MATCHES on-disk
+        # presence" invariant rather than hardcoding either state.
+        sessions = app.state.sessions
+        assert isinstance(sessions, dict)
+        models_directory = lifespan_module.models_dir()
+        present = {
+            key
+            for key, spec in lifespan_module.MODEL_REGISTRY.items()
+            if (models_directory / spec.dest).is_file()
+        }
+        assert set(sessions) == present
 
 
 def test_sessions_are_reused_not_rebuilt_across_requests(

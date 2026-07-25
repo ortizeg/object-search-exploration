@@ -32,7 +32,7 @@ checkpoints in each phase.
 - [x] **Phase 3: Backend API** - FastAPI endpoints and the SQLite run + rating store
 - [x] **Phase 4: Web UI** - Canvas box drawing, schema-driven config, overlays, rating widget, stats
 - [x] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
-- [ ] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
+- [x] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
 - [ ] **Phase 7: Method 5** - FastSAM proposals + DINOv2 region embeddings, `propose-retrieve`
 - [ ] **Phase 8: Evaluation & docs** - Benchmark, paired comparison, charts, docs, Milestone 2 spec
 
@@ -263,11 +263,11 @@ and the DINOv2 inferencer that Phase 7 will reuse rather than duplicate.
 
 Plans:
 
-- [ ] 06-01: DINOv2 ONNX acquisition/export (gated through `library-review`),
+- [x] 06-01: DINOv2 ONNX acquisition/export (gated through `library-review`),
       `DINOv2Inferencer` with dense-token output and documented pre/post-processing,
       `fetch-models` integration
 
-- [ ] 06-02: `dino_dense.py` — prototype cosine similarity, high-res scene inference with
+- [x] 06-02: `dino_dense.py` — prototype cosine similarity, high-res scene inference with
       bilinear upsampling, threshold, connected components, diagnostics, docs, sample runs
 
 ### Phase 7: Method 5
