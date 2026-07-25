@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Object Search Exploration</title>
+    <link rel="stylesheet" href="./css/app.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Object Search Exploration</h1>
+      <p class="tagline">
+        Draw one box; find every other instance of that object — through any method.
+      </p>
+    </header>
+
+    <main class="layout">
+      <!-- Left control rail: mode, method, config, image, search. -->
+      <aside class="rail">
+        <!-- Exploration mode sits ABOVE the method selector (Milestone 2 seam, UI-09).
+             One option today; Milestone 2 adds an option rather than forking the app. -->
+        <div class="control">
+          <label class="control-label" for="exploration">Exploration</label>
+          <select id="exploration">
+            <option value="same-image">Same-image search</option>
+          </select>
+        </div>
+
+        <div class="control">
+          <label class="control-label" for="method">Method</label>
+          <select id="method">
+            <option value="" disabled selected>Choose a method…</option>
+          </select>
+          <small class="control-help">
+            Pick a method before drawing — the box is disabled until you do (UI-01).
+          </small>
+        </div>
+
+        <div class="control">
+          <span class="control-label">Config</span>
+          <!-- form.js fills this from the selected method's JSON Schema (UI-07). -->
+          <div id="config" class="config-host">
+            <p class="muted">Select a method to configure it.</p>
+          </div>
+        </div>
+
+        <div class="control">
+          <label class="control-label" for="image">Image</label>
+          <select id="image">
+            <option value="" disabled selected>Loading images…</option>
+          </select>
+        </div>
+
+        <div class="control">
+          <button id="search" type="button" disabled>Search</button>
+          <small id="status" class="control-help" role="status" aria-live="polite"></small>
+        </div>
+      </aside>
+
+      <!-- Centre stage: the canvas the image is drawn on and the box is drawn over. -->
+      <section class="stage-wrap">
+        <canvas id="stage" width="900" height="600">
+          Your browser does not support the canvas element.
+        </canvas>
+        <p class="stage-hint">
+          Scroll to zoom, drag with the middle button to pan, drag with the left button to
+          draw an exemplar box.
+        </p>
+      </section>
+
+      <!-- Right panel placeholder: rating widget / stats dashboard land here in 04-02. -->
+      <aside id="panel" class="panel">
+        <p class="muted">Results, rating, and the scoreboard appear here (Plan 04-02).</p>
+      </aside>
+    </main>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>
