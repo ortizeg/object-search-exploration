@@ -115,10 +115,10 @@ which kind of image, and at what latency.
 
 ### UI (UI)
 
-- [ ] **UI-01**: Method **and** its config are selected **before** the box is drawn, so every
+- [x] **UI-01**: Method **and** its config are selected **before** the box is drawn, so every
       rating is attributable to an exact method + config
 
-- [ ] **UI-02**: Canvas box drawing with zoom/pan, redraw, and clear
+- [x] **UI-02**: Canvas box drawing with zoom/pan, redraw, and clear
 - [ ] **UI-03**: Results overlaid on the image with per-match scores
 - [ ] **UI-04**: Toggleable diagnostics overlay (similarity heatmap, keypoints, proposals)
 - [ ] **UI-05**: Tiered rating widget — thumbs up/down (required, one click); wrong matches
@@ -128,7 +128,7 @@ which kind of image, and at what latency.
 - [ ] **UI-06**: Stats dashboard showing per-method thumbs-up rate, precision/recall where
       ground truth exists, and latency percentiles
 
-- [ ] **UI-07**: Config form generated from the method's JSON Schema, so a new method needs
+- [x] **UI-07**: Config form generated from the method's JSON Schema, so a new method needs
       zero frontend changes
 
 - [ ] **UI-08**: Count fields render **empty, never prepopulated with 0**, with one-click
@@ -316,13 +316,13 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-17 | Phase 3 | Complete |
 | EVAL-18 | Phase 3 | Complete |
 | EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Phase 1 generator complete; Phase 8 consumption pending |
-| UI-01 | Phase 4 | Pending |
-| UI-02 | Phase 4 | Pending |
+| UI-01 | Phase 4 | Complete |
+| UI-02 | Phase 4 | Complete |
 | UI-03 | Phase 4 | Pending |
 | UI-04 | Phase 4 | Pending |
 | UI-05 | Phase 4 | Pending |
 | UI-06 | Phase 4 | Pending |
-| UI-07 | Phase 4 | Pending |
+| UI-07 | Phase 4 | Complete |
 | UI-08 | Phase 4 | Pending |
 | EVAL-16 | Phase 4 | Pending |
 | METHOD-02 | Phase 5 | Pending |

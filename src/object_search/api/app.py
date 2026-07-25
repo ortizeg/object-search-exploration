@@ -31,6 +31,7 @@ from object_search.api.routes_methods import router as methods_router
 from object_search.api.routes_ratings import router as ratings_router
 from object_search.api.routes_search import router as search_router
 from object_search.api.routes_stats import router as stats_router
+from object_search.api.static import install_static
 from object_search.provenance import repo_root
 
 
@@ -82,6 +83,9 @@ def create_app(
     app.include_router(search_router)
     app.include_router(ratings_router)
     app.include_router(stats_router)
+
+    # Serve the Phase 4 canvas frontend at /app, redirect / to it, and expose raw scene bytes.
+    install_static(app)
 
     return app
 

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Transform selfcheck — Object Search Exploration</title>
+    <style>
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 2rem;
+        color: #e6e6e6;
+        background: #14181f;
+      }
+      h1 {
+        font-size: 1.1rem;
+      }
+      #verdict {
+        display: inline-block;
+        padding: 0.2rem 0.9rem;
+        border-radius: 6px;
+        font-weight: 700;
+        font-size: 1.4rem;
+      }
+      #verdict.pass {
+        background: #10391f;
+        color: #52e07a;
+      }
+      #verdict.fail {
+        background: #3d1414;
+        color: #ff6b6b;
+      }
+      table {
+        border-collapse: collapse;
+        margin-top: 1rem;
+        font-size: 0.82rem;
+      }
+      th,
+      td {
+        border: 1px solid #2a313c;
+        padding: 0.3rem 0.6rem;
+        text-align: left;
+      }
+      tr.bad td {
+        color: #ff6b6b;
+      }
+      tr.ok td {
+        color: #cfe8d6;
+      }
+      p {
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Coordinate transform selfcheck (dpr = 2, zoom = 2.3, panned)</h1>
+    <p>
+      Round-trips known image coordinates through <code>imageToScreen</code> then
+      <code>screenToImage</code> and asserts the inverse holds within 0.5 px. This is the
+      proof that a box drawn under zoom + pan on a Retina display reaches the API in the
+      correct image pixels.
+    </p>
+    <p>Verdict: <span id="verdict">…</span></p>
+    <div id="result"></div>
+    <script type="module" src="./selfcheck.js"></script>
+  </body>
+</html>

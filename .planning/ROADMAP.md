@@ -353,7 +353,7 @@ the shared DINOv2 inferencer. Valid parallel schedule: 5 ∥ 6, then 7, then 8.
 | 1. Foundation | 1/2 | In Progress|  |
 | 2. Method 1 + shared primitives | 0/2 | Not started | - |
 | 3. Backend API | 2/2 | Complete | 2026-07-25 |
-| 4. Web UI | 0/2 | Not started | - |
+| 4. Web UI | 1/2 | In Progress | - |
 | 5. Method 2 | 0/2 | Not started | - |
 | 6. Method 3 | 0/2 | Not started | - |
 | 7. Method 5 | 0/2 | Not started | - |
