@@ -22,10 +22,13 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import for the @register_method side effect (API-01: the API names no method itself).
+# Import for the @register_method / @register_exploration side effects (the API names neither a
+# method nor an exploration itself -- it only imports the packages whose __init__ lists them).
+from object_search import explorations as _explorations  # noqa: F401
 from object_search import search as _search  # noqa: F401
 from object_search.api.errors import install_error_handlers
 from object_search.api.lifespan import lifespan
+from object_search.api.routes_explorations import router as explorations_router
 from object_search.api.routes_images import router as images_router
 from object_search.api.routes_methods import router as methods_router
 from object_search.api.routes_ratings import router as ratings_router
@@ -79,6 +82,7 @@ def create_app(
     install_error_handlers(app)
 
     app.include_router(methods_router)
+    app.include_router(explorations_router)
     app.include_router(images_router)
     app.include_router(search_router)
     app.include_router(ratings_router)
