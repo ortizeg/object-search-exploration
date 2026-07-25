@@ -34,7 +34,7 @@ checkpoints in each phase.
 - [x] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
 - [x] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
 - [x] **Phase 7: Method 5** - FastSAM proposals + DINOv2 region embeddings, `propose-retrieve`
-- [ ] **Phase 8: Evaluation & docs** - Benchmark, paired comparison, charts, docs, Milestone 2 spec
+- [x] **Phase 8: Evaluation & docs** - Benchmark, paired comparison, charts, docs, Milestone 2 spec
 
 ## Phase Details
 
@@ -340,8 +340,8 @@ Plans:
 - [x] 08-01: Ground-truth labels for the demo set, benchmark runner (Hydra-driven CLI),
       paired-comparison mode, Bradley-Terry ranking, metrics module (PR #15)
 
-- [ ] 08-02: Committed charts and tables, README with side-by-side sample runs, per-method
-      doc pages, `docs/ROBUSTNESS-BACKLOG.md`, `docs/MILESTONE-2.md`
+- [x] 08-02: Committed charts and tables, README with side-by-side sample runs, per-method
+      doc pages, `docs/ROBUSTNESS-BACKLOG.md`, `docs/MILESTONE-2.md` (PR #16)
 
 ## Progress
 
@@ -360,4 +360,4 @@ the shared DINOv2 inferencer. Valid parallel schedule: 5 ∥ 6, then 7, then 8.
 | 5. Method 2 | 0/2 | Not started | - |
 | 6. Method 3 | 0/2 | Not started | - |
 | 7. Method 5 | 1/2 | In Progress|  |
-| 8. Evaluation & docs | 0/2 | Not started | - |
+| 8. Evaluation & docs | 2/2 | Complete | 2026-07-25 |
