@@ -14,6 +14,7 @@ import {
   presentDiagnosticFields,
   hitTestMatch,
 } from "./overlay.js";
+import { mountRating } from "./rating.js";
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("stage"));
 const methodSelect = /** @type {HTMLSelectElement} */ (document.getElementById("method"));
@@ -22,6 +23,11 @@ const configHost = document.getElementById("config");
 const searchButton = /** @type {HTMLButtonElement} */ (document.getElementById("search"));
 const statusEl = document.getElementById("status");
 const overlayToggles = document.getElementById("overlay-toggles");
+const ratingHost = document.getElementById("rating-host");
+const tabRating = document.getElementById("tab-rating");
+const tabStats = document.getElementById("tab-stats");
+const ratingView = document.getElementById("rating-view");
+const statsView = document.getElementById("stats-view");
 
 // Swatch colours mirror overlay.js so the toggle legend reads at a glance. Kept here rather
 // than exported from overlay.js — a five-line duplication is clearer than a shared constant.
@@ -173,10 +179,12 @@ function clearResult() {
   if (typeof onResult === "function") onResult(null, []);
 }
 
-// Hook points Task 2/Task 3 assign to wire the rating widget and stats without this file
-// importing them conditionally. Left null here so Task 1 stands alone.
+// Hook points assigned further down, once the rating widget and stats renderer are defined.
+// Declared here so the pointer handlers and result adoption can reference them before then.
 /** @type {((runId:number|null, matches:Array<object>)=>void)|null} */
 let onResult = null;
+/** @type {((index:number)=>void)|null} */
+let onVerdictToggle = null;
 
 /** Load an image_id onto the canvas and reset the fit. */
 async function loadImage(imageId) {
@@ -333,9 +341,64 @@ canvas.addEventListener(
   { passive: false },
 );
 
-// --- Rating / verdict hook points (assigned in Task 2 wiring below) -------------------
-/** @type {((index:number)=>void)|null} */
-let onVerdictToggle = null;
+// --- Rating widget wiring -------------------------------------------------------------
+/** @type {{toggleVerdict:(index:number)=>void}|null} */
+let ratingWidget = null;
+
+/** Rebuild the rating widget for a fresh run, or reset to the placeholder when cleared. */
+function showRating(runId, matches) {
+  if (!ratingHost) return;
+  if (runId === null || matches.length === 0) {
+    ratingHost.replaceChildren();
+    const msg = document.createElement("p");
+    msg.className = "muted";
+    msg.textContent =
+      runId === null
+        ? "Run a search, then rate the result here."
+        : "This run returned no matches — nothing to rate.";
+    ratingHost.appendChild(msg);
+    ratingWidget = null;
+    return;
+  }
+  showTab("rating");
+  ratingWidget = mountRating(ratingHost, {
+    runId,
+    matches,
+    wrongSet: state.wrongSet,
+    setVerdictMode: (on) => {
+      state.verdictMode = on;
+      if (!on) state.wrongSet.clear();
+      requestAnimationFrame(renderScene);
+    },
+    requestRender: () => requestAnimationFrame(renderScene),
+    onSubmitted: () => {
+      void refreshStats();
+    },
+  });
+}
+onResult = showRating;
+onVerdictToggle = (index) => {
+  if (ratingWidget) ratingWidget.toggleVerdict(index);
+};
+
+// --- Panel tab switching --------------------------------------------------------------
+function showTab(which) {
+  const rating = which === "rating";
+  if (ratingView) ratingView.hidden = !rating;
+  if (statsView) statsView.hidden = rating;
+  if (tabRating) tabRating.classList.toggle("active", rating);
+  if (tabStats) tabStats.classList.toggle("active", !rating);
+}
+if (tabRating) tabRating.addEventListener("click", () => showTab("rating"));
+if (tabStats)
+  tabStats.addEventListener("click", () => {
+    showTab("stats");
+    void refreshStats();
+  });
+
+// Stats rendering is wired in Task 3; a no-op keeps the rating path standalone until then.
+/** @type {() => Promise<void>} */
+let refreshStats = async () => {};
 
 // --- Control wiring -------------------------------------------------------------------
 
@@ -387,21 +450,3 @@ async function bootstrap() {
 }
 
 void bootstrap();
-
-// Expose the wiring seams and shared state to the sibling modules loaded after this one.
-// A tiny window namespace is simpler than circular imports for a single-page app, and keeps
-// rating.js / stats.js free of any knowledge of the canvas internals.
-window.__app = {
-  state,
-  viewport,
-  renderScene,
-  setStatus,
-  /** @param {(index:number)=>void} fn */
-  setVerdictToggle(fn) {
-    onVerdictToggle = fn;
-  },
-  /** @param {(runId:number|null, matches:Array<object>)=>void} fn */
-  setOnResult(fn) {
-    onResult = fn;
-  },
-};
