@@ -68,18 +68,19 @@ load rather than at first frame.
      non-overlapping positions — proven by a test asserting pairwise IoU is exactly 0 across all
      ten, and that the recorded instance count is the count actually achieved rather than the
      count requested.
-**Plans**: 1/2 plans executed
+**Plans**: 2/2 plans executed
 
 Plans:
 
 - [x] 01-01-PLAN.md
-- [ ] 01-02-PLAN.md
+- [x] 01-02-PLAN.md
 - [x] 01-01: Pixi/pyproject scaffold, Ruff + MyPy strict + pre-commit + Loguru, pytest with
       coverage gate, GitHub repo settings, CI workflow, branch protection
 
-- [ ] 01-02: Frozen Pydantic schemas, `SearchMethod` protocol + registry, `ONNXInferencer`
+- [x] 01-02: Frozen Pydantic schemas, `SearchMethod` protocol + registry, `ONNXInferencer`
       base with init-time dtype/shape validation, `fetch-models`, synthetic generator,
-      demo asset set + `LICENSES.md`
+      chip-insertion benchmark, demo asset set + `LICENSES.md` (INFRA-07 branch protection
+      deferred — private-repo 403)
 
 ### Phase 2: Method 1 + shared primitives
 
