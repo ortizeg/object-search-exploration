@@ -47,3 +47,18 @@ docstring.
 - **Many-to-many token similarity with spatial aggregation** instead of a single mean-pooled
   prototype — measurably better for articulated objects like the basketball frames.
 - **DINOv3 backbone swap** once a clean ONNX export exists.
+
+## `propose-retrieve` (Method 5 — class-agnostic proposals + DINOv2 region embeddings)
+
+None of the following is built in Phase 7; all are captured here and in the `propose_retrieve.py`
+docstring (mirrored verbatim so the two cannot drift).
+
+- **FAISS index for corpus-scale retrieval** — unnecessary for a few hundred proposals in one image;
+  the `(N, D)` embedding matrix is shaped so it slots in when corpus search arrives.
+- **Background-masked region embedding** — embed the FastSAM mask interior rather than the raw box
+  crop; the mask is already produced, so this is cheap and likely a real accuracy win.
+- **Proposal filtering by an exemplar size/aspect prior** — drop proposals whose shape cannot match
+  the exemplar before embedding, cutting both cost and false positives.
+- **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
+- **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
+- **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
