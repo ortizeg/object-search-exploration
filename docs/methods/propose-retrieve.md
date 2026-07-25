@@ -218,3 +218,42 @@ shows the query and the matches overlay; the proposal set is the diagnostics ove
 | `lattice-plain` — repeated instances on a plain lattice | ![lattice-plain](../samples/propose-retrieve/lattice-plain.png) |
 | `lattice-touching` — touching instances (where NMS earns its keep) | ![lattice-touching](../samples/propose-retrieve/lattice-touching.png) |
 | `scatter-scaled` — scale + pose variation | ![scatter-scaled](../samples/propose-retrieve/scatter-scaled.png) |
+
+## Pseudocode
+
+**Method ④ propose-retrieve** — fourth of the four *implemented* methods (implementation
+numbering ①–④: `ncc`, `sparse-geo`, `dino-dense`, `propose-retrieve`; source-research numbering
+1, 2, 3, 5, with research Methods 4 and 6 deferred — this is research **Method 5**). The steps
+below mirror the `# 1.` … `# 7.` comments in `search()` (METHOD-11); read
+`src/object_search/search/propose_retrieve.py` for the ground truth.
+
+```
+1. proposals <- propose(image, FastSAMConfig(conf_thres=proposal_conf))  # FastSAM everything-mode
+   (internal box NMS is deliberately LOOSE, iou_thres=0.9: wants overlapping proposals)
+
+2. proposal_embeddings <- embed_regions(image, [p.box for p in proposals])  # (N, D)
+   (crop each box, DINOv2 mean-pool its patch tokens, row-wise L2-normalize)
+
+3. exemplar_embedding <- embed_regions(image, [exemplar.box])[0]  # (D,)
+   (SAME unit, SAME shared DINOv2 backbone as step 2)
+
+4. scores = proposal_embeddings @ exemplar_embedding  # cosine NN, a plain NumPy matmul (no FAISS)
+
+5. calibrate the threshold:
+       fixed retrieval_threshold passes straight through, OR
+       two-mode gmm cuts between the "matches" mode (~1.0) and background (ratio fallback if degenerate)
+
+6. proposals with score >= threshold -> accepted; keep top max_candidates as Candidates (EVAL-08)
+   POST-RETRIEVAL NMS at nms_iou over the accepted set  # collapses SAM over-segmentation
+   label the kept proposal overlapping the exemplar box is_exemplar=True  # METHOD-12: no single-best
+
+7. Diagnostics carry the FULL proposal set + metrics (proposal_ms vs embedding_ms, collapsed_by_nms)
+   EMPTY-with-note if nothing clears; ERROR model_unavailable if a weight is absent (never a raise)
+```
+
+## References
+
+- Zhao et al., "Fast Segment Anything", 2023: https://arxiv.org/abs/2306.12156
+- FastSAM code: https://github.com/CASIA-IVA-Lab/FastSAM
+- Kirillov et al., "Segment Anything (SAM)", 2023: https://arxiv.org/abs/2304.02643
+- Oquab et al., "DINOv2", 2023 (region embeddings): https://arxiv.org/abs/2304.07193

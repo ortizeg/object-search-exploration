@@ -41,6 +41,31 @@ For each marker, every proposal is scored by the weighted sum below and the sing
 `Match` (one best proposal *per marker*; two markers may legitimately point at the same object, so no
 NMS is applied across markers). Ties break on `(-score, box.y, box.x)`, so the pick is deterministic.
 
+## Pseudocode
+
+The steps below mirror the numbered comments in
+`src/object_search/explorations/marker_conditioned.py`; read that module for the ground truth.
+This is an *exploration* (Milestone 2), not one of the four search methods — it composes them.
+
+```
+1. markers <- get_method(marker_method).search(image, marker_exemplar, marker_config).matches
+   cap at max_markers; if none found -> return EMPTY with a note   # reuse a Milestone 1 method wholesale
+
+2. for each marker: estimate (reference_point, direction) via markers.py
+       path A: fitted 2x3 affine present (sparse-geo) -> theta = atan2(c, a); disambiguate the
+               180 deg flip by mapping the exemplar tip through the transform; confidence 1.0
+       path B: no transform (ncc, dino-dense) -> PCA on the Otsu foreground mask; tip via the
+               arrowhead-mass heuristic; confidence = normalised mass asymmetry
+       symmetric / low asymmetry (dot) -> centroid, direction=None   # never a guessed direction
+
+3. proposals <- propose(image, proposal)   # ONCE for the whole scene (proposal stage dominates latency)
+   if none -> return EMPTY with a note
+
+4. for each marker: score every proposal by the weighted sum (distance, direction, objectness, size),
+       keep the single best as a Match  # one best proposal per marker; no cross-marker NMS
+       ties break on (-score, box.y, box.x) for determinism
+```
+
 ## Pre-processing (exact)
 
 - **Marker crop for orientation:** `image[box.y:box.y2, box.x:box.x2]` in BGR. No colour conversion

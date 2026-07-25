@@ -204,3 +204,47 @@ the query, the matches overlay, and the DINOv2 similarity heatmap.
 | `lattice-plain` — repeated instances on a plain lattice | ![lattice-plain](../samples/dino-dense/lattice-plain.png) |
 | `lattice-touching` — touching instances (heatmap shows the coarseness) | ![lattice-touching](../samples/dino-dense/lattice-touching.png) |
 | `scatter-scaled` — scale + pose variation, where `dino-dense` beats `ncc` | ![scatter-scaled](../samples/dino-dense/scatter-scaled.png) |
+
+## Pseudocode
+
+**Method ③ dino-dense** — third of the four *implemented* methods (implementation numbering
+①–④: `ncc`, `sparse-geo`, `dino-dense`, `propose-retrieve`; source-research numbering 1, 2, 3, 5,
+with research Methods 4 and 6 deferred). The steps below mirror the `# 1.` … `# 9.` comments in
+`search()` (METHOD-11); read `src/object_search/search/dino_dense.py` for the ground truth.
+
+```
+1. inferencer <- the ONE shared, module-cached DINOv2Inferencer
+   if weight absent: return ERROR with a model_unavailable note  # never raise
+
+2. embed the exemplar crop -> mean-pool its patch tokens -> L2-normalize ONCE -> prototype
+   (pool first, normalize second: self-cosine of the prototype is 1.0)
+
+3. run the SCENE at native resolution capped at scene_max_side  # downscale + LOG the cap if above
+   snap each side to a multiple of 14; strip CLS + n_register tokens (n_register DERIVED, not hardcoded)
+   L2-normalize every returned token -> grid
+
+4. sim = prototype . grid  -> a (gh, gw) cosine map in [-1, 1]   # normalize BOTH sides, THEN dot
+
+5. bilinearly upsample the MAP (not the tokens) to pixel resolution using the inferencer scale factors
+   (token centre (gx+0.5) maps to its pixel; upsampling tokens would be 384x the work)
+
+6. calibrate the accept threshold (gmm default) on the token-resolution similarity distribution
+   (absolute cosine thresholds do not transfer across images)
+
+7. threshold -> connectedComponentsWithStats; SKIP label 0 (background) explicitly
+   components found at candidate_margin BELOW the threshold; area >= min_component_area -> box
+   (scaled back to original scene pixels; score = peak similarity inside the component)
+
+8. keep top max_candidates components as Candidates WITH raw scores (for the EVAL-08 sweep)
+   components whose score >= threshold -> Matches  # METHOD-12: every clearing component survives
+   label the component overlapping the exemplar box is_exemplar=True
+
+9. assemble Diagnostics (upsampled heatmap + metrics) and LatencyBreakdown
+   a run that clears nothing returns EMPTY with a note (METHOD-04c)
+```
+
+## References
+
+- Oquab et al., "DINOv2: Learning Robust Visual Features without Supervision", 2023: https://arxiv.org/abs/2304.07193
+- DINOv2 code: https://github.com/facebookresearch/dinov2
+- ONNX model used here (`dinov2-small-ONNX`): https://huggingface.co/onnx-community/dinov2-small-ONNX
