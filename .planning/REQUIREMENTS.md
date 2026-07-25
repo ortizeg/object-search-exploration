@@ -137,7 +137,7 @@ which kind of image, and at what latency.
 
 ### Store & Evaluation (EVAL)
 
-- [ ] **EVAL-01**: SQLite store for runs and ratings, with a versioned and migratable schema
+- [x] **EVAL-01**: SQLite store for runs and ratings, with a versioned and migratable schema
 - [ ] **EVAL-02**: Ground-truth box labels for the demo image set
 - [x] **EVAL-03**: Synthetic image generator with **exact** ground truth — lattices, clutter,
       distractors, scale and rotation variation
@@ -149,34 +149,34 @@ which kind of image, and at what latency.
       methods, so ratings are directly comparable rather than confounded by different boxes
 
 - [ ] **EVAL-06**: Benchmark results rendered as committed charts and tables
-- [ ] **EVAL-07**: **Store raw judgments only; never store a derived metric as a column.**
+- [x] **EVAL-07**: **Store raw judgments only; never store a derived metric as a column.**
       Precision, recall, F1, and expected-count are computed in queries/views from
       `retrieved`, per-match verdicts, and `missed_count`
 
-- [ ] **EVAL-08**: **Log sub-threshold candidates** — every run persists the top-N candidates
+- [x] **EVAL-08**: **Log sub-threshold candidates** — every run persists the top-N candidates
       (N ≈ 50) with raw scores *and* the applied threshold, so a threshold sweep and full PR
       curve can be reconstructed offline from ratings already collected
 
-- [ ] **EVAL-09**: Every run records provenance — git SHA, model file hash, config hash,
+- [x] **EVAL-09**: Every run records provenance — git SHA, model file hash, config hash,
       method version — so ratings from before and after a change are never pooled
 
-- [ ] **EVAL-10**: Every run records slice metadata — true instance count, instance scale
+- [x] **EVAL-10**: Every run records slice metadata — true instance count, instance scale
       range, rotation range, clutter level, exemplar keypoint count — exact for synthetic
       images, best-effort otherwise
 
-- [ ] **EVAL-11**: Latency logged as a breakdown (preprocess / inference / postprocess), not
+- [x] **EVAL-11**: Latency logged as a breakdown (preprocess / inference / postprocess), not
       a single number
 
-- [ ] **EVAL-12**: Empty results and method errors are recorded as **distinct outcomes**, not
+- [x] **EVAL-12**: Empty results and method errors are recorded as **distinct outcomes**, not
       as zero-precision runs
 
-- [ ] **EVAL-13**: `rating_completeness` is a first-class field —
+- [x] **EVAL-13**: `rating_completeness` is a first-class field —
       `none` / `precision-only` / `recall-only` / `complete` — plus whether `FP` came from
       per-match verdicts or a bare count. Aggregates state which subset each metric was
       computed over, and report threshold-sweep sample size separately from precision sample
       size
 
-- [ ] **EVAL-14**: Stats dashboard reports **n and confidence intervals** (Wilson interval for
+- [x] **EVAL-14**: Stats dashboard reports **n and confidence intervals** (Wilson interval for
       thumbs-up rate) alongside every rate
 
 - [ ] **EVAL-15**: Paired comparisons produce a win/loss/tie record and a Bradley-Terry (or
@@ -185,7 +185,7 @@ which kind of image, and at what latency.
 - [ ] **EVAL-16**: The duplicate/fragment convention is defined once and shown in the UI —
       two boxes on one instance = 1 TP + 1 FP
 
-- [ ] **EVAL-17**: **All human count fields are nullable and stored empty until entered.**
+- [x] **EVAL-17**: **All human count fields are nullable and stored empty until entered.**
       `null` ("not assessed") is never coerced to `0` ("assessed, none") at any layer — form
       default, API default, or DB column default. A rating submitted without touching the
       counts must not register as perfect precision and recall
@@ -304,16 +304,16 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | API-06 | Phase 3 | Pending |
 | API-07 | Phase 3 | Pending |
 | API-08 | Phase 3 | Pending |
-| EVAL-01 | Phase 3 | Pending |
-| EVAL-07 | Phase 3 | Pending |
-| EVAL-08 | Phase 3 | Pending |
-| EVAL-09 | Phase 3 | Pending |
-| EVAL-10 | Phase 3 | Pending |
-| EVAL-11 | Phase 3 | Pending |
-| EVAL-12 | Phase 3 | Pending |
-| EVAL-13 | Phase 3 | Pending |
-| EVAL-14 | Phase 3 | Pending |
-| EVAL-17 | Phase 3 | Pending |
+| EVAL-01 | Phase 3 | Complete |
+| EVAL-07 | Phase 3 | Complete |
+| EVAL-08 | Phase 3 | Complete |
+| EVAL-09 | Phase 3 | Complete |
+| EVAL-10 | Phase 3 | Complete |
+| EVAL-11 | Phase 3 | Complete |
+| EVAL-12 | Phase 3 | Complete |
+| EVAL-13 | Phase 3 | Complete |
+| EVAL-14 | Phase 3 | Complete |
+| EVAL-17 | Phase 3 | Complete |
 | EVAL-18 | Phase 3 | Pending |
 | EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Phase 1 generator complete; Phase 8 consumption pending |
 | UI-01 | Phase 4 | Pending |
