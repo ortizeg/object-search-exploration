@@ -95,22 +95,22 @@ which kind of image, and at what latency.
 
 ### API (API)
 
-- [ ] **API-01**: `GET /methods` returns each method's name, description, and config JSON
+- [x] **API-01**: `GET /methods` returns each method's name, description, and config JSON
       Schema, with zero method names hardcoded in the API layer
 
-- [ ] **API-02**: `POST /search` takes image id + exemplar box + method + config and returns
+- [x] **API-02**: `POST /search` takes image id + exemplar box + method + config and returns
       a `SearchResult`
 
-- [ ] **API-03**: Every search is persisted as a `RunRecord` (image, box, method, config hash
+- [x] **API-03**: Every search is persisted as a `RunRecord` (image, box, method, config hash
       and JSON, matches, latency, timestamp)
 
-- [ ] **API-04**: `POST /ratings` records a rating against a run
-- [ ] **API-05**: `GET /stats` returns the per-method scoreboard
-- [ ] **API-06**: `GET /images` lists demo images; an upload endpoint accepts ad-hoc images
-- [ ] **API-07**: ONNX sessions are loaded once at startup via `lifespan` and reused across
+- [x] **API-04**: `POST /ratings` records a rating against a run
+- [x] **API-05**: `GET /stats` returns the per-method scoreboard
+- [x] **API-06**: `GET /images` lists demo images; an upload endpoint accepts ad-hoc images
+- [x] **API-07**: ONNX sessions are loaded once at startup via `lifespan` and reused across
       requests
 
-- [ ] **API-08**: Structured error handling — a method that raises returns a typed error
+- [x] **API-08**: Structured error handling — a method that raises returns a typed error
       response, not a 500 stack trace
 
 ### UI (UI)
@@ -190,7 +190,7 @@ which kind of image, and at what latency.
       default, API default, or DB column default. A rating submitted without touching the
       counts must not register as perfect precision and recall
 
-- [ ] **EVAL-18**: `wrong_count` accepted as a fast alternative to per-match verdicts,
+- [x] **EVAL-18**: `wrong_count` accepted as a fast alternative to per-match verdicts,
       mutually exclusive with them, validated `0 ≤ wrong_count ≤ R`. If both are present,
       per-match wins and the discrepancy is flagged, not silently reconciled
 
@@ -296,14 +296,14 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | METHOD-11 | Phase 2 | Complete |
 | METHOD-12 | Phase 2 | Complete |
 | DOC-02 | Phase 2 | Complete |
-| API-01 | Phase 3 | Pending |
-| API-02 | Phase 3 | Pending |
-| API-03 | Phase 3 | Pending |
-| API-04 | Phase 3 | Pending |
-| API-05 | Phase 3 | Pending |
-| API-06 | Phase 3 | Pending |
-| API-07 | Phase 3 | Pending |
-| API-08 | Phase 3 | Pending |
+| API-01 | Phase 3 | Complete |
+| API-02 | Phase 3 | Complete |
+| API-03 | Phase 3 | Complete |
+| API-04 | Phase 3 | Complete |
+| API-05 | Phase 3 | Complete |
+| API-06 | Phase 3 | Complete |
+| API-07 | Phase 3 | Complete |
+| API-08 | Phase 3 | Complete |
 | EVAL-01 | Phase 3 | Complete |
 | EVAL-07 | Phase 3 | Complete |
 | EVAL-08 | Phase 3 | Complete |
@@ -314,7 +314,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-13 | Phase 3 | Complete |
 | EVAL-14 | Phase 3 | Complete |
 | EVAL-17 | Phase 3 | Complete |
-| EVAL-18 | Phase 3 | Pending |
+| EVAL-18 | Phase 3 | Complete |
 | EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Phase 1 generator complete; Phase 8 consumption pending |
 | UI-01 | Phase 4 | Pending |
 | UI-02 | Phase 4 | Pending |

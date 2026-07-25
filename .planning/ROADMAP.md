@@ -29,7 +29,7 @@ checkpoints in each phase.
 
 - [ ] **Phase 1: Foundation** - Scaffold, quality gates, CI, schemas, registry, ONNXInferencer, demo assets
 - [x] **Phase 2: Method 1 + shared primitives** - `ncc`, calibration/peaks/nms/viz, sample-run renderer
-- [ ] **Phase 3: Backend API** - FastAPI endpoints and the SQLite run + rating store
+- [x] **Phase 3: Backend API** - FastAPI endpoints and the SQLite run + rating store
 - [ ] **Phase 4: Web UI** - Canvas box drawing, schema-driven config, overlays, rating widget, stats
 - [ ] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
 - [ ] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
@@ -151,11 +151,11 @@ today still means something after the code changes.
 
 Plans:
 
-- [ ] 03-01: SQLite store — schema with nullable human-count columns and no defaults,
+- [x] 03-01: SQLite store — schema with nullable human-count columns and no defaults,
       migrations, raw-judgment tables, derived-metric views with NULL propagation, Wilson
       interval, sub-threshold candidate persistence
 
-- [ ] 03-02: FastAPI app — `/methods` `/search` `/images` `/ratings` `/stats`, lifespan ONNX
+- [x] 03-02: FastAPI app — `/methods` `/search` `/images` `/ratings` `/stats`, lifespan ONNX
       session loading, typed structured errors, provenance and latency-breakdown capture
 
 ### Phase 4: Web UI
@@ -352,7 +352,7 @@ the shared DINOv2 inferencer. Valid parallel schedule: 5 ∥ 6, then 7, then 8.
 |-------|----------------|--------|-----------|
 | 1. Foundation | 1/2 | In Progress|  |
 | 2. Method 1 + shared primitives | 0/2 | Not started | - |
-| 3. Backend API | 0/2 | Not started | - |
+| 3. Backend API | 2/2 | Complete | 2026-07-25 |
 | 4. Web UI | 0/2 | Not started | - |
 | 5. Method 2 | 0/2 | Not started | - |
 | 6. Method 3 | 0/2 | Not started | - |
