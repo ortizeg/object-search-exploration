@@ -66,7 +66,7 @@ which kind of image, and at what latency.
       result when the exemplar lacks texture; the exemplar self-match is labelled as the
       exemplar, neither double-counted nor discarded
 
-- [ ] **METHOD-05**: Method 3 `dino-dense` — DINOv2 ONNX dense patch tokens, mean-pooled crop
+- [x] **METHOD-05**: Method 3 `dino-dense` — DINOv2 ONNX dense patch tokens, mean-pooled crop
       prototype, cosine similarity map, threshold, connected components → boxes, with the
       scene run at high input resolution and the similarity map bilinearly upsampled
 
@@ -331,7 +331,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | METHOD-04a | Phase 5 | Complete |
 | METHOD-04b | Phase 5 | Pending |
 | METHOD-04c | Phase 5 | Complete |
-| METHOD-05 | Phase 6 | Pending |
+| METHOD-05 | Phase 6 | Complete |
 | METHOD-06 | Phase 7 | Pending |
 | EVAL-02 | Phase 8 | Pending |
 | EVAL-04 | Phase 8 | Pending |
