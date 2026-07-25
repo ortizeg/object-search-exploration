@@ -333,6 +333,7 @@ class _Correspondence:
     test is disabled, the rank is the honest replacement for the discarded best/second signal.
     """
 
+    index: int  # position in the correspondence list; how a peak's members are looked up
     crop_xy: tuple[float, float]
     scene_xy: tuple[float, float]
     crop_scale: float | None
@@ -458,6 +459,7 @@ def _match_top_k(
             j = int(row_idx[rank])
             correspondences.append(
                 _Correspondence(
+                    index=len(correspondences),
                     crop_xy=(float(crop.xy[i, 0]), float(crop.xy[i, 1])),
                     scene_xy=(float(scene.xy[j, 0]), float(scene.xy[j, 1])),
                     crop_scale=None if crop.scale is None else float(crop.scale[i]),
@@ -478,3 +480,291 @@ def _match_top_k(
         n_dropped,
     )
     return _MatchResult(tuple(correspondences), k_ceiling_hit, n_dropped, n_matched)
+
+
+# ---------------------------------------------------------------- generalized Hough voting
+
+
+@dataclass(frozen=True)
+class _Vote:
+    """One correspondence's (or pair's) prediction of an instance's pose in the scene.
+
+    ``px, py`` is the predicted **object-centre** location in scene pixels; ``log_scale`` and
+    ``theta_deg`` are the hypothesized scale (natural log) and rotation. ``members`` are the
+    indices of the correspondences that produced this vote -- one for the single/translation
+    modes, two for a pairwise vote -- so the winning peak knows exactly which correspondences to
+    hand to RANSAC.
+    """
+
+    px: float
+    py: float
+    log_scale: float
+    theta_deg: float
+    members: tuple[int, ...]
+
+
+def _proper_similarity_2pt(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    q1: tuple[float, float],
+    q2: tuple[float, float],
+) -> tuple[complex, complex] | None:
+    """Solve the proper (orientation-preserving) 4-DoF similarity ``q = a*p + b`` from two pairs.
+
+    Writing points as complex numbers turns a 4-DoF similarity into a single complex-linear map:
+    ``a = s*e^{i*theta}`` carries scale and rotation, ``b`` the translation. Two point pairs
+    determine it exactly: ``a = (q2 - q1) / (p2 - p1)``, ``b = q1 - a*p1``. Returns ``None`` when
+    the two source points coincide (an undetermined transform). This is the *proper* branch only;
+    the reflection branch lives in the RANSAC layer, where the mirror check needs it.
+    """
+    dp = complex(p2[0] - p1[0], p2[1] - p1[1])
+    if abs(dp) < 1e-12:
+        return None
+    dq = complex(q2[0] - q1[0], q2[1] - q1[1])
+    a = dq / dp
+    b = complex(q1[0], q1[1]) - a * complex(p1[0], p1[1])
+    return a, b
+
+
+def _vote_single_4dof(corr: _Correspondence, centre: tuple[float, float]) -> _Vote | None:
+    """Single-correspondence vote using the keypoint frame (Lowe's original, free).
+
+    A framed keypoint carries ``(x, y, scale, orientation)``, so ONE correspondence determines a
+    full similarity: relative scale ``s = scene_scale / crop_scale`` and relative rotation
+    ``theta = scene_angle - crop_angle``. The offset from the crop keypoint to the object centre,
+    transformed by that similarity, predicts the centre in the scene. Requires a frame; the caller
+    guarantees it (and raises otherwise) before this is reached.
+    """
+    if corr.crop_scale is None or corr.crop_angle is None:
+        raise ValueError("single-4dof voting requires framed keypoints (scale + orientation)")
+    if corr.scene_scale is None or corr.scene_angle is None:
+        raise ValueError("single-4dof voting requires framed keypoints (scale + orientation)")
+    if corr.crop_scale <= 0.0 or corr.scene_scale <= 0.0:
+        return None
+    s = corr.scene_scale / corr.crop_scale
+    theta = corr.scene_angle - corr.crop_angle
+    rad = np.radians(theta)
+    cos_t, sin_t = float(np.cos(rad)), float(np.sin(rad))
+    dxl = centre[0] - corr.crop_xy[0]
+    dyl = centre[1] - corr.crop_xy[1]
+    px = corr.scene_xy[0] + s * (cos_t * dxl - sin_t * dyl)
+    py = corr.scene_xy[1] + s * (sin_t * dxl + cos_t * dyl)
+    return _Vote(px, py, float(np.log(s)), theta, (corr.index,))
+
+
+def _vote_translation_2dof(corr: _Correspondence, centre: tuple[float, float]) -> _Vote:
+    """Translation-only vote (any backend), assuming instances share the exemplar scale/rotation.
+
+    The predicted centre is the exemplar centre plus the crop->scene translation of this
+    correspondence. Scale and rotation are pinned at the identity (``log_scale = 0``,
+    ``theta = 0``), which is correct and fast for the near-identical case.
+    """
+    tx = corr.scene_xy[0] - corr.crop_xy[0]
+    ty = corr.scene_xy[1] - corr.crop_xy[1]
+    return _Vote(centre[0] + tx, centre[1] + ty, 0.0, 0.0, (corr.index,))
+
+
+@dataclass(frozen=True)
+class _VoteCast:
+    """The votes plus the pairwise-sampling diagnostics the voting step is responsible for."""
+
+    votes: tuple[_Vote, ...]
+    pairwise_pairs_sampled: int  # 0 unless voting_mode == pairwise-4dof
+    pairwise_capped: bool  # True when the O(n^2) pair set was capped by config
+
+
+def _cast_votes(
+    mode: Literal["single-4dof", "translation-2dof", "pairwise-4dof"],
+    correspondences: tuple[_Correspondence, ...],
+    centre: tuple[float, float],
+    *,
+    has_frame: bool,
+    pairwise_cap: int,
+    rng: np.random.Generator,
+) -> _VoteCast:
+    """Turn correspondences into pose votes under the selected voting mode (METHOD-04a).
+
+    ``single-4dof`` is valid only for a framed backend and **raises** on a frameless one -- a
+    config that is accepted and then quietly does something else is worse than a refusal.
+    ``translation-2dof`` and ``pairwise-4dof`` work for any backend; ``pairwise-4dof`` samples
+    correspondence pairs up to ``pairwise_cap`` (it is O(n^2)) and records the cap so a slow run
+    is explained rather than mysterious.
+    """
+    if mode == "single-4dof":
+        if not has_frame:
+            raise ValueError(
+                "voting_mode='single-4dof' requires a backend whose keypoints carry a frame "
+                "(scale + orientation); this backend is frameless. Use 'translation-2dof' or "
+                "'pairwise-4dof' instead."
+            )
+        single = [_vote_single_4dof(corr, centre) for corr in correspondences]
+        return _VoteCast(tuple(v for v in single if v is not None), 0, False)
+
+    if mode == "translation-2dof":
+        translation = [_vote_translation_2dof(corr, centre) for corr in correspondences]
+        return _VoteCast(tuple(translation), 0, False)
+
+    # pairwise-4dof: each pair of correspondences determines a 4-DoF similarity.
+    n = len(correspondences)
+    total_pairs = n * (n - 1) // 2
+    if total_pairs <= pairwise_cap:
+        pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+        capped = False
+    else:
+        sampled: set[tuple[int, int]] = set()
+        while len(sampled) < pairwise_cap:
+            i = int(rng.integers(0, n))
+            j = int(rng.integers(0, n))
+            if i != j:
+                sampled.add((min(i, j), max(i, j)))
+        pairs = sorted(sampled)  # sort for determinism regardless of set iteration order
+        capped = True
+
+    votes: list[_Vote] = []
+    for i, j in pairs:
+        ci, cj = correspondences[i], correspondences[j]
+        model = _proper_similarity_2pt(ci.crop_xy, cj.crop_xy, ci.scene_xy, cj.scene_xy)
+        if model is None:
+            continue
+        a, b = model
+        if abs(a) <= 0.0:
+            continue
+        predicted = a * complex(centre[0], centre[1]) + b
+        votes.append(
+            _Vote(
+                predicted.real,
+                predicted.imag,
+                float(np.log(abs(a))),
+                float(np.degrees(np.angle(a))),
+                (ci.index, cj.index),
+            )
+        )
+    return _VoteCast(tuple(votes), len(pairs), capped)
+
+
+def _soft_neighbours(value: float, width: float) -> tuple[tuple[int, float], tuple[int, float]]:
+    """Split ``value`` across its two nearest bins (linear soft assignment).
+
+    Returns ``((lower_bin, weight), (upper_bin, weight))`` where the weights sum to 1. Soft
+    binning is required (Lowe's boundary fix): a vote near a bin edge would otherwise fall
+    entirely into one bin and no peak would clear the floor when instances straddle a boundary.
+    """
+    coord = value / width
+    lower = int(np.floor(coord))
+    frac = coord - lower
+    return (lower, 1.0 - frac), (lower + 1, frac)
+
+
+def _accumulate_votes(
+    votes: tuple[_Vote, ...], base_location_width: float
+) -> tuple[dict[tuple[int, int, int, int], float], dict[tuple[int, int, int, int], list[int]]]:
+    """Accumulate votes into a hash-table pose histogram with soft binning and circular theta.
+
+    Bins are Lowe's §7.3 widths: 30 degrees orientation, a factor of 2 in scale (so log-scale is
+    binned by ``log 2``), and ``0.25 x max projected crop dimension`` location. The location bin
+    width is **scale-dependent** -- ``base_location_width * 2**scale_bin`` -- which is exactly why
+    votes live in a **dict keyed by ``(x, y, scale, theta)``**, not a dense array. Each vote is
+    soft-assigned into the 2 nearest bins per dimension (16 bins in 4-DoF), and **theta wraps
+    circularly** modulo the 12 orientation bins so a vote near 0/360 reaches the adjacent bin.
+    """
+    log_two = float(np.log(_SCALE_BIN_FACTOR))
+    weight: dict[tuple[int, int, int, int], float] = {}
+    members: dict[tuple[int, int, int, int], list[int]] = {}
+
+    for vote in votes:
+        # theta: circular, modulo _N_THETA_BINS bins of _THETA_BIN_DEG each.
+        theta = vote.theta_deg % 360.0
+        t_coord = theta / _THETA_BIN_DEG
+        t_lower = int(np.floor(t_coord))
+        t_frac = t_coord - t_lower
+        theta_bins = (
+            (t_lower % _N_THETA_BINS, 1.0 - t_frac),
+            ((t_lower + 1) % _N_THETA_BINS, t_frac),
+        )
+        scale_bins = _soft_neighbours(vote.log_scale, log_two)
+
+        for s_idx, s_w in scale_bins:
+            # Location bin width grows with the hypothesized scale (Lowe): within one scale bin
+            # all votes share this width, so their location bins align and can cluster.
+            loc_w = base_location_width * (_SCALE_BIN_FACTOR**s_idx)
+            x_bins = _soft_neighbours(vote.px, loc_w)
+            y_bins = _soft_neighbours(vote.py, loc_w)
+            for t_idx, t_w in theta_bins:
+                for x_idx, x_w in x_bins:
+                    for y_idx, y_w in y_bins:
+                        w = s_w * t_w * x_w * y_w
+                        if w <= 0.0:
+                            continue
+                        key = (x_idx, y_idx, s_idx, t_idx)
+                        weight[key] = weight.get(key, 0.0) + w
+                        members.setdefault(key, []).extend(vote.members)
+    return weight, members
+
+
+def _neighbourhood(key: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+    """The 3^4 bins adjacent to ``key`` (inclusive), with theta wrapping circularly.
+
+    Used to de-duplicate peaks: adjacent bins describe the same cluster and must not both be
+    reported. Location and scale simply step +/-1; theta steps +/-1 modulo the 12 orientation
+    bins so the neighbourhood of bin 0 includes bin 11.
+    """
+    x, y, s, t = key
+    out: list[tuple[int, int, int, int]] = []
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for ds in (-1, 0, 1):
+                for dt in (-1, 0, 1):
+                    out.append((x + dx, y + dy, s + ds, (t + dt) % _N_THETA_BINS))
+    return out
+
+
+@dataclass(frozen=True)
+class _Peak:
+    """One hypothesized instance cluster: a pose-space bin plus its member correspondences."""
+
+    votes: float
+    dx: float
+    dy: float
+    log_scale: float
+    theta_deg: float
+    member_indices: tuple[int, ...]
+
+
+def _enumerate_peaks(
+    weight: dict[tuple[int, int, int, int], float],
+    members: dict[tuple[int, int, int, int], list[int]],
+    min_votes: int,
+    base_location_width: float,
+) -> tuple[_Peak, ...]:
+    """Enumerate pose-space peaks: bins with >= ``min_votes`` weight, de-duplicated by 3^4.
+
+    Bins are taken strongest-first; a bin is skipped when an already-accepted peak lies in its
+    3^4 neighbourhood, so adjacent bins describing one cluster are not reported twice. Each peak
+    carries the union of its member correspondence indices (what per-peak RANSAC verifies) and a
+    representative pose at the bin's lower corner (diagnostics only).
+    """
+    candidates = sorted(
+        (key for key, w in weight.items() if w >= min_votes),
+        key=lambda key: (-weight[key], key),
+    )
+    accepted: list[_Peak] = []
+    accepted_keys: set[tuple[int, int, int, int]] = set()
+    log_two = float(np.log(_SCALE_BIN_FACTOR))
+    for key in candidates:
+        if any(neighbour in accepted_keys for neighbour in _neighbourhood(key)):
+            continue
+        accepted_keys.add(key)
+        x_idx, y_idx, s_idx, t_idx = key
+        loc_w = base_location_width * (_SCALE_BIN_FACTOR**s_idx)
+        unique_members = tuple(sorted(set(members[key])))
+        accepted.append(
+            _Peak(
+                votes=weight[key],
+                dx=x_idx * loc_w,
+                dy=y_idx * loc_w,
+                log_scale=s_idx * log_two,
+                theta_deg=(t_idx * _THETA_BIN_DEG),
+                member_indices=unique_members,
+            )
+        )
+    return tuple(accepted)
