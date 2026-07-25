@@ -91,6 +91,40 @@ body {
   text-align: center;
 }
 
+/* Diagnostics overlay toggles — one checkbox per diagnostic field present in the payload. */
+.overlay-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.9rem;
+  padding: 0.35rem 0.2rem 0;
+  font-size: 0.78rem;
+}
+.overlay-toggles legend {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-right: 0.3rem;
+  align-self: center;
+}
+.overlay-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.overlay-toggle input {
+  accent-color: var(--accent);
+}
+.overlay-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  display: inline-block;
+}
+
 .control {
   margin-bottom: 1.1rem;
   display: flex;

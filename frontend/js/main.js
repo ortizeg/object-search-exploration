@@ -1,11 +1,19 @@
-// main.js — the tracer. End to end: load methods + images, render the chosen image on the
-// canvas, gate box-drawing behind method selection (UI-01), and on release convert the drag
-// to image coordinates and POST /search, logging the returned match count. Rendering the
-// result overlay is Plan 04-02; this file only proves the round trip is wired and correct.
+// main.js — the app shell wiring. End to end: load methods + images, render the chosen image
+// on the canvas, gate box-drawing behind method selection (UI-01), and on release POST /search.
+// This plan (04-02) adds the result + diagnostics overlays, the tiered rating widget, and the
+// stats dashboard on top of the 04-01 canvas/transform foundation.
 
 import { Viewport, finalizeBox } from "./viewport.js";
 import { buildForm } from "./form.js";
 import { getMethods, getImages, postSearch, imageUrl } from "./api.js";
+import {
+  drawResults,
+  drawQueryBox,
+  drawHeatmap,
+  drawPointDiagnostics,
+  presentDiagnosticFields,
+  hitTestMatch,
+} from "./overlay.js";
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("stage"));
 const methodSelect = /** @type {HTMLSelectElement} */ (document.getElementById("method"));
@@ -13,6 +21,17 @@ const imageSelect = /** @type {HTMLSelectElement} */ (document.getElementById("i
 const configHost = document.getElementById("config");
 const searchButton = /** @type {HTMLButtonElement} */ (document.getElementById("search"));
 const statusEl = document.getElementById("status");
+const overlayToggles = document.getElementById("overlay-toggles");
+
+// Swatch colours mirror overlay.js so the toggle legend reads at a glance. Kept here rather
+// than exported from overlay.js — a five-line duplication is clearer than a shared constant.
+const OVERLAY_SWATCH = {
+  similarity_heatmap: "#ff8c42",
+  keypoints: "#7cffb2",
+  correspondences: "#c792ea",
+  hough_peaks: "#ffb86c",
+  proposals: "#5aa0ff",
+};
 
 const viewport = new Viewport(canvas);
 
@@ -25,6 +44,17 @@ const state = {
   /** @type {{id:number,start:{x:number,y:number},current:{x:number,y:number}}|null} */ drag:
     null,
   /** @type {{id:number,startX:number,startY:number}|null} */ pan: null,
+  // --- result + overlay state (04-02) ---
+  /** @type {number|null} */ runId: null,
+  /** @type {Array<{box:{x:number,y:number,w:number,h:number},score:number,is_exemplar?:boolean}>} */
+  matches: [],
+  /** @type {object|null} */ diagnostics: null,
+  /** @type {CanvasImageSource|null} */ heatmapImg: null,
+  /** @type {Set<string>} */ overlayEnabled: new Set(),
+  /** @type {Set<number>} indices a human marked wrong (per-match verdicts, Task 2) */
+  wrongSet: new Set(),
+  /** @type {boolean} true while the rating widget is in per-match verdict mode (Task 2) */
+  verdictMode: false,
 };
 
 /** True only once a method is selected — the single gate UI-01 depends on. */
@@ -36,30 +66,117 @@ function setStatus(message) {
   if (statusEl) statusEl.textContent = message;
 }
 
-function render() {
-  const boxes = [];
+const dpr = () => window.devicePixelRatio || 1;
+
+/** Composite one frame: image, heatmap (under boxes), results, query box, rubber-band, points. */
+function renderScene() {
+  const ctx = viewport.paintImage();
+  if (!ctx) return;
+
+  if (state.diagnostics && state.heatmapImg && state.overlayEnabled.has("similarity_heatmap")) {
+    drawHeatmap(viewport, state.heatmapImg);
+  }
+  if (state.matches.length) {
+    drawResults(viewport, state.matches, { wrongSet: state.wrongSet });
+  }
   if (state.box) {
-    boxes.push({
-      x: state.box.x0,
-      y: state.box.y0,
-      w: state.box.x1 - state.box.x0,
-      h: state.box.y1 - state.box.y0,
-      color: "#00e5ff",
-    });
-  } else if (state.drag) {
-    // Live rubber-band while dragging (in image space; render is transform-aware).
+    drawQueryBox(viewport, state.box);
+  }
+  if (state.drag) {
+    // Live rubber-band while dragging, in image space (transform-aware).
     const a = state.drag.start;
     const b = state.drag.current;
-    boxes.push({
-      x: Math.min(a.x, b.x),
-      y: Math.min(a.y, b.y),
-      w: Math.abs(b.x - a.x),
-      h: Math.abs(b.y - a.y),
-      color: "#ffd166",
-    });
+    ctx.setTransform(viewport.zoom, 0, 0, viewport.zoom, viewport.panX, viewport.panY);
+    ctx.setLineDash([]);
+    ctx.lineWidth = (1.5 * dpr()) / viewport.zoom;
+    ctx.strokeStyle = "#ffd166";
+    ctx.strokeRect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
-  viewport.render(boxes);
+  if (state.diagnostics) {
+    drawPointDiagnostics(viewport, state.diagnostics, state.overlayEnabled);
+  }
 }
+
+/** Rebuild the overlay-toggle checkboxes for the diagnostic fields present in this result. */
+function buildOverlayToggles() {
+  if (!overlayToggles) return;
+  overlayToggles.replaceChildren();
+  const present = presentDiagnosticFields(state.diagnostics);
+  if (present.length === 0) {
+    overlayToggles.hidden = true;
+    return;
+  }
+  overlayToggles.hidden = false;
+  const legend = document.createElement("span");
+  legend.className = "overlay-toggles-legend";
+  legend.textContent = "Overlays";
+  overlayToggles.appendChild(legend);
+  for (const { key, label } of present) {
+    const wrap = document.createElement("label");
+    wrap.className = "overlay-toggle";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = state.overlayEnabled.has(key);
+    input.addEventListener("change", () => {
+      if (input.checked) state.overlayEnabled.add(key);
+      else state.overlayEnabled.delete(key);
+      requestAnimationFrame(renderScene);
+    });
+    const swatch = document.createElement("span");
+    swatch.className = "overlay-swatch";
+    swatch.style.background = OVERLAY_SWATCH[key] || "#00e5ff";
+    const text = document.createElement("span");
+    text.textContent = label;
+    wrap.append(input, swatch, text);
+    overlayToggles.appendChild(wrap);
+  }
+}
+
+/** Decode a base64 similarity-heatmap PNG into an Image, then re-render when it is ready. */
+function loadHeatmap(heatmap) {
+  state.heatmapImg = null;
+  if (!heatmap || !heatmap.png_b64) return;
+  const img = new Image();
+  img.onload = () => {
+    state.heatmapImg = img;
+    requestAnimationFrame(renderScene);
+  };
+  img.src = `data:image/png;base64,${heatmap.png_b64}`;
+}
+
+/** Adopt a fresh search result: store matches + diagnostics, prime overlays, re-render. */
+function adoptResult(runId, result) {
+  state.runId = runId;
+  state.matches = Array.isArray(result?.matches) ? result.matches : [];
+  state.diagnostics = result?.diagnostics || null;
+  state.wrongSet = new Set();
+  state.verdictMode = false;
+  // Default every present diagnostic overlay ON so a run is legible without hunting for toggles.
+  state.overlayEnabled = new Set(presentDiagnosticFields(state.diagnostics).map((f) => f.key));
+  loadHeatmap(state.diagnostics?.similarity_heatmap);
+  buildOverlayToggles();
+  if (typeof onResult === "function") onResult(runId, state.matches);
+  requestAnimationFrame(renderScene);
+}
+
+/** Clear any previous result — called when a new query box begins. */
+function clearResult() {
+  state.runId = null;
+  state.matches = [];
+  state.diagnostics = null;
+  state.heatmapImg = null;
+  state.overlayEnabled = new Set();
+  state.wrongSet = new Set();
+  state.verdictMode = false;
+  if (overlayToggles) overlayToggles.hidden = true;
+  if (typeof onResult === "function") onResult(null, []);
+}
+
+// Hook points Task 2/Task 3 assign to wire the rating widget and stats without this file
+// importing them conditionally. Left null here so Task 1 stands alone.
+/** @type {((runId:number|null, matches:Array<object>)=>void)|null} */
+let onResult = null;
 
 /** Load an image_id onto the canvas and reset the fit. */
 async function loadImage(imageId) {
@@ -72,8 +189,9 @@ async function loadImage(imageId) {
   });
   state.imageId = imageId;
   state.box = null;
+  clearResult();
   viewport.setImage(img, img.naturalWidth, img.naturalHeight);
-  render();
+  renderScene();
   canvas.setAttribute("aria-disabled", String(!drawingEnabled()));
 }
 
@@ -93,7 +211,7 @@ function selectMethod(name) {
   canvas.setAttribute("aria-disabled", String(!drawingEnabled()));
 }
 
-/** Run a search for the current box + method + config, and log the match count (tracer). */
+/** Run a search for the current box + method + config, then overlay the result. */
 async function runSearch() {
   if (!state.method || !state.imageId || !state.box) return;
   const config = state.form ? state.form.readValues() : {};
@@ -113,10 +231,9 @@ async function runSearch() {
   setStatus("Searching…");
   try {
     const { run_id, result } = await postSearch(body);
-    const count = Array.isArray(result?.matches) ? result.matches.length : 0;
-    // eslint-disable-next-line no-console
-    console.log("[search] run", run_id, "->", count, "matches", body.exemplar.box, result);
-    setStatus(`Run ${run_id}: ${count} match(es). Overlay lands in Plan 04-02.`);
+    adoptResult(run_id, result);
+    const count = state.matches.length;
+    setStatus(`Run ${run_id}: ${count} match(es). Rate it in the right panel.`);
   } catch (err) {
     setStatus(`Search failed: ${err.message}`);
     // eslint-disable-next-line no-console
@@ -135,6 +252,18 @@ canvas.addEventListener("pointerdown", (e) => {
     return;
   }
   if (e.button !== 0 || !e.isPrimary) return;
+  // Per-match verdict mode (Task 2): a left click marks the box under the cursor wrong rather
+  // than starting a new query, so the current run can be rated without redrawing.
+  if (state.verdictMode && state.matches.length) {
+    const p = viewport.screenToImage(e.clientX, e.clientY);
+    const index = hitTestMatch(state.matches, p.x, p.y);
+    if (index >= 0 && typeof onVerdictToggle === "function") {
+      onVerdictToggle(index);
+      requestAnimationFrame(renderScene);
+    }
+    e.preventDefault();
+    return;
+  }
   // UI-01 gate: no method selected (or no image) => drawing is disabled, full stop.
   if (!drawingEnabled()) {
     setStatus("Pick a method first — drawing is disabled until then.");
@@ -143,9 +272,10 @@ canvas.addEventListener("pointerdown", (e) => {
   canvas.setPointerCapture(e.pointerId);
   const start = viewport.screenToImage(e.clientX, e.clientY);
   state.box = null;
+  clearResult();
   state.drag = { id: e.pointerId, start, current: start };
   e.preventDefault();
-  requestAnimationFrame(render);
+  requestAnimationFrame(renderScene);
 });
 
 canvas.addEventListener("pointermove", (e) => {
@@ -153,12 +283,12 @@ canvas.addEventListener("pointermove", (e) => {
     viewport.panBy(e.clientX - state.pan.startX, e.clientY - state.pan.startY);
     state.pan.startX = e.clientX;
     state.pan.startY = e.clientY;
-    requestAnimationFrame(render);
+    requestAnimationFrame(renderScene);
     return;
   }
   if (!state.drag || e.pointerId !== state.drag.id) return;
   state.drag.current = viewport.screenToImage(e.clientX, e.clientY);
-  requestAnimationFrame(render);
+  requestAnimationFrame(renderScene);
 });
 
 function endDrag(e) {
@@ -176,7 +306,7 @@ function endDrag(e) {
   state.drag = null;
   state.box = box;
   searchButton.disabled = !drawingEnabled() || state.box === null;
-  render();
+  renderScene();
   if (box) {
     void runSearch();
   } else {
@@ -198,10 +328,14 @@ canvas.addEventListener(
     e.preventDefault();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     viewport.zoomAbout(factor, e.clientX, e.clientY);
-    requestAnimationFrame(render);
+    requestAnimationFrame(renderScene);
   },
   { passive: false },
 );
+
+// --- Rating / verdict hook points (assigned in Task 2 wiring below) -------------------
+/** @type {((index:number)=>void)|null} */
+let onVerdictToggle = null;
 
 // --- Control wiring -------------------------------------------------------------------
 
@@ -215,7 +349,7 @@ searchButton.addEventListener("click", () => void runSearch());
 const resizeObserver = new ResizeObserver(() => {
   viewport.syncCanvasSize();
   viewport.fitContain();
-  render();
+  renderScene();
 });
 resizeObserver.observe(canvas);
 
@@ -253,3 +387,21 @@ async function bootstrap() {
 }
 
 void bootstrap();
+
+// Expose the wiring seams and shared state to the sibling modules loaded after this one.
+// A tiny window namespace is simpler than circular imports for a single-page app, and keeps
+// rating.js / stats.js free of any knowledge of the canvas internals.
+window.__app = {
+  state,
+  viewport,
+  renderScene,
+  setStatus,
+  /** @param {(index:number)=>void} fn */
+  setVerdictToggle(fn) {
+    onVerdictToggle = fn;
+  },
+  /** @param {(runId:number|null, matches:Array<object>)=>void} fn */
+  setOnResult(fn) {
+    onResult = fn;
+  },
+};
