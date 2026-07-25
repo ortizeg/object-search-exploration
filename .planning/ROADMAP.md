@@ -33,7 +33,7 @@ checkpoints in each phase.
 - [x] **Phase 4: Web UI** - Canvas box drawing, schema-driven config, overlays, rating widget, stats
 - [x] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
 - [x] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
-- [ ] **Phase 7: Method 5** - FastSAM proposals + DINOv2 region embeddings, `propose-retrieve`
+- [x] **Phase 7: Method 5** - FastSAM proposals + DINOv2 region embeddings, `propose-retrieve`
 - [ ] **Phase 8: Evaluation & docs** - Benchmark, paired comparison, charts, docs, Milestone 2 spec
 
 ## Phase Details
@@ -289,18 +289,18 @@ embedding stages — because Milestone 2 depends on calling exactly those two st
   4. The proposal set renders in the UI diagnostics overlay.
   5. The proposal backend is switchable between FastSAM and MobileSAM by config alone, and
      any licence constraint on the chosen weights is recorded in `LICENSES.md`.
-**Plans**: 1/2 plans executed
+**Plans**: 2/2 plans executed
 
 Plans:
 
 - [x] 07-01-PLAN.md
-- [ ] 07-02-PLAN.md
+- [x] 07-02-PLAN.md
 
 - [x] 07-01: FastSAM/MobileSAM ONNX proposal stage (gated through `library-review`) as an
       independently callable unit, with documented output decoding and `fetch-models`
       integration
 
-- [ ] 07-02: `propose_retrieve.py` — region embedding stage, cosine NN retrieval with
+- [x] 07-02: `propose_retrieve.py` — region embedding stage, cosine NN retrieval with
       threshold and NMS, diagnostics, docs, sample runs
 
 ### Phase 8: Evaluation & docs

@@ -70,7 +70,7 @@ which kind of image, and at what latency.
       prototype, cosine similarity map, threshold, connected components → boxes, with the
       scene run at high input resolution and the similarity map bilinearly upsampled
 
-- [ ] **METHOD-06**: Method 5 `propose-retrieve` — FastSAM/MobileSAM ONNX class-agnostic
+- [x] **METHOD-06**: Method 5 `propose-retrieve` — FastSAM/MobileSAM ONNX class-agnostic
       proposals, DINOv2 region embeddings from the same inferencer as Method 3, cosine
       nearest-neighbour retrieval with threshold and NMS; proposal and embedding stages are
       **independently callable units**
@@ -332,7 +332,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | METHOD-04b | Phase 5 | Complete |
 | METHOD-04c | Phase 5 | Complete |
 | METHOD-05 | Phase 6 | Complete |
-| METHOD-06 | Phase 7 | Pending |
+| METHOD-06 | Phase 7 | Complete |
 | EVAL-02 | Phase 8 | Pending |
 | EVAL-04 | Phase 8 | Pending |
 | EVAL-05 | Phase 8 | Pending |
