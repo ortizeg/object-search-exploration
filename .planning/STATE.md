@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 1
-current_phase_name: Foundation
+current_phase: 8
+current_phase_name: Evaluation & docs
 status: executing
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-07-25T10:30:00.000Z"
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-07-25T11:20:00.000Z"
 last_activity: 2026-07-25
-last_activity_desc: "Executed 07-02: propose-retrieve (embed_regions + search), Phase 7 complete"
+last_activity_desc: "Executed 08-02: committed charts, README, method-doc drift guard, robustness backlog, Milestone 2 spec, LIMITATIONS. Phase 8 complete — final plan of the project. PR #16 open, CI green."
 progress:
   total_phases: 8
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 16
 deviation_branch_protection: INFRA-07 partial — branch protection unavailable on a free private repo (403 'Upgrade to GitHub Pro or make this repository public'). Skipped by decision; CI on PRs works, server-side enforcement does not. Not a blocker for any other work.
 ---
 
@@ -231,6 +231,6 @@ corrections are load-bearing:
 
 ## Session
 
-**Last session:** 2026-07-25T10:30:00.000Z
-**Stopped at:** Completed 07-02-PLAN.md — Phase 7 complete (METHOD-06); PR #14 open
+**Last session:** 2026-07-25T11:20:00.000Z
+**Stopped at:** Completed 08-02-PLAN.md — Phase 8 complete (EVAL-06, DOC-03/04/05/06); PR #16 open, CI green. Final plan of the project.
 **Resume file:** None

@@ -148,7 +148,7 @@ which kind of image, and at what latency.
 - [x] **EVAL-05**: Paired comparison mode — the **same** exemplar box run through all four
       methods, so ratings are directly comparable rather than confounded by different boxes
 
-- [ ] **EVAL-06**: Benchmark results rendered as committed charts and tables
+- [x] **EVAL-06**: Benchmark results rendered as committed charts and tables
 - [x] **EVAL-07**: **Store raw judgments only; never store a derived metric as a column.**
       Precision, recall, F1, and expected-count are computed in queries/views from
       `retrieved`, per-match verdicts, and `missed_count`
@@ -212,12 +212,12 @@ which kind of image, and at what latency.
       exemplar box per demo image, run through each method, results rendered as images under
       `docs/samples/<method>/`, regenerable by one CLI command
 
-- [ ] **DOC-03**: README showing the sample runs for all four methods side by side
-- [ ] **DOC-04**: Per-method documentation page — algorithm, pre/post-processing, config
+- [x] **DOC-03**: README showing the sample runs for all four methods side by side
+- [x] **DOC-04**: Per-method documentation page — algorithm, pre/post-processing, config
       reference, known failure modes, robustness backlog
 
-- [ ] **DOC-05**: `docs/ROBUSTNESS-BACKLOG.md` aggregating every method's backlog
-- [ ] **DOC-06**: `docs/MILESTONE-2.md` specifying the marker-conditioned region proposal
+- [x] **DOC-05**: `docs/ROBUSTNESS-BACKLOG.md` aggregating every method's backlog
+- [x] **DOC-06**: `docs/MILESTONE-2.md` specifying the marker-conditioned region proposal
       feature and which Milestone 1 components it reuses
 
 ## v2 Requirements
@@ -336,12 +336,12 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-02 | Phase 8 | Complete (plan 08-01) |
 | EVAL-04 | Phase 8 | Complete (plan 08-01) |
 | EVAL-05 | Phase 8 | Complete (plan 08-01) |
-| EVAL-06 | Phase 8 | Pending (plan 08-02: charts) |
+| EVAL-06 | Phase 8 | Done (08-02: charts + results.md) |
 | EVAL-15 | Phase 8 | Complete (plan 08-01) |
-| DOC-03 | Phase 8 | Pending |
-| DOC-04 | Phase 8 | Pending |
-| DOC-05 | Phase 8 | Pending |
-| DOC-06 | Phase 8 | Pending |
+| DOC-03 | Phase 8 | Done (08-02) |
+| DOC-04 | Phase 8 | Done (08-02) |
+| DOC-05 | Phase 8 | Done (08-02) |
+| DOC-06 | Phase 8 | Done (08-02) |
 
 **Coverage:**
 
