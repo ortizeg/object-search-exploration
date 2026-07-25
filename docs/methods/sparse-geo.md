@@ -216,3 +216,54 @@ Deferred deliberately (mirrored from the module docstring); none is built in thi
   which would unlock `single-4dof` voting for a learned backend.
 - **LoFTR / RoMa dense matching** with correspondence-field clustering for low-texture objects
   (a research spike — the ONNX export is awkward).
+
+## Pseudocode
+
+**Method ② sparse-geo** — second of the four *implemented* methods (implementation numbering
+①–④: `ncc`, `sparse-geo`, `dino-dense`, `propose-retrieve`; source-research numbering 1, 2, 3, 5,
+with research Methods 4 and 6 deferred). The steps below mirror the `# 1.` … `# 9.` comments in
+`search()` (METHOD-11); read `src/object_search/search/sparse_geo.py` for the ground truth.
+
+```
+1. gray <- BGR2GRAY(scene) once; build backend (SIFT default)  # backend fixes metric + frame?
+
+2. detect+describe on the crop and on the FULL scene with the same backend
+   shift crop keypoints by the crop origin (x, y) into scene pixels
+
+3. if #crop_keypoints < min_exemplar_keypoints:      # low-keypoint guard (METHOD-04c)
+       return EMPTY with a diagnostic note
+
+4. for each crop keypoint: take its top-k scene neighbours UNCONDITIONALLY  # Lowe ratio DISABLED
+       optionally apply only the k-vs-(k+1) ratio
+   record k_ceiling_hit when the k-ceiling likely truncated instances
+
+5. cast each correspondence -> a 4-DoF pose vote (cx, cy, log_scale, theta) under voting_mode:
+       single-4dof       -> uses the keypoint frame; RAISES on a frameless (SuperPoint) backend
+       translation-2dof  -> votes in (dx, dy)
+       pairwise-4dof     -> similarity per correspondence pair, sampling up to pairwise_cap
+
+6. decompose into instance hypotheses:
+       hough: soft-bin votes (2 bins/dim = 16 in 4-DoF, circular theta, 30 deg / factor-2 /
+              0.25*max-crop-dim scale-dependent location bins) in a dict keyed by bin tuple;
+              enumerate peaks with weight >= min_votes, de-duped against the 3^4 neighbourhood
+       (or sequential-ransac: fit dominant model, remove inliers, repeat)
+
+7. for each peak: NumPy RANSAC seeded by np.random.default_rng(seed)  # NOT cv2.setRNGSeed
+       2-point minimal samples (proper + reflected candidates), ransac_iters iterations
+       reject on mirror (det < 0) or implausible scale (< min_scale or > max_scale)
+       accept at >= min_inliers inliers
+
+8. transform the exemplar box corners by each fitted model -> axis-aligned scene box
+   label the best-overlapping instance is_exemplar=True; keep sub-threshold peaks as candidates
+
+9. return every verified instance as a Match (with its fitted 2x3 transform)  # METHOD-12: no single-best
+```
+
+## References
+
+- Lowe, "Distinctive Image Features from Scale-Invariant Keypoints", IJCV 2004 (§7.3 Hough clustering): https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf
+- DeTone et al., "SuperPoint: Self-Supervised Interest Point Detection and Description", CVPRW 2018: https://arxiv.org/abs/1712.07629
+- Fischler & Bolles, "Random Sample Consensus (RANSAC)", 1981: https://doi.org/10.1145/358669.358692
+- Ballard, "Generalizing the Hough Transform to Detect Arbitrary Shapes", 1981: https://doi.org/10.1016/0031-3203(81)90009-1
+- Rublee et al., "ORB: an efficient alternative to SIFT or SURF", ICCV 2011: https://doi.org/10.1109/ICCV.2011.6126544
+- LightGlue-ONNX (standalone SuperPoint export used here): https://github.com/fabio-sim/LightGlue-ONNX
