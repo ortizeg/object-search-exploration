@@ -226,16 +226,17 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 
 ### Milestone 2 — Marker-Conditioned Region Proposal
 
-- **M2-01**: Find every instance of a marker (arrow, dot, caret, highlighter blob) by reusing
-  any Milestone 1 method wholesale
+- **M2-01** ✓ (Phase 9, 09-01): Find every instance of a marker (arrow, dot, caret, highlighter
+  blob) by reusing any Milestone 1 method wholesale
 
-- **M2-02**: Estimate each marker's reference point and orientation — arrow tip and direction,
-  or centroid with no direction for a symmetric marker; orientation from PCA on the marker
-  mask or recovered from the similarity/affine transform Method 2 already fits per instance
+- **M2-02** ✓ (Phase 9, 09-01): Estimate each marker's reference point and orientation — arrow tip
+  and direction, or centroid with no direction for a symmetric marker; orientation from PCA on the
+  marker mask or recovered from the similarity/affine transform Method 2 already fits per instance
 
-- **M2-03**: Propose objects near each marker by reusing Method 5's proposal stage directly
-- **M2-04**: Score and pick the best proposal by distance from the reference point, alignment
-  with the marker's direction, objectness, and a size prior
+- **M2-03** ✓ (Phase 9, 09-01): Propose objects near each marker by reusing Method 5's proposal
+  stage directly
+- **M2-04** ✓ (Phase 9, 09-01): Score and pick the best proposal by distance from the reference
+  point, alignment with the marker's direction, objectness, and a size prior
 
 - **M2-05**: Second UI mode, selected by the exploration-mode selector above the method
   selector
@@ -342,6 +343,10 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | DOC-04 | Phase 8 | Done (08-02) |
 | DOC-05 | Phase 8 | Done (08-02) |
 | DOC-06 | Phase 8 | Done (08-02) |
+| M2-01 | Phase 9 | Complete (plan 09-01) |
+| M2-02 | Phase 9 | Complete (plan 09-01) |
+| M2-03 | Phase 9 | Complete (plan 09-01) |
+| M2-04 | Phase 9 | Complete (plan 09-01) |
 
 **Coverage:**
 
