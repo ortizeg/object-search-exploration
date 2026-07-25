@@ -104,5 +104,7 @@ samples = "python -m object_search.cli render-samples"
 # model-free chipset subset (ncc + classical sparse-geo) with no ONNX weights.
 bench = "python -m object_search.eval.benchmark"
 bench-ci = "python -m object_search.eval.benchmark ci=true"
+# Render the committed, byte-identical charts + results.md from the last `bench` run (EVAL-06).
+bench-charts = "python -m object_search.eval.charts"
 synth = "python -m object_search.cli synth"
 chipset = "python -m object_search.cli chipset"
