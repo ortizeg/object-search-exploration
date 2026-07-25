@@ -1,0 +1,85 @@
+{
+  "achieved_n": 10,
+  "boxes": [
+    {
+      "h": 86,
+      "w": 86,
+      "x": 886,
+      "y": 32
+    },
+    {
+      "h": 113,
+      "w": 113,
+      "x": 399,
+      "y": 33
+    },
+    {
+      "h": 112,
+      "w": 112,
+      "x": 701,
+      "y": 115
+    },
+    {
+      "h": 75,
+      "w": 75,
+      "x": 158,
+      "y": 130
+    },
+    {
+      "h": 103,
+      "w": 103,
+      "x": 818,
+      "y": 361
+    },
+    {
+      "h": 92,
+      "w": 92,
+      "x": 355,
+      "y": 365
+    },
+    {
+      "h": 100,
+      "w": 100,
+      "x": 355,
+      "y": 543
+    },
+    {
+      "h": 111,
+      "w": 111,
+      "x": 732,
+      "y": 566
+    },
+    {
+      "h": 103,
+      "w": 103,
+      "x": 163,
+      "y": 622
+    },
+    {
+      "h": 73,
+      "w": 73,
+      "x": 918,
+      "y": 631
+    }
+  ],
+  "emblem": {
+    "seed": 1681507850,
+    "size": 84
+  },
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "textured-cluttered-09.png",
+  "regime": "cluttered",
+  "requested_n": 10,
+  "seed": 2047535826,
+  "slice_metadata": {
+    "clutter_level": 1.0,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.1638479136210702,
+    "instance_scale_min": 0.8237965282278221,
+    "rotation_max_deg": 17.871565456657255,
+    "rotation_min_deg": -14.277192553748943,
+    "true_instance_count": 10
+  },
+  "width": 1024
+}

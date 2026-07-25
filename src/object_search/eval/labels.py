@@ -44,6 +44,7 @@ _GT_ROOTS: tuple[Path, ...] = (
     Path("assets") / "demo" / "chipset",
     Path("assets") / "demo" / "synthetic",
     Path("assets") / "demo" / "basketball",
+    Path("assets") / "demo" / "textured",
 )
 
 
@@ -106,6 +107,8 @@ def _source_for(root_name: str) -> str:
         return "chipset"
     if root_name == "synthetic":
         return "synthetic"
+    if root_name == "textured":
+        return "textured"
     return "hand"
 
 
@@ -161,6 +164,19 @@ def chipset_image_ids() -> tuple[str, ...]:
     if not chipset_dir.is_dir():
         return ()
     return tuple(sorted(path.name[: -len(".gt.json")] for path in chipset_dir.glob("*.gt.json")))
+
+
+def textured_image_ids() -> tuple[str, ...]:
+    """Every textured-regime image id with a committed sidecar (EVAL-20), sorted by id.
+
+    Derived from the files on disk like :func:`chipset_image_ids`, so regenerating the set with a
+    different size stays correct. The id prefix (``textured-plain-``, ``textured-varied-``,
+    ``textured-cluttered-``) names the regime, which the report groups by.
+    """
+    textured_dir = repo_root() / "assets" / "demo" / "textured"
+    if not textured_dir.is_dir():
+        return ()
+    return tuple(sorted(path.name[: -len(".gt.json")] for path in textured_dir.glob("*.gt.json")))
 
 
 def scene_path(image_id: str) -> Path | None:

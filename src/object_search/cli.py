@@ -138,6 +138,25 @@ def chipset(
     typer.echo(f"wrote {len(written)} chip image(s) to {out}")
 
 
+_TEXTURED_DIR = repo_root() / "assets" / "demo" / "textured"
+
+
+@app.command("textured")
+def textured(
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")] = _TEXTURED_DIR,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite existing files.")] = False,
+) -> None:
+    """Generate the textured benchmark regimes (EVAL-20) with exact ground truth.
+
+    Three regimes -- plain (keypoint-favourable), varied (scale/rotation/brightness), and
+    cluttered (noise + distractors) -- complementing the NCC-favourable chipset.
+    """
+    from object_search.synthetic.textured import write_textured
+
+    written = write_textured(out, force=force)
+    typer.echo(f"wrote {len(written)} textured image(s) to {out}")
+
+
 _SAMPLES_DIR = repo_root() / "docs" / "samples"
 
 
