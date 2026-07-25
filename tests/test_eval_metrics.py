@@ -13,6 +13,11 @@ import pytest
 from pydantic import ValidationError
 
 from object_search.eval.labels import GroundTruth, load_ground_truth
+from object_search.eval.metrics import (
+    average_precision,
+    match_predictions,
+    precision_recall_f1,
+)
 from object_search.schemas.geometry import BBox
 
 # --------------------------------------------------------------------------- labels (Task 1)
@@ -109,3 +114,110 @@ def test_groundtruth_is_frozen() -> None:
     )
     with pytest.raises(ValidationError):
         gt.image_id = "y"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- matching (Task 2)
+
+
+def test_match_predictions_perfect() -> None:
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    pred = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    assert match_predictions(pred, gt) == (2, 0, 0)
+
+
+def test_match_predictions_duplicate_is_tp_plus_fp() -> None:
+    # EVAL-16: two boxes on one instance = 1 TP + 1 FP, never 2 TP.
+    gt = [BBox(x=0, y=0, w=10, h=10)]
+    pred = [BBox(x=0, y=0, w=10, h=10), BBox(x=1, y=0, w=10, h=10)]
+    tp, fp, fn = match_predictions(pred, gt)
+    assert (tp, fp, fn) == (1, 1, 0)
+
+
+def test_match_predictions_miss_is_fn() -> None:
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    pred = [BBox(x=0, y=0, w=10, h=10)]
+    assert match_predictions(pred, gt) == (1, 0, 1)
+
+
+def test_match_predictions_below_threshold_is_fp() -> None:
+    gt = [BBox(x=0, y=0, w=10, h=10)]
+    # IoU well under 0.5 -- a near miss is a false positive plus a false negative.
+    pred = [BBox(x=8, y=0, w=10, h=10)]
+    tp, fp, fn = match_predictions(pred, gt)
+    assert (tp, fp, fn) == (0, 1, 1)
+
+
+def test_match_predictions_higher_iou_gt_wins() -> None:
+    # One prediction near two GT: it must claim the better-overlapping one.
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=3, y=0, w=10, h=10)]
+    pred = [BBox(x=3, y=0, w=10, h=10)]
+    tp, fp, fn = match_predictions(pred, gt)
+    assert (tp, fp, fn) == (1, 0, 1)
+
+
+# --------------------------------------------------------------------------- p/r/f1 (Task 2)
+
+
+def test_precision_recall_f1_known() -> None:
+    p, r, f1 = precision_recall_f1(tp=3, fp=1, fn=1)
+    assert p == pytest.approx(0.75)
+    assert r == pytest.approx(0.75)
+    assert f1 == pytest.approx(0.75)
+
+
+def test_precision_none_on_abstention() -> None:
+    # tp + fp == 0: nothing returned. Precision is UNDEFINED (None), never 0.
+    p, r, f1 = precision_recall_f1(tp=0, fp=0, fn=4)
+    assert p is None
+    assert r == pytest.approx(0.0)
+    assert f1 is None
+
+
+def test_recall_none_when_nothing_to_find() -> None:
+    p, r, f1 = precision_recall_f1(tp=0, fp=3, fn=0)
+    assert p == pytest.approx(0.0)
+    assert r is None
+    assert f1 is None
+
+
+def test_f1_none_when_p_and_r_both_zero() -> None:
+    p, r, f1 = precision_recall_f1(tp=0, fp=2, fn=2)
+    assert p == pytest.approx(0.0)
+    assert r == pytest.approx(0.0)
+    assert f1 is None
+
+
+# --------------------------------------------------------------------------- AP (Task 2)
+
+
+def test_average_precision_hand_computed_all_point() -> None:
+    # Two GT. Ranked candidate log: TP(g1), FP, TP(g2).
+    #   after #1: p=1.0,   r=0.5
+    #   after #2: p=0.5,   r=0.5
+    #   after #3: p=2/3,   r=1.0
+    # Envelope (monotone from right): [1.0, 2/3, 2/3].
+    # AP = (0.5-0.0)*1.0 + (1.0-0.5)*(2/3) = 0.5 + 1/3 = 5/6.
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    candidates = [
+        (BBox(x=0, y=0, w=10, h=10), 0.9),
+        (BBox(x=200, y=200, w=10, h=10), 0.8),
+        (BBox(x=50, y=50, w=10, h=10), 0.7),
+    ]
+    ap = average_precision(candidates, gt)
+    assert ap == pytest.approx(5.0 / 6.0)
+
+
+def test_average_precision_perfect_is_one() -> None:
+    gt = [BBox(x=0, y=0, w=10, h=10)]
+    candidates = [(BBox(x=0, y=0, w=10, h=10), 0.9)]
+    assert average_precision(candidates, gt) == pytest.approx(1.0)
+
+
+def test_average_precision_empty_candidate_log_is_zero() -> None:
+    gt = [BBox(x=0, y=0, w=10, h=10)]
+    assert average_precision([], gt) == pytest.approx(0.0)
+
+
+def test_average_precision_raises_without_ground_truth() -> None:
+    with pytest.raises(ValueError, match="zero ground-truth"):
+        average_precision([(BBox(x=0, y=0, w=10, h=10), 0.9)], [])
