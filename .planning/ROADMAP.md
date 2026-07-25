@@ -289,11 +289,14 @@ embedding stages — because Milestone 2 depends on calling exactly those two st
   4. The proposal set renders in the UI diagnostics overlay.
   5. The proposal backend is switchable between FastSAM and MobileSAM by config alone, and
      any licence constraint on the chosen weights is recorded in `LICENSES.md`.
-**Plans**: 2 plans
+**Plans**: 1/2 plans executed
 
 Plans:
 
-- [ ] 07-01: FastSAM/MobileSAM ONNX proposal stage (gated through `library-review`) as an
+- [x] 07-01-PLAN.md
+- [ ] 07-02-PLAN.md
+
+- [x] 07-01: FastSAM/MobileSAM ONNX proposal stage (gated through `library-review`) as an
       independently callable unit, with documented output decoding and `fetch-models`
       integration
 
@@ -356,5 +359,5 @@ the shared DINOv2 inferencer. Valid parallel schedule: 5 ∥ 6, then 7, then 8.
 | 4. Web UI | 2/2 | Complete | 2026-07-25 |
 | 5. Method 2 | 0/2 | Not started | - |
 | 6. Method 3 | 0/2 | Not started | - |
-| 7. Method 5 | 0/2 | Not started | - |
+| 7. Method 5 | 1/2 | In Progress|  |
 | 8. Evaluation & docs | 0/2 | Not started | - |
