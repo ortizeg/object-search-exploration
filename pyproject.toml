@@ -52,6 +52,10 @@ ban-relative-imports = "all"
 [tool.ruff.lint.per-file-ignores]
 # assert is the point of a test; return/arg annotations on test functions are noise.
 "tests/**/*.py" = ["S101", "ANN201", "ANN001"]
+# scripts/ are one-off utilities (report/asset generation), not library code, and are outside
+# `mypy src/` and the shipped package. They print to stdout, embed a display-oriented HTML/CSS
+# template (long lines), and use typographic glyphs (numbered circles, en-dashes) on purpose.
+"scripts/**/*.py" = ["T201", "ANN", "E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["object_search"]

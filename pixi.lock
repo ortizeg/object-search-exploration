@@ -5820,7 +5820,7 @@ packages:
 - pypi: ./
   name: object-search
   version: 0.1.0
-  sha256: af4fc5e83c1f774f8f0be1a7893844c9c7043d5030c0cf76a46d18a50fac9fd8
+  sha256: 46e2f886fb8ade4bafbb85065b81f81aa3e52b6704193743fc34a15e4b7810f0
   requires_python: '>=3.12'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/ocl-icd-2.3.4-hb03c661_1.conda
   sha256: 75f3bf733523a338f73d6c276c4a26634877cd970edb558f2769d9fa52b100a9
