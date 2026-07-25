@@ -449,13 +449,23 @@ class FastSAMInferencer(ONNXInferencer[list[Proposal]]):
     def propose(
         self,
         image: npt.NDArray[np.uint8],
-        config: FastSAMConfig,
+        config: BaseModel,
     ) -> list[Proposal]:
         """Run FastSAM on one BGR scene and return proposals decoded with ``config``.
 
-        This is the :class:`~object_search.search.proposals.ProposalBackend` entry point. It is the
-        independently callable proposal unit -- it knows nothing about exemplars or retrieval.
+        This is the :class:`~object_search.search.proposals.ProposalBackend` entry point, so
+        ``config`` is typed as :class:`~pydantic.BaseModel` (the backend-agnostic contract) and
+        narrowed to :class:`FastSAMConfig` here -- the same idiom the registered ``search``
+        functions use. It is the independently callable proposal unit: it knows nothing about
+        exemplars or retrieval.
+
+        Raises:
+            TypeError: If ``config`` is not a :class:`FastSAMConfig`.
         """
+        if not isinstance(config, FastSAMConfig):
+            raise TypeError(
+                f"FastSAMInferencer.propose expects a FastSAMConfig, got {type(config).__name__}"
+            )
         orig_h, orig_w = int(image.shape[0]), int(image.shape[1])
         info = self.preprocess(image)
         outputs = self._session.run(None, {self._input_name: info.tensor})
