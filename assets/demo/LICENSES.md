@@ -106,7 +106,7 @@ See `.planning/research/MODELS.md` for the full runtime-verified analysis.
 
 | Model | Registry key | Licence | Constraint |
 |-------|--------------|---------|------------|
-| DINOv2-small (ONNX) | `dinov2-small` | **Apache-2.0** | Clean. Inherited from `facebook/dinov2-small`; the `onnx-community` derivative declares no licence field, so the inheritance is recorded explicitly. |
+| DINOv2-small (ONNX) | `dinov2-small` | **Apache-2.0** | Clean. Inherited from `facebook/dinov2-small`; the `onnx-community` derivative declares no licence field, so the inheritance is recorded explicitly. Verdict **Adopt** recorded in `docs/library-reviews/dinov2.md`. |
 | SuperPoint (ONNX) | `superpoint` | **MagicLeap non-commercial research-only** | The weights are non-commercial; the derivatives clause covers the ONNX file, so it must **never be redistributed**. Satisfied at zero cost because weights are gitignored (INFRA-11). |
 | FastSAM-s (ONNX) | `fastsam-s` | **AGPL-3.0** | The exported `.onnx` embeds the AGPL licence string. Private local use triggers nothing; **publishing this repo or network-exposing the API fires AGPL §13**. Revisit before either. |
 

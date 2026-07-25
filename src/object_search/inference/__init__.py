@@ -6,6 +6,7 @@ Import the pieces from here::
 """
 
 from object_search.inference.base import BaseInferencer, PostProcessor
+from object_search.inference.dinov2 import DINOv2Inferencer
 from object_search.inference.onnx_inferencer import (
     ONNXContractError,
     ONNXInferencer,
@@ -15,6 +16,7 @@ from object_search.inference.onnx_inferencer import (
 
 __all__ = [
     "BaseInferencer",
+    "DINOv2Inferencer",
     "ONNXContractError",
     "ONNXInferencer",
     "ONNXInputSpec",

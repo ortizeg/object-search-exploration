@@ -58,7 +58,10 @@ MODEL_REGISTRY: Mapping[str, ModelSpec] = {
         repo_id="onnx-community/dinov2-small-ONNX",
         revision="08c606e3123472a388efa59181b677d428f69bbd",
         filename="onnx/model.onnx",
-        sha256=None,  # filled on first fetch, then a hard gate (EVAL-09 model hash)
+        # Pinned at the revision above; sha256 recorded from the first verified fetch so it is
+        # now a hard integrity gate (EVAL-09 model hash). Deterministic because the revision is
+        # pinned -- a byte-different download refuses to install.
+        sha256="6266c3cd72db6953cecdcbfeab9422a9f783d96f1a4e296ba70ffbac43b54a18",
         license="Apache-2.0",
         license_note=(
             "Apache-2.0, inherited from facebook/dinov2-small; the onnx-community derivative "
