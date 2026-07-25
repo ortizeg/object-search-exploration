@@ -5,7 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from starlette.testclient import TestClient
 
+from object_search.api.app import create_app
 from object_search.log import setup_logging
 
 
@@ -36,3 +38,20 @@ def tmp_models_dir(tmp_path: Path) -> Path:
     models = tmp_path / "models"
     models.mkdir()
     return models
+
+
+@pytest.fixture
+def api_client(tmp_path: Path) -> Iterator[TestClient]:
+    """A ``TestClient`` over the real app with a fresh temp store and uploads directory.
+
+    Entering the ``TestClient`` context runs the real ASGI lifespan, so the store is migrated
+    and the (empty, in Phase 3) session registry is built exactly as in production. Each test
+    gets its own database, so run ids and stats never leak between tests.
+    """
+    app = create_app(
+        db_path=tmp_path / "runs.db",
+        uploads_dir=tmp_path / "uploads",
+        log_level="WARNING",
+    )
+    with TestClient(app) as client:
+        yield client

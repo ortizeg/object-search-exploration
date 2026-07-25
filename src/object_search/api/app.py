@@ -26,6 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from object_search import search as _search  # noqa: F401
 from object_search.api.errors import install_error_handlers
 from object_search.api.lifespan import lifespan
+from object_search.api.routes_images import router as images_router
+from object_search.api.routes_methods import router as methods_router
 from object_search.provenance import repo_root
 
 
@@ -71,6 +73,9 @@ def create_app(
     )
 
     install_error_handlers(app)
+
+    app.include_router(methods_router)
+    app.include_router(images_router)
 
     return app
 
