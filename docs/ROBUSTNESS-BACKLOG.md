@@ -63,6 +63,27 @@ docstring (mirrored verbatim so the two cannot drift).
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
 - **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
 
+## `marker-conditioned` (Exploration 2 — marker → pointed-at object, Milestone 2)
+
+None of the following is built in Milestone 2; all are captured here and in the
+`marker_conditioned.py` docstring (mirrored so the two cannot drift).
+
+- **A learned marker / keypoint tip detector**, replacing the arrowhead-mass heuristic, so the tip is
+  found directly rather than inferred from foreground-mass asymmetry — the heuristic is 180°-ambiguous
+  on short or near-symmetric arrowheads and abstains there rather than guess.
+- **Per-proposal appearance matching** via the already-shipped `embed_regions()`, so the chosen
+  proposal must also *look* like the pointed-at object, not merely sit near the pointing ray.
+- **Multi-marker disambiguation when arrows cross** — a global assignment (each proposal to at most
+  one marker) instead of scoring every proposal against every marker independently, which lets two
+  close markers double-claim one object.
+- **A dedicated marker detector** trained on marker gestures, instead of reusing a Milestone 1 method
+  whose invariances were designed for whole objects — the demo shows the cost of the mismatch:
+  `ncc` is not rotation-invariant, and classical `sparse-geo` abstains on the low-texture synthetic
+  arrows, so no shipped finder resolves all randomly-rotated arrows.
+- **Ray-to-box distance and a per-marker size prior** in the scorer, replacing proposal-centre
+  distance and a single global `size_prior_frac`, so an elongated object off to one side of the
+  pointing ray is not unfairly penalised and over-segmented proposals are handled better.
+
 ## Cross-cutting — applies to every method
 
 These are not any single method's backlog; they are structural robustness work and deferred

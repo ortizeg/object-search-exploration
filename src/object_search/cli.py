@@ -25,6 +25,7 @@ from object_search.provenance import repo_root
 # default so no function call happens in a signature (flake8-bugbear B008).
 _SYNTH_DIR = repo_root() / "assets" / "demo" / "synthetic"
 _CHIPSET_DIR = repo_root() / "assets" / "demo" / "chipset"
+_MARKERS_DIR = repo_root() / "assets" / "demo" / "markers"
 
 app = typer.Typer(
     name="object-search",
@@ -93,6 +94,38 @@ def synth(
     typer.echo(f"wrote {len(names)} synthetic image(s) to {out}")
 
 
+@app.command("markers")
+def markers(
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")] = _MARKERS_DIR,
+    spec: Annotated[
+        str | None, typer.Option("--spec", help="One MARKER_DEMO_SPECS name, or all.")
+    ] = None,
+) -> None:
+    """Write the synthetic marker demo set (Milestone 2) with exact per-marker ground truth.
+
+    Each ``<name>.png`` gets a ``<name>.markers.json`` sidecar carrying every marker's exact
+    tip, direction, centroid, box, and (when present) the pointed-at target box -- the oracles the
+    orientation estimator is tested against. Deterministic from each spec's seed, so the images are
+    committed and fully regenerable.
+    """
+    from object_search.synthetic.generator import (
+        MARKER_DEMO_SPECS,
+        save_marker_image,
+        synthesize_markers,
+    )
+
+    if spec is not None and spec not in MARKER_DEMO_SPECS:
+        known = ", ".join(sorted(MARKER_DEMO_SPECS))
+        typer.echo(f"unknown marker spec {spec!r}; known: {known}", err=True)
+        raise typer.Exit(code=1)
+
+    names = [spec] if spec is not None else sorted(MARKER_DEMO_SPECS)
+    for name in names:
+        image = synthesize_markers(MARKER_DEMO_SPECS[name])
+        save_marker_image(image, out / f"{name}.png")
+    typer.echo(f"wrote {len(names)} marker image(s) to {out}")
+
+
 @app.command("chipset")
 def chipset(
     out: Annotated[Path, typer.Option("--out", help="Output directory.")] = _CHIPSET_DIR,
@@ -129,7 +162,23 @@ def render_samples(
 
     names = [method] if method is not None else None
     paths = _render(names, out_root=out)
-    typer.echo(f"rendered {len(paths)} sample artifact(s) under {out}")
+    typer.echo(f"rendered {len(paths)} method sample artifact(s) under {out}")
+
+    # The exploration analogue of the method loop: render the marker-conditioned gallery too.
+    # The proposal stage needs the FastSAM weight; pin the CPU provider so the committed panels
+    # are reproducible across machines, and skip gracefully (like other model-gated paths) when
+    # the weight is absent, so `pixi run samples` still works with no models fetched.
+    if method is None:
+        from object_search.samples import render_marker_samples
+        from object_search.search.proposals import default_backend
+
+        try:
+            backend = default_backend(providers=["CPUExecutionProvider"])
+        except FileNotFoundError:
+            logger.info("FastSAM weight absent; skipping the marker exploration gallery")
+        else:
+            marker_paths = render_marker_samples(backend=backend, out_root=out)
+            typer.echo(f"rendered {len(marker_paths)} marker sample artifact(s) under {out}")
 
 
 @app.command("benchmark")

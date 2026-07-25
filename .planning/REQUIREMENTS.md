@@ -238,8 +238,10 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 - **M2-04** ✓ (Phase 9, 09-01): Score and pick the best proposal by distance from the reference
   point, alignment with the marker's direction, objectness, and a size prior
 
-- **M2-05**: Second UI mode, selected by the exploration-mode selector above the method
-  selector
+- **M2-05** ✓ (Phase 9, 09-02): Second UI mode, selected by the exploration-mode selector above
+  the method selector — populated from `GET /explorations`, config form rebuilt from the
+  exploration's own JSON schema, marker→proposal overlay, committed byte-identical sample runs,
+  and docs flipped to built
 
 ### Deferred Methods
 
@@ -347,6 +349,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | M2-02 | Phase 9 | Complete (plan 09-01) |
 | M2-03 | Phase 9 | Complete (plan 09-01) |
 | M2-04 | Phase 9 | Complete (plan 09-01) |
+| M2-05 | Phase 9 | Complete (plan 09-02) |
 
 **Coverage:**
 

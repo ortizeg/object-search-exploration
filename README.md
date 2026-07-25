@@ -11,10 +11,13 @@ This is an **exploration harness, not a product**. Its value is that each method
 readable, editable, and measurable by an ML practitioner, and that adding a fifth method or
 a whole new exploration is a small, obvious diff.
 
-> **Status: Milestone 1 complete.** All four search methods, the canvas UI, the FastAPI
-> backend, the SQLite rating/stats layer, and the evaluation harness are implemented and
-> tested. The benchmark below is real, run over the committed demo set. Where a method is
-> weak, the numbers say so — see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+> **Status: Milestone 2 complete.** Milestone 1 — all four search methods, the canvas UI, the
+> FastAPI backend, the SQLite rating/stats layer, and the evaluation harness — is implemented and
+> tested. **Milestone 2 adds a second *exploration*** (`marker-conditioned`): draw a marker, find
+> every instance, and resolve the object each one points at. Explorations are now a registry-level
+> concept with two members, hosted from one UI by a schema-driven mode selector. The benchmark
+> below is real, run over the committed demo set; where a method is weak the numbers say so — see
+> [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
 ## Quickstart
 
@@ -62,6 +65,25 @@ The plain lattice scene (twelve identical instances) run through each method:
 Each method's gallery also covers `cluttered-distractors`, `scatter-scaled`, and the
 solid-rectangle `lattice-touching` scene, where texture-free methods honestly abstain rather
 than guess. See each method's `docs/samples/<method>/index.md` for the per-scene outcome table.
+
+## Milestone 2 — the `marker-conditioned` exploration
+
+Explorations are a registry-level concept, mirroring methods — adding one is a new file plus an
+import, exactly like a method. There are now **two members**: the Milestone 1 same-image search and
+`marker-conditioned`. Draw a box around one marker (an arrow, a dot); the exploration finds every
+instance of that marker, recovers where each points, and returns the best object-region proposal it
+points at. It reuses a Milestone 1 method to find markers and the Method 5 `propose()` stage for the
+objects, adding only the orientation estimator and the scoring function. Pick it from the
+**Exploration** selector above the method selector; the config form is rebuilt from the exploration's
+own JSON schema.
+
+Full write-up: [`docs/explorations/marker-conditioned.md`](docs/explorations/marker-conditioned.md).
+Committed, byte-identical sample runs under
+[`docs/samples/marker-conditioned/`](docs/samples/marker-conditioned/):
+
+| `arrows-with-targets` — the marker's arrow and the chosen proposal on the target it points at |
+| --- |
+| ![marker-conditioned](docs/samples/marker-conditioned/arrows-with-targets.png) |
 
 ## Benchmark
 
