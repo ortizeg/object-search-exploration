@@ -31,7 +31,7 @@ from object_search.provenance import repo_root
 from object_search.schemas.records import SliceMetadata
 
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
-_DEMO_SUBDIRS = ("synthetic", "chipset", "basketball")
+_DEMO_SUBDIRS = ("synthetic", "chipset", "basketball", "markers")
 _UPLOADS_PREFIX = "uploads/"
 
 

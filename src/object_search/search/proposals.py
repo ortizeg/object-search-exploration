@@ -63,7 +63,12 @@ def default_backend(
         model_path: Path to ``fastsam_s.onnx``. ``None`` uses the gitignored registry location
             (``models/`` + the ``fastsam-s`` spec's ``dest``), which must have been produced by
             ``pixi run -e export export-fastsam``.
-        providers: ONNX Runtime execution providers; ``None`` = the runtime default.
+        providers: ONNX Runtime execution providers. ``None`` pins ``CPUExecutionProvider``
+            -- NOT the runtime default. On macOS the runtime default puts CoreML first, whose
+            kernels are non-deterministic and, empirically, fail to build an execution plan for
+            some input shapes ("Error in building plan"). Reproducibility is a hard project
+            constraint (same input => identical results), so the proposal backend pins CPU
+            exactly as ``dino_dense`` does. Pass an explicit list to override.
 
     Raises:
         FileNotFoundError: If the weight is absent -- surfaced here rather than swallowed, so the
@@ -74,7 +79,8 @@ def default_backend(
         if model_path is not None
         else (models.models_dir() / models.MODEL_REGISTRY["fastsam-s"].dest)
     )
-    return FastSAMInferencer(path, providers=providers)
+    resolved_providers = providers if providers is not None else ["CPUExecutionProvider"]
+    return FastSAMInferencer(path, providers=resolved_providers)
 
 
 def propose(
