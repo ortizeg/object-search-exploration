@@ -45,24 +45,24 @@ which kind of image, and at what latency.
       pyramid for scale search (per-peak level index so output box size is correct), and an
       optional rotated-template bank (default angle set `[0]`)
 
-- [ ] **METHOD-02**: Method 2 `sparse-geo` classical backend — OpenCV SIFT / AKAZE / ORB,
+- [x] **METHOD-02**: Method 2 `sparse-geo` classical backend — OpenCV SIFT / AKAZE / ORB,
       no weights, no ONNX
 
 - [ ] **METHOD-03**: Method 2 learned backend — SuperPoint via ONNX Runtime, behind the same
       backend interface as the classical detectors
 
-- [ ] **METHOD-04**: Method 2 many-to-many top-k kNN matching with the standard Lowe ratio
+- [x] **METHOD-04**: Method 2 many-to-many top-k kNN matching with the standard Lowe ratio
       test **disabled** (optional k+1 ratio test instead), generalized Hough pose voting with
       soft binning, and per-peak RANSAC with degeneracy rejection
 
-- [ ] **METHOD-04a**: Method 2 voting modes `single-4dof` / `translation-2dof` /
+- [x] **METHOD-04a**: Method 2 voting modes `single-4dof` / `translation-2dof` /
       `pairwise-4dof`, selectable by config, because SuperPoint keypoints carry no scale or
       orientation and single-correspondence 4-DoF voting is invalid for that backend
 
 - [ ] **METHOD-04b**: Method 2 sequential-RANSAC decomposition available as a pluggable
       alternative to Hough voting, behind the same interface
 
-- [ ] **METHOD-04c**: Method 2 emits an explicit low-keypoint diagnostic rather than an empty
+- [x] **METHOD-04c**: Method 2 emits an explicit low-keypoint diagnostic rather than an empty
       result when the exemplar lacks texture; the exemplar self-match is labelled as the
       exemplar, neither double-counted nor discarded
 
@@ -325,12 +325,12 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | UI-07 | Phase 4 | Complete |
 | UI-08 | Phase 4 | Complete |
 | EVAL-16 | Phase 4 | Complete |
-| METHOD-02 | Phase 5 | Pending |
+| METHOD-02 | Phase 5 | Complete |
 | METHOD-03 | Phase 5 | Pending |
-| METHOD-04 | Phase 5 | Pending |
-| METHOD-04a | Phase 5 | Pending |
+| METHOD-04 | Phase 5 | Complete |
+| METHOD-04a | Phase 5 | Complete |
 | METHOD-04b | Phase 5 | Pending |
-| METHOD-04c | Phase 5 | Pending |
+| METHOD-04c | Phase 5 | Complete |
 | METHOD-05 | Phase 6 | Pending |
 | METHOD-06 | Phase 7 | Pending |
 | EVAL-02 | Phase 8 | Pending |
