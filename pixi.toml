@@ -98,6 +98,7 @@ quality = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 fetch-models = "python -m object_search.cli fetch-models"
 serve = "uvicorn object_search.api.app:app --reload --port 8000"
 samples = "python -m object_search.cli render-samples"
+report = "python scripts/build_report.py"
 # Hydra's @hydra.main seizes sys.argv, so the benchmark CANNOT be a Typer subcommand
 # (the Typer parser and Hydra's would both try to own argv). It is its own module entry
 # point instead. `bench` runs the full sweep (needs fetched models); `bench-ci` runs the
