@@ -75,10 +75,10 @@ which kind of image, and at what latency.
       nearest-neighbour retrieval with threshold and NMS; proposal and embedding stages are
       **independently callable units**
 
-- [ ] **METHOD-07**: Shared threshold calibration (`search/common/calibration.py`) offering
+- [x] **METHOD-07**: Shared threshold calibration (`search/common/calibration.py`) offering
       `self-similarity`, `ratio`, and `gmm` strategies — imported by choice, never mandated
 
-- [ ] **METHOD-08**: Shared peak extraction (`search/common/peaks.py`) offering `nms`,
+- [x] **METHOD-08**: Shared peak extraction (`search/common/peaks.py`) offering `nms`,
       `local-max` (default, suppression radius tied to crop size), and `watershed` strategies
 
 - [ ] **METHOD-09**: Every method returns a `diagnostics` payload the UI can render
@@ -289,8 +289,8 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-03 | Phase 1 | Complete |
 | DOC-01 | Phase 1 | Complete |
 | METHOD-01 | Phase 2 | Pending |
-| METHOD-07 | Phase 2 | Pending |
-| METHOD-08 | Phase 2 | Pending |
+| METHOD-07 | Phase 2 | Complete |
+| METHOD-08 | Phase 2 | Complete |
 | METHOD-09 | Phase 2 | Pending |
 | METHOD-10 | Phase 2 | Pending |
 | METHOD-11 | Phase 2 | Pending |
