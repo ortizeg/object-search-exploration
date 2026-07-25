@@ -44,6 +44,15 @@ Pre-processing (exact)
   and AKAZE (configured for its float KAZE descriptor) are L2; ORB's binary descriptor is
   Hamming. Getting this wrong yields garbage matches that still *look* like matches, so it is
   chosen from the backend and cannot be set to the wrong value from the UI.
+- **SuperPoint (the learned backend) preprocessing is different and explicit.** The grayscale is
+  scaled to ``[0, 1]`` (``/255``) with **no mean/std** -- BT.601 luma, which the shared
+  ``cv2.COLOR_BGR2GRAY`` reproduces -- and the input is padded on the bottom/right to a multiple
+  of **8** (the stride) rather than resized, because non-multiple sides are silently floored (a
+  coordinate truncation). Its keypoints are integer ``(x, y)`` with **no scale or orientation**
+  (``has_frame`` False, so ``single-4dof`` raises), and its 256-D descriptors are **already
+  L2-normalized** (metric ``l2``; do not re-normalize). Effective border is **8 px**. Full
+  contract in ``inference/superpoint.py`` and ``docs/library-reviews/superpoint.md``; the weights
+  are MagicLeap **non-commercial research-only** and gitignored.
 
 Post-processing (exact)
 -----------------------
@@ -95,13 +104,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import cv2
 import numpy as np
 import numpy.typing as npt
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from object_search.schemas import (
     BBox,
@@ -117,6 +126,9 @@ from object_search.schemas import (
     SearchResult,
 )
 from object_search.search.registry import register_method
+
+if TYPE_CHECKING:  # the learned backend; imported lazily at construction so this module's import
+    from object_search.inference.superpoint import SuperPointInferencer  # stays onnx-free until use
 
 # -- Tunables that are properties of the METHOD, not of a query, so they are module -------
 # -- constants rather than config fields. Each is justified from Lowe IJCV 2004 §7.3. -----
@@ -150,13 +162,15 @@ class SparseGeoConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    backend: Literal["sift", "akaze", "orb"] = Field(
+    backend: Literal["sift", "akaze", "orb", "superpoint"] = Field(
         default="sift",
         description=(
             "Keypoint detector/descriptor. SIFT is the default: ORB yields ~1 keypoint where "
             "SIFT yields 83 on a 64px crop, so ORB falls below the vote floor on small crops. "
-            "The descriptor DISTANCE METRIC is fixed by the backend (SIFT/AKAZE float L2, ORB "
-            "binary Hamming) and is deliberately NOT a separate field."
+            "SIFT/AKAZE/ORB are classical (no weights); 'superpoint' is the learned ONNX backend "
+            "(frameless keypoints, L2-normalized descriptors). The descriptor DISTANCE METRIC is "
+            "fixed by the backend (SIFT/AKAZE/SuperPoint float L2, ORB binary Hamming) and is "
+            "deliberately NOT a separate field."
         ),
     )
     k: int = Field(
@@ -248,6 +262,45 @@ class SparseGeoConfig(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _default_superpoint_to_translation_2dof(cls, data: object) -> object:
+        """Give the SuperPoint backend its own working default of translation-2dof.
+
+        The class default ``voting_mode`` stays ``single-4dof`` (correct for the framed classical
+        backends). But SuperPoint is frameless, so ``single-4dof`` is invalid for it -- and a
+        backend whose only default raised would have no usable default at all. When the caller
+        selects ``backend="superpoint"`` and does **not** name a voting mode, resolve it to
+        ``translation-2dof`` here (before validation), so the per-backend default is real without
+        making the field nullable in the JSON Schema the UI form is generated from.
+        """
+        if (
+            isinstance(data, dict)
+            and data.get("backend") == "superpoint"
+            and "voting_mode" not in data
+        ):
+            return {**data, "voting_mode": "translation-2dof"}
+        return data
+
+    @model_validator(mode="after")
+    def _reject_single_4dof_for_frameless_superpoint(self) -> SparseGeoConfig:
+        """Refuse ``single-4dof`` + ``superpoint`` at config time (METHOD-04a).
+
+        SuperPoint keypoints carry no scale/orientation frame, so a single correspondence cannot
+        determine a 4-DoF similarity. Rejecting the combination here -- rather than letting it be
+        accepted and quietly do something else -- is the contract: a config that is accepted and
+        then silently degrades is worse than a refusal. (The voting layer raises the same way as a
+        defence in depth, but this makes the error a load-time, model-free one.)
+        """
+        if self.backend == "superpoint" and self.voting_mode == "single-4dof":
+            raise ValueError(
+                "voting_mode='single-4dof' is invalid for backend='superpoint': SuperPoint "
+                "keypoints carry no scale/orientation frame, so a single correspondence cannot "
+                "determine a 4-DoF similarity. Use 'translation-2dof' (the superpoint default) "
+                "or 'pairwise-4dof'."
+            )
+        return self
+
 
 # ------------------------------------------------------------------- backend abstraction
 
@@ -264,17 +317,24 @@ class _Backend:
     name: str
     metric: Literal["l2", "hamming"]
     has_frame: bool
-    detector: cv2.Feature2D
+    detector: cv2.Feature2D | SuperPointInferencer
 
 
-def _make_backend(name: Literal["sift", "akaze", "orb"]) -> _Backend:
-    """Construct the requested classical backend, fixing its distance metric.
+def _make_backend(name: Literal["sift", "akaze", "orb", "superpoint"]) -> _Backend:
+    """Construct the requested backend, fixing its distance metric and frame flag.
 
     AKAZE is configured for its **float KAZE descriptor** (``DESCRIPTOR_KAZE``) rather than the
     default binary MLDB, so that -- as the method contract states -- SIFT and AKAZE are both L2
     and only ORB is Hamming. All three classical detectors produce keypoints with a full frame
-    (``size`` and ``angle``), so ``has_frame`` is True; a frameless backend (SuperPoint) would
-    set it False and make ``single-4dof`` voting raise.
+    (``size`` and ``angle``), so ``has_frame`` is True.
+
+    ``superpoint`` is the learned backend: its keypoints are **frameless** (``has_frame`` False,
+    which is what makes ``single-4dof`` voting raise) and its 256-D descriptors are already
+    L2-normalized, so the metric is ``l2`` (cosine and squared-L2 agree on normalized vectors).
+    Its ONNX weight is loaded here; if the (gitignored, MagicLeap non-commercial) file is absent,
+    :class:`SuperPointInferencer` raises ``FileNotFoundError`` -- a clear, actionable failure
+    rather than a silent degradation. The import is local so the classical path never pays the
+    onnxruntime import cost.
     """
     # The cv2 type stubs omit the detector FACTORY functions (SIFT_create et al.) while typing
     # the Feature2D instances they return, so these three calls need an attr-defined ignore.
@@ -287,6 +347,13 @@ def _make_backend(name: Literal["sift", "akaze", "orb"]) -> _Backend:
         return _Backend("akaze", "l2", True, detector)
     if name == "orb":
         return _Backend("orb", "hamming", True, cv2.ORB_create())  # type: ignore[attr-defined]
+    if name == "superpoint":
+        from object_search.inference import models
+        from object_search.inference.superpoint import SuperPointInferencer
+
+        model_path = models.models_dir() / models.MODEL_REGISTRY["superpoint"].dest
+        # SuperPoint descriptors are L2-normalized -> l2 metric; keypoints frameless -> no frame.
+        return _Backend("superpoint", "l2", False, SuperPointInferencer(model_path))
     raise ValueError(f"unknown backend {name!r}")  # unreachable via the Literal, defensive
 
 
@@ -321,6 +388,28 @@ def _abstain_note(backend: str, n_keypoints: int, minimum: int) -> str:
     )
 
 
+def _detect_superpoint(
+    gray: npt.NDArray[np.uint8],
+    inferencer: SuperPointInferencer,
+    origin_xy: tuple[int, int] = (0, 0),
+) -> _Keypoints:
+    """Detect + describe with the learned SuperPoint backend, shifting coords by ``origin_xy``.
+
+    SuperPoint returns integer ``(x, y)`` keypoints in input pixels and **already-L2-normalized**
+    256-D descriptors; it carries **no scale or orientation**, so ``scale`` and ``angle`` come back
+    ``None`` -- which is exactly what makes ``single-4dof`` voting raise for this backend. As in the
+    classical path, keypoints are shifted by the crop origin so every coordinate is in scene pixels.
+    """
+    result = inferencer.detect(gray)
+    if result.keypoints.shape[0] == 0:
+        empty_desc: npt.NDArray[np.generic] = np.empty((0, 0), dtype=np.float32)
+        return _Keypoints(np.empty((0, 2), np.float64), None, None, empty_desc)
+    ox, oy = origin_xy
+    xy = result.keypoints.astype(np.float64) + np.array([ox, oy], dtype=np.float64)
+    # scale/angle are None: SuperPoint keypoints are frameless (no size, no orientation).
+    return _Keypoints(xy, None, None, np.asarray(result.descriptors))
+
+
 def _detect(
     gray: npt.NDArray[np.uint8],
     backend: _Backend,
@@ -330,8 +419,15 @@ def _detect(
 
     ``origin_xy`` is the crop's top-left in scene pixels, so exemplar keypoints detected on the
     crop come back in the same scene coordinate frame as the scene keypoints -- no per-call
-    offset arithmetic is needed anywhere downstream.
+    offset arithmetic is needed anywhere downstream. The learned SuperPoint backend takes the
+    ONNX detection path; the classical detectors take the ``cv2.Feature2D`` path -- both return the
+    identical ``_Keypoints`` shape, which is what lets the rest of the module stay backend-agnostic.
     """
+    from object_search.inference.superpoint import SuperPointInferencer
+
+    if isinstance(backend.detector, SuperPointInferencer):
+        return _detect_superpoint(gray, backend.detector, origin_xy)
+
     keypoints, descriptors = backend.detector.detectAndCompute(gray, None)
     if descriptors is None or len(keypoints) == 0:
         empty_desc: npt.NDArray[np.generic] = np.empty((0, 0), dtype=np.float32)
