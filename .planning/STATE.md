@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 8
 current_phase_name: Evaluation & docs
 status: executing
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-07-25T11:20:00.000Z"
+stopped_at: Completed 09-02-PLAN.md (Milestone 2 complete)
+last_updated: "2026-07-25T12:35:00.000Z"
 last_activity: 2026-07-25
-last_activity_desc: "Executed 08-02: committed charts, README, method-doc drift guard, robustness backlog, Milestone 2 spec, LIMITATIONS. Phase 8 complete — final plan of the project. PR #16 open, CI green."
+last_activity_desc: "Executed 09-02: schema-driven second UI exploration mode, presence-driven marker overlay, marker demo assets + byte-identical sample gallery, docs flipped to built. Milestone 2 complete (M2-05). Four gates green, 93% coverage. PR #18 open. Human-verify (browser marker flow) pending an orchestrator run; FastSAM CoreML-EP failure on this host deferred (CPU provider works)."
 progress:
-  total_phases: 8
+  total_phases: 9
   completed_phases: 8
-  total_plans: 16
-  completed_plans: 16
+  total_plans: 18
+  completed_plans: 18
 deviation_branch_protection: INFRA-07 partial — branch protection unavailable on a free private repo (403 'Upgrade to GitHub Pro or make this repository public'). Skipped by decision; CI on PRs works, server-side enforcement does not. Not a blocker for any other work.
 ---
 
