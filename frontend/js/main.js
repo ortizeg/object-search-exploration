@@ -5,7 +5,7 @@
 
 import { Viewport, finalizeBox } from "./viewport.js";
 import { buildForm } from "./form.js";
-import { getMethods, getImages, postSearch, imageUrl } from "./api.js";
+import { getMethods, getImages, postSearch, getStats, imageUrl } from "./api.js";
 import {
   drawResults,
   drawQueryBox,
@@ -15,6 +15,7 @@ import {
   hitTestMatch,
 } from "./overlay.js";
 import { mountRating } from "./rating.js";
+import { renderStats } from "./stats.js";
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("stage"));
 const methodSelect = /** @type {HTMLSelectElement} */ (document.getElementById("method"));
@@ -28,6 +29,8 @@ const tabRating = document.getElementById("tab-rating");
 const tabStats = document.getElementById("tab-stats");
 const ratingView = document.getElementById("rating-view");
 const statsView = document.getElementById("stats-view");
+const statsHost = document.getElementById("stats-host");
+const statsRefresh = document.getElementById("stats-refresh");
 
 // Swatch colours mirror overlay.js so the toggle legend reads at a glance. Kept here rather
 // than exported from overlay.js — a five-line duplication is clearer than a shared constant.
@@ -396,9 +399,22 @@ if (tabStats)
     void refreshStats();
   });
 
-// Stats rendering is wired in Task 3; a no-op keeps the rating path standalone until then.
-/** @type {() => Promise<void>} */
-let refreshStats = async () => {};
+// --- Stats dashboard ------------------------------------------------------------------
+/** Fetch /stats and render the scoreboard. Called on tab open, refresh, and after a submit. */
+async function refreshStats() {
+  if (!statsHost) return;
+  try {
+    const stats = await getStats();
+    renderStats(statsHost, stats);
+  } catch (err) {
+    statsHost.replaceChildren();
+    const msg = document.createElement("p");
+    msg.className = "muted";
+    msg.textContent = `Failed to load stats: ${err.message}`;
+    statsHost.appendChild(msg);
+  }
+}
+if (statsRefresh) statsRefresh.addEventListener("click", () => void refreshStats());
 
 // --- Control wiring -------------------------------------------------------------------
 

@@ -362,3 +362,80 @@ button#search:disabled {
 .rating-msg.error {
   color: #ff5470;
 }
+
+/* --- Stats dashboard ---------------------------------------------------------------- */
+.stat-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+  margin-bottom: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.stat-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.stat-method {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+.stat-caption {
+  margin: 0;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+.stat-empty {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-style: italic;
+}
+.stat-mean {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.stat-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.3rem;
+}
+.stat-chip {
+  font-size: 0.72rem;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+/* SVG bars: a neutral track, an accent fill/marker, a dim interval band. */
+.stat-svg .stat-track {
+  fill: var(--panel-2);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.stat-svg .stat-fill {
+  fill: var(--accent);
+}
+.stat-svg .stat-band {
+  fill: rgba(0, 229, 255, 0.28);
+}
+.stat-svg .stat-cap {
+  stroke: var(--accent-dim);
+  stroke-width: 1.5;
+}
+.stat-svg .stat-mark {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
