@@ -57,17 +57,25 @@ def test_flat_crop_returns_empty_with_a_note() -> None:
     assert "texture" in result.diagnostics.notes[0].lower()
 
 
-def test_flat_template_matchtemplate_behaviour_is_pinned_for_this_opencv() -> None:
-    """Pin the measured flat-template response so an OpenCV bump is caught (PITFALLS 1.1).
+def test_flat_template_matchtemplate_behaviour_is_pinned() -> None:
+    """Pin the measured flat-template response so an OpenCV change is caught (PITFALLS 1.1).
 
-    A zero-variance template makes TM_CCOEFF_NORMED degenerate (0/0). OpenCV does not raise
-    and does not return NaN -- it returns a CONSTANT map, and *which* constant has changed
-    across versions: 4.10.0 returned 1.0 everywhere, while the pinned 4.13.0 build returns
-    0.0 everywhere (the fix was backported), and 5.0.0 also returns 0.0. Either way it is a
-    fabricated constant, never a real correlation, which is exactly why :func:`search`'s std
-    guard runs *before* matchTemplate. This test pins the two invariants that matter -- the
-    map is constant, and no NaN/Inf leaks -- plus the exact constant for the installed build,
-    so a version change that alters it fails loudly here instead of on the scoreboard.
+    A zero-variance template makes TM_CCOEFF_NORMED degenerate (0/0). OpenCV does not raise and
+    does not return NaN -- it returns a CONSTANT map whose value is a **fabricated** degenerate
+    constant, never a real correlation. *Which* constant appears is both version- AND
+    platform-dependent, which is exactly why this test does not assert one specific number:
+
+    - OpenCV 4.10 returned 1.0 everywhere (issue #5688);
+    - the pinned 4.13 returns 0.0 on macOS/arm64 but 1.0 on Linux/x86_64 (measured: this test
+      first failed in CI on Linux while passing locally on macOS -- the constant is a build
+      artefact, not a documented value);
+    - 5.0 returns 0.0.
+
+    So the portable, honest invariants are pinned instead: the map is CONSTANT, carries no
+    NaN/Inf, and its value is one of the two known degenerate constants {0.0, 1.0} -- never a
+    plausible-looking correlation. Any of these breaking (a real value, a NaN, a non-constant
+    map) fails loudly here rather than on the scoreboard. All of them are why :func:`search`'s
+    std guard runs *before* matchTemplate regardless of which constant this build produces.
     """
     rng = np.random.default_rng(0)
     scene = rng.integers(0, 256, (120, 160), dtype=np.uint8)
@@ -77,12 +85,7 @@ def test_flat_template_matchtemplate_behaviour_is_pinned_for_this_opencv() -> No
 
     assert np.isfinite(resp).all(), "flat template must not produce NaN/Inf (it never has)"
     assert float(np.ptp(resp)) == 0.0, "a zero-variance template yields a constant response map"
-    constant = float(resp.flat[0])
-    major, minor = (int(part) for part in cv2.__version__.split(".")[:2])
-    if (major, minor) <= (4, 10):
-        assert constant == 1.0  # the historical 4.10 wall-of-ones behaviour
-    else:
-        assert constant == 0.0  # 4.13 (installed) and 5.x return zeros
+    assert float(resp.flat[0]) in (0.0, 1.0), "the constant must be a known degenerate value"
 
 
 # ------------------------------------------------------------------------- lattice behaviour
