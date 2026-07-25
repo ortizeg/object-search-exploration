@@ -1,0 +1,79 @@
+{
+  "achieved_n": 9,
+  "boxes": [
+    {
+      "h": 84,
+      "w": 84,
+      "x": 433,
+      "y": 44
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 191,
+      "y": 46
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 344,
+      "y": 108
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 452,
+      "y": 131
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 167,
+      "y": 189
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 65,
+      "y": 215
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 418,
+      "y": 279
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 219,
+      "y": 359
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 418,
+      "y": 389
+    }
+  ],
+  "emblem": {
+    "seed": 1546673833,
+    "size": 84
+  },
+  "exemplar_index": 0,
+  "height": 480,
+  "image": "textured-plain-01.png",
+  "regime": "plain",
+  "requested_n": 9,
+  "seed": 1099171983,
+  "slice_metadata": {
+    "clutter_level": 0.0,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 9
+  },
+  "width": 640
+}

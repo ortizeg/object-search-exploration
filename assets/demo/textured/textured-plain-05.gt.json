@@ -1,0 +1,85 @@
+{
+  "achieved_n": 10,
+  "boxes": [
+    {
+      "h": 84,
+      "w": 84,
+      "x": 586,
+      "y": 64
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 451,
+      "y": 70
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 709,
+      "y": 150
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 52,
+      "y": 172
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 213,
+      "y": 181
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 403,
+      "y": 223
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 182,
+      "y": 302
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 642,
+      "y": 374
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 18,
+      "y": 382
+    },
+    {
+      "h": 84,
+      "w": 84,
+      "x": 450,
+      "y": 418
+    }
+  ],
+  "emblem": {
+    "seed": 920533812,
+    "size": 84
+  },
+  "exemplar_index": 0,
+  "height": 600,
+  "image": "textured-plain-05.png",
+  "regime": "plain",
+  "requested_n": 10,
+  "seed": 1719495125,
+  "slice_metadata": {
+    "clutter_level": 0.0,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 10
+  },
+  "width": 800
+}

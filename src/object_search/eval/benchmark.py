@@ -55,6 +55,7 @@ from object_search.eval.labels import (
     chipset_image_ids,
     load_ground_truth,
     scene_path,
+    textured_image_ids,
 )
 from object_search.eval.metrics import average_precision, match_predictions, precision_recall_f1
 from object_search.provenance import current_git_sha, repo_root
@@ -102,9 +103,12 @@ class BenchmarkConfig(BaseModel):
         if self.ci:
             images = chipset_image_ids()[: self.ci_image_limit]
             return _MODEL_FREE_METHODS, images
-        # The full sweep includes the chipset (NCC-favourable) alongside the configured synthetic
-        # scenes (learned-favourable) so the per-slice crossover has both sides present.
-        images = tuple(dict.fromkeys((*chipset_image_ids(), *self.image_ids)))
+        # The full sweep includes the chipset (NCC-favourable), the textured regimes (EVAL-20,
+        # keypoint- and deep-feature-favourable), and the configured synthetic scenes, so the
+        # per-slice crossover has every side present.
+        images = tuple(
+            dict.fromkeys((*chipset_image_ids(), *textured_image_ids(), *self.image_ids))
+        )
         return self.methods, images
 
 
