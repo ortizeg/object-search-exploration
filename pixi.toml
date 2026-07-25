@@ -80,6 +80,12 @@ onnx = "*"
 default = { features = ["dev"], solve-group = "default" }
 export = { features = ["export"] }
 
+# Export-only tasks live under the `export` feature so they are runnable ONLY in the `export`
+# environment (torch + ultralytics, AGPL-3.0). This keeps the AGPL exporter off the default
+# task surface: `pixi run export-fastsam` in the runtime env has no such task.
+[feature.export.tasks]
+export-fastsam = { cmd = "python scripts/export_fastsam.py" }
+
 # --------------------------------------------------------------------------------- tasks
 # These names are the contract CI invokes. Do not rename them.
 [tasks]

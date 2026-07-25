@@ -5,16 +5,16 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Foundation
 status: executing
-stopped_at: ""
-deviation_branch_protection: "INFRA-07 partial — branch protection unavailable on a free private repo (403 'Upgrade to GitHub Pro or make this repository public'). Skipped by decision; CI on PRs works, server-side enforcement does not. Not a blocker for any other work."
-last_updated: "2026-07-24T18:28:36.420Z"
-last_activity: 2026-07-24
-last_activity_desc: Project initialized; PROJECT.md, REQUIREMENTS.md, ROADMAP.md
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-07-25T09:50:35.941Z"
+last_activity: 2026-07-25
+last_activity_desc: "Executed 01-02: schemas, registry, ONNXInferencer, synthetic +"
 progress:
   total_phases: 8
-  completed_phases: 0
+  completed_phases: 6
   total_plans: 16
-  completed_plans: 1
+  completed_plans: 13
+deviation_branch_protection: INFRA-07 partial — branch protection unavailable on a free private repo (403 'Upgrade to GitHub Pro or make this repository public'). Skipped by decision; CI on PRs works, server-side enforcement does not. Not a blocker for any other work.
 ---
 
 # Project State
@@ -37,7 +37,7 @@ Last activity: 2026-07-25 — Executed 01-02: schemas, registry, ONNXInferencer,
 chip benchmark, fetch-models, demo assets. All gates green (90.34% coverage). PR #2 open, CI
 green. INFRA-07 branch protection unavailable on a private repo.
 
-Progress: [█████░░░░░] 50%
+Progress: [████████░░] 81%
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [█████░░░░░] 50%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 1 P1 | 16m | 6 tasks | 19 files |
+| Phase 07 P01 | 40m | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -120,9 +121,11 @@ review; the PRs are numbered in phase order.
   protected branches on **private** repositories. `main` reports `"protected": false`.
 
   Three ways to close it, all requiring a decision that is the repo owner's to make:
+
   1. **Upgrade to GitHub Pro** — costs money.
   2. **Make the repository public** — an irreversible outward-facing action, and one with a
      licence dimension (see the FastSAM AGPL note below), so it must not be done implicitly.
+
   3. **Accept convention-only enforcement** — what is in effect now.
 
   **Chosen for now: option 3.** CI still runs `lint`, `format-check`, `typecheck`, and `test` on
@@ -185,6 +188,7 @@ corrections are load-bearing:
 3. **§14's `sefaburak*` DINOv2 references are superseded** by `onnx-community/dinov2-small-ONNX`
    (Apache-2.0, fully dynamic input, `last_hidden_state [B, floor(H/14)*floor(W/14)+1, 384]`),
    which was runtime-verified at six resolutions.
+
 4. **§8's reproducibility constraint cannot be honoured as written for RANSAC, and pretending
    otherwise would be the exact kind of lie the constraint exists to prevent.** The brief says
    "any stochastic step (RANSAC, SAM prompt sampling) takes an explicit seed from config."
@@ -227,6 +231,6 @@ corrections are load-bearing:
 
 ## Session
 
-**Last session:** 2026-07-25T05:30:00.000Z
-**Stopped at:** Completed 01-02-PLAN.md (INFRA-07 branch protection still blocked: needs GitHub Pro or a public repo)
+**Last session:** 2026-07-25T09:50:35.934Z
+**Stopped at:** Completed 07-01-PLAN.md
 **Resume file:** None
