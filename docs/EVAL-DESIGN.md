@@ -143,6 +143,23 @@ the registry-iterating sample renderer, `_DEMO_SUBDIRS` discovery.
 - Wiring the regimes into `_DEMO_SUBDIRS`, `conf/benchmark.yaml`, and a `dev`/`test` split marker.
 - **Report v2** (§8).
 
+### Local acceleration — a parallel benchmark runner (do first)
+
+Inference stays **CPU-pinned** for reproducibility (a GPU/CUDA path was considered and rejected
+for the committed baseline: CUDA kernels are non-deterministic and would diverge from the CPU
+numbers of record; it is only worth adding later as an opt-in *tuning-loop* accelerator, never for
+the recorded run). The real speedup on this CPU design is **parallelism**: the sweep runs one
+method-image at a time today, and dino-dense (~2.3 s/image) dominates.
+
+Add a `workers` option to `eval/benchmark.py` that runs the (method, image) work items across a
+`ProcessPoolExecutor`. Each worker process reuses its own lazy model singleton, so a model loads
+once per process. **The aggregation must be order-independent:** collect all results, sort
+`per_image` deterministically (by method, then image id) before writing, so a parallel run and a
+serial run produce a **byte-identical `results.json`** (a test asserts this). This preserves the
+EVAL-06 byte-identical-charts guarantee and keeps determinism intact while cutting wall-clock
+~5–8× on a multi-core machine — enough that a full ~200-image sweep runs in a few minutes locally,
+which is the tuning-loop turnaround we want without renting hardware.
+
 ## 8. Report v2
 
 Regenerate `docs/reports/benchmark-report.html` (self-contained; charts inline SVG, overlays
