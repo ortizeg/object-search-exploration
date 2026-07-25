@@ -31,7 +31,27 @@ scale-tolerant in a way raw correlation is not.
    silently degrading. Three voting modes exist: `single-4dof` (classical only), `translation-2dof`
    (any backend), `pairwise-4dof` (any backend, O(n²) pairs sampled to a cap).
 
-## Pre-processing (exact)
+## Backends — two behind one interface, switched by config alone
+
+`sparse-geo` runs one of two backend families through the **same** code path; the only two
+things the rest of the module needs from a backend are its descriptor **distance metric** and
+whether its keypoints carry a **geometric frame** (scale + orientation). Switching backend is
+config alone — no separate code path.
+
+| `backend` | Kind | Metric | Frame? | Default voting mode |
+|---|---|---|---|---|
+| `sift` (default) | classical (no weights) | L2 | yes | `single-4dof` |
+| `akaze` | classical (float KAZE descriptor) | L2 | yes | `single-4dof` |
+| `orb` | classical (binary descriptor) | Hamming | yes | `single-4dof` |
+| `superpoint` | learned (ONNX) | L2 (descriptors pre-normalized) | **no** | `translation-2dof` |
+
+The descriptor **distance metric is a property of the backend, never a config field** — getting
+it wrong yields garbage matches that still *look* like matches. Because SuperPoint keypoints are
+**frameless**, selecting `voting_mode="single-4dof"` with `backend="superpoint"` is rejected at
+config-construction time (METHOD-04a) rather than silently degraded; its working default is
+`translation-2dof`.
+
+## Pre-processing (exact) — classical backends
 
 - The BGR scene is converted **once** to grayscale (`cv2.COLOR_BGR2GRAY`); all three classical
   detectors operate on intensity. Kept **uint8**, C-contiguous. No mean/std normalization —
@@ -43,6 +63,26 @@ scale-tolerant in a way raw correlation is not.
   yields 83 on a 64×64 crop). The descriptor **distance metric is a property of the backend**,
   never a config field: SIFT and AKAZE (configured for its float KAZE descriptor) are L2; ORB is
   binary Hamming.
+
+## Pre-processing (exact) — SuperPoint (learned) backend
+
+Full contract in `src/object_search/inference/superpoint.py` and
+`docs/library-reviews/superpoint.md` (verdict **Trial**). The exact steps (stated per the
+project's explicit-preprocessing constraint, exact numbers not "standard normalization"):
+
+- **Input** `image`, f32, NCHW, `[1, 1, H, W]` — batch fixed at 1, a **single grayscale
+  channel**, H/W dynamic.
+- **Colour**: BT.601 luma `gray = 0.299·R + 0.587·G + 0.114·B`, which the shared
+  `cv2.COLOR_BGR2GRAY` reproduces (METHOD-11: the equivalence is written down because the two
+  paths differ in rounding and can shift a borderline keypoint). The scene is grayscaled once and
+  the same single-channel crop/scene are handed to SuperPoint.
+- **Range [0, 1]** via `/255`, and **NO mean subtraction, NO std division** — SuperPoint wants
+  raw luma; applying ImageNet normalization here silently wrecks detection.
+- **Pad to a multiple of 8, do not resize.** Non-multiple sides are silently floored (trailing
+  rows/columns dropped — a coordinate truncation), so the inferencer zero-pads bottom/right to
+  the next multiple of the stride 8. Padding on the far edges preserves the top-left origin, so
+  keypoint coordinates need no remapping.
+- Keypoints are shifted by the crop origin into **scene** pixels, exactly as the classical path.
 
 ## Post-processing (exact)
 
@@ -59,6 +99,45 @@ scale-tolerant in a way raw correlation is not.
   of the fitted linear part). Shear and aspect distortion are deliberately NOT tested — a 4-DoF
   similarity has neither by construction, so those tests are vacuous.
 - **METHOD-12**: multiple distinct models are returned; there is no single-best short-circuit.
+
+### SuperPoint output decoding (exact)
+
+- **Outputs** `keypoints` **int64** `[1, N, 2]` `(x, y)` in input pixels, `scores` f32 `[1, N]`,
+  `descriptors` f32 `[1, N, 256]`. All three share one symbolic `N`, so lengths always agree; the
+  batch dimension (fixed 1) is dropped.
+- **Descriptors are already L2-normalized** (measured ‖d‖ = 1.0000) — **do not re-normalize**.
+  kNN is therefore a plain matmul: cosine `= D_crop @ D_scene.T`, squared-L2 `= 2 − 2·cos`. The
+  backend metric is `l2` because on unit vectors L2 and cosine agree monotonically.
+- **Keypoints carry no scale/orientation** (frameless), so `scale`/`angle` are `None` — which is
+  exactly what makes `single-4dof` raise and `translation-2dof` the default for this backend.
+- **Effective border is 8 px**, not the configured `remove_borders=4` (the border mask is applied
+  on the 8×-upsampled score grid), so no correspondence lands within 8 px of the scene edge —
+  relevant when an instance is clipped by the frame.
+- **`N` is genuinely variable** (unbounded on textured scenes), which is what lets the
+  low-keypoint guard (METHOD-04c) read `keypoints.shape[1]` directly; `pairwise-4dof` caps its
+  O(N²) pair sampling via `pairwise_cap`.
+
+## Config reference
+
+The frozen `SparseGeoConfig` (its JSON Schema drives the UI form — one source of truth for
+defaults, ranges, and help text):
+
+| field | type / range | default | purpose |
+|---|---|---|---|
+| `backend` | `sift`/`akaze`/`orb`/`superpoint` | `sift` | detector/descriptor; metric + frame fixed by it |
+| `k` | int ≥ 1 | 6 | top-k scene neighbours kept per crop keypoint (ratio test disabled) |
+| `use_kplus1_ratio` | bool | `false` | enable the only ratio test available (k-vs-(k+1)) |
+| `kplus1_ratio` | 0 < f ≤ 1 | 0.9 | drop a crop keypoint when dist(k) ≥ ratio·dist(k+1) |
+| `voting_mode` | `single-4dof`/`translation-2dof`/`pairwise-4dof` | `single-4dof` (classical), `translation-2dof` (superpoint) | how a correspondence becomes a pose vote |
+| `decomposition` | `hough`/`sequential-ransac` | `hough` | cluster-into-instances strategy |
+| `min_votes` | int ≥ 1 | 3 | min accumulated bin weight to hypothesize a cluster |
+| `min_inliers` | int ≥ 2 | 5 | min RANSAC inliers to accept a verified instance |
+| `pairwise_cap` | int ≥ 1 | 20000 | cap on sampled pairs for `pairwise-4dof` (O(n²)) |
+| `min_exemplar_keypoints` | int ≥ 1 | 20 | below this the crop abstains WITH a note (METHOD-04c) |
+| `ransac_iters` | int ≥ 1 | 200 | RANSAC iterations per peak (2-point samples) |
+| `ransac_thresh_px` | f > 0 | 5.0 | inlier reprojection-error threshold in scene pixels |
+| `min_scale` / `max_scale` | f > 0 | 0.2 / 5.0 | scale-plausibility bounds for degeneracy rejection |
+| `seed` | int ≥ 0 | 0 | the REAL seed for `np.random.default_rng` (NOT `cv2.setRNGSeed`) |
 
 ## Algorithm
 

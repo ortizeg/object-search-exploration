@@ -81,7 +81,9 @@ MODEL_REGISTRY: Mapping[str, ModelSpec] = {
         repo_id="fabio-sim/LightGlue-ONNX",
         revision="v1.0.0",
         filename="superpoint.onnx",
-        sha256=None,
+        # Pinned from the first verified fetch of the immutable v1.0.0 release asset; now a hard
+        # integrity gate (EVAL-09). A byte-different download refuses to install.
+        sha256="234d12c9f523292efb34e0ca513b011050b0c052700da9c01787b9356a1138d2",
         license="Apache-2.0 code / MagicLeap weights non-commercial research-only",
         license_note=(
             "The MagicLeap weights are NON-COMMERCIAL research-only and the DERIVATIVES clause "
