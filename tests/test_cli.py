@@ -52,7 +52,9 @@ def test_render_samples_unknown_method_exits_nonzero(tmp_path: Path) -> None:
     assert "unknown method" in result.output
 
 
-def test_benchmark_fails_loudly() -> None:
+def test_benchmark_redirects_to_hydra_entrypoint() -> None:
+    # The benchmark is a @hydra.main module entry point (Hydra owns sys.argv), so the Typer
+    # shim must fail loudly and point at `pixi run bench`, never silently succeed.
     result = runner.invoke(app, ["benchmark"])
     assert result.exit_code == 1
-    assert "Phase 8" in result.output
+    assert "pixi run bench" in result.output
