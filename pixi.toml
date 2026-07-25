@@ -60,8 +60,25 @@ mypy = ">=1.13"
 pre-commit = ">=4.0"
 httpx = ">=0.28"  # needed by fastapi's TestClient
 
+[feature.dev.dependencies]
+onnx = ">=1.22.0,<2"
+
+# The FastSAM ONNX export needs Ultralytics, and therefore torch. Those are EXPORT-TIME-ONLY
+# dependencies, quarantined in this feature so the DEFAULT runtime environment stays
+# torch-free -- which makes the "ONNX Runtime for every learned model" constraint structural
+# rather than something reviewers have to police. AGPL-3.0 (ultralytics) lives only here and
+# never enters the default solve-group. Invoke with `pixi run -e export fetch-models --only
+# fastsam-s`. This is a deviation from plan 01-01's single-environment manifest (see SUMMARY).
+[feature.export.dependencies]
+python = "3.12.*"
+ultralytics = "*"
+pytorch = "*"
+torchvision = "*"
+onnx = "*"
+
 [environments]
 default = { features = ["dev"], solve-group = "default" }
+export = { features = ["export"] }
 
 # --------------------------------------------------------------------------------- tasks
 # These names are the contract CI invokes. Do not rename them.
@@ -77,3 +94,4 @@ serve = "uvicorn object_search.api.app:app --reload --port 8000"
 samples = "python -m object_search.cli render-samples"
 bench = "python -m object_search.cli benchmark"
 synth = "python -m object_search.cli synth"
+chipset = "python -m object_search.cli chipset"

@@ -1,0 +1,86 @@
+{
+  "boxes": [
+    {
+      "h": 57,
+      "w": 57,
+      "x": 131,
+      "y": 64
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 59,
+      "y": 109
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 210,
+      "y": 154
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 343,
+      "y": 239
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 37,
+      "y": 274
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 799,
+      "y": 314
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 208,
+      "y": 362
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 243,
+      "y": 454
+    }
+  ],
+  "image": "cluttered-distractors.png",
+  "slice_metadata": {
+    "clutter_level": 0.6,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 8
+  },
+  "spec": {
+    "bg_color": [
+      235,
+      235,
+      235
+    ],
+    "clutter": 0.6,
+    "fg_color": [
+      40,
+      90,
+      220
+    ],
+    "height": 640,
+    "instance_size": 56,
+    "mode": "scatter",
+    "n_distractors": 8,
+    "n_instances": 8,
+    "position_jitter": 0.0,
+    "rotation_jitter_deg": 0.0,
+    "scale_jitter": 0.0,
+    "seed": 4,
+    "shape": "plus",
+    "width": 960
+  }
+}

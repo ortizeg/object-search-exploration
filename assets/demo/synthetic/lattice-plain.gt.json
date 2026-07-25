@@ -1,0 +1,110 @@
+{
+  "boxes": [
+    {
+      "h": 57,
+      "w": 57,
+      "x": 123,
+      "y": 106
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 342,
+      "y": 106
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 562,
+      "y": 106
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 781,
+      "y": 106
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 123,
+      "y": 292
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 342,
+      "y": 292
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 562,
+      "y": 292
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 781,
+      "y": 292
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 123,
+      "y": 478
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 342,
+      "y": 478
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 562,
+      "y": 478
+    },
+    {
+      "h": 57,
+      "w": 57,
+      "x": 781,
+      "y": 478
+    }
+  ],
+  "image": "lattice-plain.png",
+  "slice_metadata": {
+    "clutter_level": 0.0,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 12
+  },
+  "spec": {
+    "bg_color": [
+      235,
+      235,
+      235
+    ],
+    "clutter": 0.0,
+    "fg_color": [
+      40,
+      90,
+      220
+    ],
+    "height": 640,
+    "instance_size": 56,
+    "mode": "lattice",
+    "n_distractors": 0,
+    "n_instances": 12,
+    "position_jitter": 0.0,
+    "rotation_jitter_deg": 0.0,
+    "scale_jitter": 0.0,
+    "seed": 1,
+    "shape": "plus",
+    "width": 960
+  }
+}

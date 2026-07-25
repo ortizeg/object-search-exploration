@@ -27,16 +27,16 @@ which kind of image, and at what latency.
 - [ ] **INFRA-07**: GitHub repo with branch protection on `main` and CI running
       lint / typecheck / test on every PR
 
-- [ ] **INFRA-08**: Frozen Pydantic schemas for every inter-layer contract
+- [x] **INFRA-08**: Frozen Pydantic schemas for every inter-layer contract
       (`ExemplarBox`, `Match`, `SearchResult`, `RunRecord`, `Rating`)
 
-- [ ] **INFRA-09**: `ONNXInferencer` base performs **init-time dtype and shape validation** —
+- [x] **INFRA-09**: `ONNXInferencer` base performs **init-time dtype and shape validation** —
       a mismatched model raises at construction, not at first frame
 
-- [ ] **INFRA-10**: `SearchMethod` protocol plus decorator registry — adding a method touches
+- [x] **INFRA-10**: `SearchMethod` protocol plus decorator registry — adding a method touches
       exactly one new file plus one import
 
-- [ ] **INFRA-11**: `pixi run fetch-models` downloads or exports every ONNX model; weights
+- [x] **INFRA-11**: `pixi run fetch-models` downloads or exports every ONNX model; weights
       are gitignored and the export step is scripted and reproducible, never manual
 
 ### Methods (METHOD)
@@ -139,7 +139,7 @@ which kind of image, and at what latency.
 
 - [ ] **EVAL-01**: SQLite store for runs and ratings, with a versioned and migratable schema
 - [ ] **EVAL-02**: Ground-truth box labels for the demo image set
-- [ ] **EVAL-03**: Synthetic image generator with **exact** ground truth — lattices, clutter,
+- [x] **EVAL-03**: Synthetic image generator with **exact** ground truth — lattices, clutter,
       distractors, scale and rotation variation
 
 - [ ] **EVAL-04**: Benchmark runner covering every method × every image × default config,
@@ -194,9 +194,17 @@ which kind of image, and at what latency.
       mutually exclusive with them, validated `0 ≤ wrong_count ≤ R`. If both are present,
       per-match wins and the discrepancy is flagged, not silently reconciled
 
+- [x] **EVAL-19**: **Chip-insertion benchmark set** — 10 generated images, each with a
+      *different* randomly-generated chip pasted `N ∈ {5, 10, 15}` times at random
+      **non-overlapping** positions on a white background, across 10 canvas sizes ramping from
+      small to very large. Ground truth is exact and known by construction, so precision,
+      recall, and AP are computable per method with no human rating and no hand-labelling.
+      This is the parameter-tuning and method-comparison harness: an objective, zero-cost
+      signal that can be re-run after every config change.
+
 ### Demo Assets & Docs (DOC)
 
-- [ ] **DOC-01**: Demo image set — basketball broadcast frames from the sibling project,
+- [x] **DOC-01**: Demo image set — basketball broadcast frames from the sibling project,
       permissively-licensed generic repeated-instance photos (shelf, PCB, parking lot,
       tiles), and generated synthetic images — with a `LICENSES.md` recording provenance
 
@@ -274,12 +282,12 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | INFRA-05 | Phase 1 | Complete |
 | INFRA-06 | Phase 1 | Complete |
 | INFRA-07 | Phase 1 | Pending |
-| INFRA-08 | Phase 1 | Pending |
-| INFRA-09 | Phase 1 | Pending |
-| INFRA-10 | Phase 1 | Pending |
-| INFRA-11 | Phase 1 | Pending |
-| EVAL-03 | Phase 1 | Pending |
-| DOC-01 | Phase 1 | Pending |
+| INFRA-08 | Phase 1 | Complete |
+| INFRA-09 | Phase 1 | Complete |
+| INFRA-10 | Phase 1 | Complete |
+| INFRA-11 | Phase 1 | Complete |
+| EVAL-03 | Phase 1 | Complete |
+| DOC-01 | Phase 1 | Complete |
 | METHOD-01 | Phase 2 | Pending |
 | METHOD-07 | Phase 2 | Pending |
 | METHOD-08 | Phase 2 | Pending |
@@ -307,6 +315,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-14 | Phase 3 | Pending |
 | EVAL-17 | Phase 3 | Pending |
 | EVAL-18 | Phase 3 | Pending |
+| EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Phase 1 generator complete; Phase 8 consumption pending |
 | UI-01 | Phase 4 | Pending |
 | UI-02 | Phase 4 | Pending |
 | UI-03 | Phase 4 | Pending |

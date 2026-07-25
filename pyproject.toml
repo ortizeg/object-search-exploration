@@ -68,7 +68,10 @@ ignore_missing_imports = false
 # cv2, onnxruntime, sklearn and scipy ship absent or incomplete stubs. Scope the escape
 # hatch to exactly those modules so strict mode stays honest everywhere else.
 [[tool.mypy.overrides]]
-module = ["cv2.*", "onnxruntime.*", "sklearn.*", "scipy.*"]
+# ultralytics lives only in the `export` pixi env (torch, AGPL-3.0) and is imported inside a
+# single function; it is absent from the runtime env mypy runs in, so treat it as untyped
+# there rather than failing the type check on an intentionally-absent module.
+module = ["cv2.*", "onnxruntime.*", "sklearn.*", "scipy.*", "ultralytics.*"]
 ignore_missing_imports = true
 
 # --------------------------------------------------------------------------------- pytest

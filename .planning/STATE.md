@@ -5,14 +5,15 @@ milestone_name: milestone
 current_phase: 1
 current_phase_name: Foundation
 status: executing
-stopped_at: "Completed 01-01-PLAN.md (Task 6 blocked: branch protection needs GitHub Pro or a public repo)"
+stopped_at: ""
+deviation_branch_protection: "INFRA-07 partial — branch protection unavailable on a free private repo (403 'Upgrade to GitHub Pro or make this repository public'). Skipped by decision; CI on PRs works, server-side enforcement does not. Not a blocker for any other work."
 last_updated: "2026-07-24T18:28:36.420Z"
 last_activity: 2026-07-24
 last_activity_desc: Project initialized; PROJECT.md, REQUIREMENTS.md, ROADMAP.md
 progress:
-  total_phases: 4
+  total_phases: 8
   completed_phases: 0
-  total_plans: 2
+  total_plans: 16
   completed_plans: 1
 ---
 
@@ -30,10 +31,11 @@ which method actually works, on which kind of image, and at what latency.
 ## Current Position
 
 Phase: 1 of 8 (Foundation)
-Plan: 1 of 2 in current phase
-Status: Ready to execute
-Last activity: 2026-07-24 — Project initialized; PROJECT.md, REQUIREMENTS.md, ROADMAP.md
-written and committed; private GitHub repo created and `main` pushed.
+Plan: 2 of 2 in current phase
+Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
+Last activity: 2026-07-25 — Executed 01-02: schemas, registry, ONNXInferencer, synthetic +
+chip benchmark, fetch-models, demo assets. All gates green (90.34% coverage). PR #2 open, CI
+green. INFRA-07 branch protection unavailable on a private repo.
 
 Progress: [█████░░░░░] 50%
 
@@ -225,6 +227,6 @@ corrections are load-bearing:
 
 ## Session
 
-**Last session:** 2026-07-24T18:28:36.415Z
-**Stopped at:** Completed 01-01-PLAN.md (Task 6 blocked: branch protection needs GitHub Pro or a public repo)
+**Last session:** 2026-07-25T05:30:00.000Z
+**Stopped at:** Completed 01-02-PLAN.md (INFRA-07 branch protection still blocked: needs GitHub Pro or a public repo)
 **Resume file:** None
