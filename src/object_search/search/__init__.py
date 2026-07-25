@@ -5,13 +5,20 @@ line below, which loads the module for its ``@register_method`` side effect. The
 plugin scan and no auto-discovery -- the import list *is* the set of installed methods, and
 you can read it top to bottom to know what the app can do.
 
-There are no methods yet: Phase 2 adds Method 1 and, with it, the first import here, e.g.::
+Phase 2 adds Method 1, and with it the first registration import::
 
     from object_search.search import ncc  # noqa: F401  (registers "ncc")
 
-Until then the block is intentionally empty except for this note.
+Every later method appends exactly one more such line -- that plus the new file is the whole
+cost of adding a method (INFRA-10).
 """
 
+# -- Method registrations (INFRA-10) --------------------------------------------------
+# One import per method, each purely for its @register_method side effect. The import list
+# below *is* the set of installed methods -- no plugin scan, no auto-discovery. Each import
+# is "unused" by name (hence noqa: F401) but load-bearing: importing the module runs its
+# @register_method decorator, which is the entire cost of adding a method.
+from object_search.search import ncc  # noqa: F401  (registers "ncc")
 from object_search.search.registry import (
     DuplicateMethodError,
     MethodInfo,
@@ -24,11 +31,6 @@ from object_search.search.registry import (
     method_schemas,
     register_method,
 )
-
-# -- Method registrations (INFRA-10) --------------------------------------------------
-# One import per method, each purely for its @register_method side effect. Phase 2 adds a
-# line like `from object_search.search import ncc` with a trailing noqa-F401 (the import is
-# "unused" by name but load-bearing for its registration side effect).
 
 __all__ = [
     "DuplicateMethodError",
