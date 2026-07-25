@@ -94,6 +94,7 @@ Deferred deliberately (mirrored in ``docs/methods/sparse-geo.md``); none is buil
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Literal
 
 import cv2
@@ -101,6 +102,21 @@ import numpy as np
 import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
+
+from object_search.schemas import (
+    BBox,
+    Candidate,
+    Correspondence,
+    Diagnostics,
+    ExemplarBox,
+    HoughPeak,
+    LatencyBreakdown,
+    Match,
+    Point,
+    SearchOutcome,
+    SearchResult,
+)
+from object_search.search.registry import register_method
 
 # -- Tunables that are properties of the METHOD, not of a query, so they are module -------
 # -- constants rather than config fields. Each is justified from Lowe IJCV 2004 §7.3. -----
@@ -118,6 +134,11 @@ _K_CEILING_RATIO = 0.9
 # A verified peak whose mapped box overlaps the exemplar by at least this IoU is the exemplar's
 # own self-match, labelled is_exemplar rather than dropped or double-counted (METHOD-04c).
 _EXEMPLAR_IOU = 0.5
+# Diagnostics payload caps -- correspondences and peaks are for a human overlay, not a data dump.
+_MAX_DIAG_CORRESPONDENCES = 300
+_MAX_CANDIDATES = 50
+# A hard ceiling on sequential-RANSAC rounds, so a pathological pool cannot loop forever.
+_MAX_SEQUENTIAL_ROUNDS = 64
 
 
 class SparseGeoConfig(BaseModel):
@@ -768,3 +789,505 @@ def _enumerate_peaks(
             )
         )
     return tuple(accepted)
+
+
+# ---------------------------------------------------------- per-peak RANSAC (NumPy, real seed)
+
+
+@dataclass(frozen=True)
+class _SimilarityModel:
+    """A fitted 4-DoF similarity as a 2x3 affine, plus the scale and the signed determinant.
+
+    ``det`` carries the reflection: a *proper* (orientation-preserving) similarity has
+    ``det > 0``; a reflected one has ``det < 0``. Degeneracy rejection reads the sign directly.
+    """
+
+    matrix: npt.NDArray[np.float64]  # 2x3: [[m00, m01, tx], [m10, m11, ty]]
+    scale: float
+    det: float
+
+    @property
+    def flat(self) -> tuple[float, ...]:
+        """Row-major 6-tuple for :class:`Match.transform`."""
+        return tuple(float(v) for v in self.matrix.reshape(-1))
+
+
+def _apply_model(model: _SimilarityModel, pts: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Map ``pts`` (n, 2) through ``model``: ``linear @ p + translation``."""
+    linear = model.matrix[:, :2]
+    translation = model.matrix[:, 2]
+    out: npt.NDArray[np.float64] = pts @ linear.T + translation
+    return out
+
+
+def _model_from_complex(a: complex, b: complex, *, reflect: bool) -> _SimilarityModel:
+    """Build a 2x3 similarity from the complex-linear coefficients ``a`` (scale*rotation), ``b``.
+
+    ``q = a*p + b`` is the proper similarity; ``q = a*conj(p) + b`` is its reflection. The two
+    linear parts differ only in the sign structure, and the reflection is the one with a negative
+    determinant -- which is exactly what mirror rejection keys on.
+    """
+    ar, ai = a.real, a.imag
+    if reflect:
+        linear = np.array([[ar, ai], [ai, -ar]], dtype=np.float64)
+    else:
+        linear = np.array([[ar, -ai], [ai, ar]], dtype=np.float64)
+    matrix = np.array([[linear[0, 0], linear[0, 1], b.real], [linear[1, 0], linear[1, 1], b.imag]])
+    det = float(linear[0, 0] * linear[1, 1] - linear[0, 1] * linear[1, 0])
+    return _SimilarityModel(matrix, float(np.sqrt(abs(det))), det)
+
+
+def _two_point_models(
+    p1: npt.NDArray[np.float64],
+    p2: npt.NDArray[np.float64],
+    q1: npt.NDArray[np.float64],
+    q2: npt.NDArray[np.float64],
+) -> list[_SimilarityModel]:
+    """Both 4-DoF similarities a pair of correspondences can determine: proper and reflected.
+
+    Two point pairs determine a 4-DoF similarity exactly, but there are two of them -- an
+    orientation-preserving fit and a reflected fit. Returning BOTH is what makes the mirror check
+    non-vacuous: mirrored data is best explained by the reflected model, whose negative
+    determinant degeneracy rejection then discards.
+    """
+    pc1, pc2 = complex(p1[0], p1[1]), complex(p2[0], p2[1])
+    qc1, qc2 = complex(q1[0], q1[1]), complex(q2[0], q2[1])
+    dp = pc2 - pc1
+    if abs(dp) < 1e-12:
+        return []
+    a_proper = (qc2 - qc1) / dp
+    b_proper = qc1 - a_proper * pc1
+    a_reflect = (qc2 - qc1) / dp.conjugate()
+    b_reflect = qc1 - a_reflect * pc1.conjugate()
+    return [
+        _model_from_complex(a_proper, b_proper, reflect=False),
+        _model_from_complex(a_reflect, b_reflect, reflect=True),
+    ]
+
+
+@dataclass(frozen=True)
+class _RansacResult:
+    """The best model RANSAC found for a set of correspondences, and how it sampled.
+
+    ``sample_log`` -- the sequence of index pairs sampled -- is exposed ONLY so tests can prove
+    the seed is real: the same seed reproduces it byte-for-byte, a different seed changes it.
+    """
+
+    model: _SimilarityModel | None
+    inlier_mask: npt.NDArray[np.bool_]
+    n_inliers: int
+    sample_log: tuple[tuple[int, int], ...]
+
+
+def _ransac_similarity(
+    src: npt.NDArray[np.float64],
+    dst: npt.NDArray[np.float64],
+    iters: int,
+    thresh_px: float,
+    rng: np.random.Generator,
+) -> _RansacResult:
+    """Fit a 4-DoF similarity by RANSAC, implemented in NumPy with a REAL, user-controllable seed.
+
+    The sampling is driven by ``rng = np.random.default_rng(config.seed)`` -- deliberately NOT
+    ``cv2.setRNGSeed``, which has no effect on OpenCV's RANSAC (it hardcodes ``RNG rng((uint64)-1)``
+    in ``ptsetreg.cpp``). Each iteration samples 2 distinct correspondences, fits both the proper
+    and reflected 2-point similarities, and keeps whichever model has the most inliers within
+    ``thresh_px``. The mirror check downstream can then reject a reflected winner.
+    """
+    n = src.shape[0]
+    if n < 2:
+        return _RansacResult(None, np.zeros(n, dtype=np.bool_), 0, ())
+
+    best_model: _SimilarityModel | None = None
+    best_mask = np.zeros(n, dtype=np.bool_)
+    best_count = -1
+    sample_log: list[tuple[int, int]] = []
+    for _ in range(iters):
+        i = int(rng.integers(0, n))
+        j = int(rng.integers(0, n))
+        while j == i:
+            j = int(rng.integers(0, n))
+        sample_log.append((i, j))
+        for model in _two_point_models(src[i], src[j], dst[i], dst[j]):
+            residuals = np.linalg.norm(_apply_model(model, src) - dst, axis=1)
+            mask = residuals < thresh_px
+            count = int(mask.sum())
+            if count > best_count:
+                best_count, best_model, best_mask = count, model, mask
+    return _RansacResult(best_model, best_mask, max(best_count, 0), tuple(sample_log))
+
+
+def _is_degenerate(model: _SimilarityModel, min_scale: float, max_scale: float) -> tuple[bool, str]:
+    """Reject implausible fits: **scale plausibility** and **mirror** (negative determinant).
+
+    Shear and aspect distortion are DELIBERATELY not tested. A 4-DoF similarity has neither by
+    construction -- its linear part is always ``scale * rotation`` (or its reflection) -- so a
+    shear or aspect test could only ever pass and would be a vacuous control. Those tests would
+    become meaningful only if a full affine model were ever added as a config option; until then
+    the two checks that can actually fire are the determinant sign and the scale bound.
+    """
+    if model.det < 0.0:
+        return True, "mirror/reflection (negative determinant of the linear part)"
+    if not (min_scale <= model.scale <= max_scale):
+        return True, f"implausible scale {model.scale:.3f} outside [{min_scale}, {max_scale}]"
+    return False, ""
+
+
+def _model_to_box(model: _SimilarityModel, exemplar: BBox, width: int, height: int) -> BBox | None:
+    """Map the exemplar box's corners through ``model`` to an axis-aligned scene box.
+
+    The four corners are transformed and their axis-aligned bounding box is taken (a rotated
+    similarity turns the box into a rotated quad, and the reported detection is its AABB). Returns
+    ``None`` when the mapped box falls entirely off-image or collapses below one pixel.
+    """
+    corners = np.array(
+        [
+            [exemplar.x, exemplar.y],
+            [exemplar.x2, exemplar.y],
+            [exemplar.x2, exemplar.y2],
+            [exemplar.x, exemplar.y2],
+        ],
+        dtype=np.float64,
+    )
+    mapped = _apply_model(model, corners)
+    x0 = max(0, min(int(np.floor(mapped[:, 0].min())), width - 1))
+    y0 = max(0, min(int(np.floor(mapped[:, 1].min())), height - 1))
+    x1 = max(0, min(int(np.ceil(mapped[:, 0].max())), width))
+    y1 = max(0, min(int(np.ceil(mapped[:, 1].max())), height))
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return BBox(x=x0, y=y0, w=x1 - x0, h=y1 - y0)
+
+
+# ------------------------------------------------------------------ verification + assembly
+
+
+@dataclass(frozen=True)
+class _Instance:
+    """A verified instance: its box, the fitted model, and how strongly it was supported."""
+
+    box: BBox
+    model: _SimilarityModel
+    n_inliers: int
+    votes: float
+
+
+def _verify_peaks(
+    peaks: tuple[_Peak, ...],
+    crop_pts: npt.NDArray[np.float64],
+    scene_pts: npt.NDArray[np.float64],
+    exemplar: BBox,
+    width: int,
+    height: int,
+    config: SparseGeoConfig,
+    rng: np.random.Generator,
+) -> tuple[list[_Instance], list[Candidate], list[HoughPeak]]:
+    """Per-peak RANSAC + degeneracy rejection for the Hough decomposition.
+
+    Every peak is verified independently; an accepted peak becomes an instance, a rejected one is
+    kept as a sub-threshold Candidate (its vote weight is the score) so an offline sweep can
+    rebuild a PR curve (EVAL-08). METHOD-12: there is no single-best short-circuit -- every peak
+    that clears the inlier floor and survives degeneracy rejection is returned.
+    """
+    instances: list[_Instance] = []
+    candidates: list[Candidate] = []
+    diag_peaks: list[HoughPeak] = []
+    for peak in peaks:
+        idx = np.array(peak.member_indices, dtype=np.int64)
+        result = _ransac_similarity(
+            crop_pts[idx], scene_pts[idx], config.ransac_iters, config.ransac_thresh_px, rng
+        )
+        n_inliers = result.n_inliers
+        box = None if result.model is None else _model_to_box(result.model, exemplar, width, height)
+        degenerate, reason = (
+            (True, "no model")
+            if result.model is None
+            else _is_degenerate(result.model, config.min_scale, config.max_scale)
+        )
+        diag_peaks.append(
+            HoughPeak(
+                dx=peak.dx,
+                dy=peak.dy,
+                log_scale=peak.log_scale,
+                theta_deg=peak.theta_deg,
+                votes=peak.votes,
+                n_inliers=n_inliers,
+            )
+        )
+        if result.model is not None and not degenerate and n_inliers >= config.min_inliers and box:
+            instances.append(_Instance(box, result.model, n_inliers, peak.votes))
+        elif box is not None:
+            candidates.append(Candidate(box=box, score=peak.votes))
+        elif reason:
+            logger.debug("sparse-geo peak rejected ({}): votes={:.2f}", reason, peak.votes)
+    return instances, candidates, diag_peaks
+
+
+def _verify_sequential_ransac(
+    crop_pts: npt.NDArray[np.float64],
+    scene_pts: npt.NDArray[np.float64],
+    exemplar: BBox,
+    width: int,
+    height: int,
+    config: SparseGeoConfig,
+    rng: np.random.Generator,
+) -> tuple[list[_Instance], list[Candidate], list[HoughPeak]]:
+    """The pluggable alternative to Hough (METHOD-04b): fit the dominant model, remove its inliers,
+    repeat until the support falls below the floor.
+
+    Same interface, same degeneracy rejection, same RANSAC. Mirrors the selectable-strategy
+    pattern used by ``calibration.py`` / ``peaks.py``: a reader swaps ``decomposition`` in config
+    and the rest of the pipeline is unchanged.
+    """
+    instances: list[_Instance] = []
+    diag_peaks: list[HoughPeak] = []
+    remaining = np.arange(crop_pts.shape[0], dtype=np.int64)
+    for _ in range(_MAX_SEQUENTIAL_ROUNDS):
+        if remaining.size < config.min_inliers:
+            break
+        result = _ransac_similarity(
+            crop_pts[remaining],
+            scene_pts[remaining],
+            config.ransac_iters,
+            config.ransac_thresh_px,
+            rng,
+        )
+        if result.model is None or result.n_inliers < config.min_inliers:
+            break
+        degenerate, _ = _is_degenerate(result.model, config.min_scale, config.max_scale)
+        inlier_global = remaining[result.inlier_mask]
+        remaining = remaining[~result.inlier_mask]  # remove this model's inliers and continue
+        box = _model_to_box(result.model, exemplar, width, height)
+        if degenerate or box is None:
+            continue
+        centre = _apply_model(result.model, np.array([[exemplar.cx, exemplar.cy]]))[0]
+        diag_peaks.append(
+            HoughPeak(
+                dx=float(centre[0]),
+                dy=float(centre[1]),
+                log_scale=float(np.log(result.model.scale)),
+                theta_deg=float(
+                    np.degrees(np.arctan2(result.model.matrix[1, 0], result.model.matrix[0, 0]))
+                ),
+                votes=float(inlier_global.size),
+                n_inliers=result.n_inliers,
+            )
+        )
+        instances.append(_Instance(box, result.model, result.n_inliers, float(inlier_global.size)))
+    return instances, [], diag_peaks
+
+
+def _label_exemplar_and_build_matches(
+    instances: list[_Instance], exemplar: BBox
+) -> tuple[Match, ...]:
+    """Turn verified instances into Matches, labelling the exemplar's own region is_exemplar=True.
+
+    The crop is part of the scene, so it self-matches to an identity-transform instance whose box
+    coincides with the exemplar. That is a genuine instance (METHOD-04c): the best-overlapping
+    instance above the IoU floor is labelled rather than dropped (which understates recall) or
+    counted silently as a discovery (which overstates the method). Matches are returned in the
+    canonical ``(-score, y, x)`` order.
+    """
+    exemplar_idx: int | None = None
+    best_iou = _EXEMPLAR_IOU
+    for i, inst in enumerate(instances):
+        overlap = inst.box.iou(exemplar)
+        if overlap >= best_iou:
+            best_iou = overlap
+            exemplar_idx = i
+    order = sorted(
+        range(len(instances)),
+        key=lambda i: (-instances[i].n_inliers, instances[i].box.y, instances[i].box.x),
+    )
+    return tuple(
+        Match(
+            box=instances[i].box,
+            score=float(instances[i].n_inliers),
+            is_exemplar=(i == exemplar_idx),
+            transform=instances[i].model.flat,
+        )
+        for i in order
+    )
+
+
+def _empty(note: str, metrics: dict[str, float], latency: LatencyBreakdown) -> SearchResult:
+    """An honest ``outcome=EMPTY`` carrying a note that says *why* (METHOD-04c)."""
+    return SearchResult(
+        method="sparse-geo",
+        method_version=_METHOD_VERSION,
+        outcome=SearchOutcome.EMPTY,
+        matches=(),
+        latency=latency,
+        threshold_applied=float(metrics.get("min_inliers", 0.0)),
+        candidates=(),
+        diagnostics=Diagnostics(notes=(note,), metrics=metrics),
+    )
+
+
+@register_method(
+    name="sparse-geo",
+    description=(
+        "Sparse keypoint matching (ratio test disabled) with generalized Hough voting and "
+        "per-peak RANSAC -- recovers many geometric models, one per instance."
+    ),
+    version=_METHOD_VERSION,
+    config_model=SparseGeoConfig,
+)
+def search(
+    image: npt.NDArray[np.uint8],
+    exemplar: ExemplarBox,
+    config: BaseModel,
+) -> SearchResult:
+    """Find every instance of ``exemplar`` in ``image`` by sparse matching + geometric voting."""
+    # The registry types config as BaseModel (method-agnostic); the registered config_model
+    # guarantees the concrete type. Narrow it once, and fail loudly if the contract is violated.
+    if not isinstance(config, SparseGeoConfig):
+        raise TypeError(
+            f"sparse-geo.search requires a SparseGeoConfig, got {type(config).__name__}"
+        )
+
+    height, width = image.shape[:2]
+    ex = exemplar.box
+    t_start = perf_counter()
+
+    # 1. Grayscale once and build the requested backend (SIFT default; metric fixed by backend).
+    gray: npt.NDArray[np.uint8] = np.ascontiguousarray(
+        cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), dtype=np.uint8
+    )
+    backend = _make_backend(config.backend)
+
+    # 2. Detect + describe on the crop and the full scene. Crop keypoints are shifted into scene
+    #    coordinates by the crop origin, so every coordinate below is in scene pixels.
+    crop_gray = np.ascontiguousarray(gray[ex.y : ex.y2, ex.x : ex.x2], dtype=np.uint8)
+    crop_kps = _detect(crop_gray, backend, origin_xy=(ex.x, ex.y))
+    scene_kps = _detect(gray, backend)
+    preprocess_ms = (perf_counter() - t_start) * 1000.0
+
+    # 3. Low-keypoint guard (METHOD-04c) -- abstain WITH a diagnostic, never a silent empty result.
+    base_metrics: dict[str, float] = {
+        "n_crop_keypoints": float(crop_kps.count),
+        "n_scene_keypoints": float(scene_kps.count),
+        "min_inliers": float(config.min_inliers),
+    }
+    if crop_kps.count < config.min_exemplar_keypoints:
+        note = _abstain_note(config.backend, crop_kps.count, config.min_exemplar_keypoints)
+        logger.debug("sparse-geo: {}", note)
+        return _empty(
+            note,
+            base_metrics,
+            LatencyBreakdown(preprocess_ms=preprocess_ms, inference_ms=0.0, postprocess_ms=0.0),
+        )
+
+    t_infer = perf_counter()
+
+    # 4. Many-to-many top-k matching with the standard Lowe ratio test DISABLED (only the optional
+    #    k+1 ratio is available). This keeps the repeated-instance correspondences a ratio test
+    #    would destroy.
+    matched = _match_top_k(
+        crop_kps, scene_kps, backend.metric, config.k, config.use_kplus1_ratio, config.kplus1_ratio
+    )
+    crop_pts = np.array([c.crop_xy for c in matched.correspondences], dtype=np.float64).reshape(
+        -1, 2
+    )
+    scene_pts = np.array([c.scene_xy for c in matched.correspondences], dtype=np.float64).reshape(
+        -1, 2
+    )
+
+    # 5. Cast each correspondence into a 4-DoF pose vote under the selected mode. single-4dof
+    #    RAISES on a frameless backend (all classical backends are framed, so it is valid here).
+    rng = np.random.default_rng(config.seed)
+    centre = (ex.cx, ex.cy)
+    cast = _cast_votes(
+        config.voting_mode,
+        matched.correspondences,
+        centre,
+        has_frame=backend.has_frame,
+        pairwise_cap=config.pairwise_cap,
+        rng=rng,
+    )
+
+    # 6. Decompose the correspondences into instance hypotheses -- generalized Hough voting
+    #    (default) or the sequential-RANSAC alternative (METHOD-04b), both behind one interface.
+    base_location_width = _LOCATION_BIN_FRAC * max(ex.w, ex.h)
+    if config.decomposition == "hough":
+        weight, members = _accumulate_votes(cast.votes, base_location_width)
+        peaks = _enumerate_peaks(weight, members, config.min_votes, base_location_width)
+        # 7. Verify each peak with its own NumPy per-peak RANSAC + degeneracy rejection.
+        instances, candidates, diag_peaks = _verify_peaks(
+            peaks, crop_pts, scene_pts, ex, width, height, config, rng
+        )
+    else:
+        peaks = ()
+        instances, candidates, diag_peaks = _verify_sequential_ransac(
+            crop_pts, scene_pts, ex, width, height, config, rng
+        )
+
+    inference_ms = (perf_counter() - t_infer) * 1000.0
+    t_post = perf_counter()
+
+    # 8. Box mapping already happened per instance; label the exemplar self-match and assemble the
+    #    diagnostics overlay (correspondences + Hough peaks) the practitioner reads.
+    matches = _label_exemplar_and_build_matches(instances, ex)
+    ordered_corr = sorted(matched.correspondences, key=lambda c: c.distance)
+    diag_correspondences = tuple(
+        Correspondence(
+            src=Point(x=c.crop_xy[0], y=c.crop_xy[1]),
+            dst=Point(x=c.scene_xy[0], y=c.scene_xy[1]),
+            distance=c.distance,
+            rank=c.rank,
+        )
+        for c in ordered_corr[:_MAX_DIAG_CORRESPONDENCES]
+    )
+    metrics = {
+        **base_metrics,
+        "n_correspondences": float(len(matched.correspondences)),
+        "n_crop_matched": float(matched.n_crop_matched),
+        "k_ceiling_hit": float(matched.k_ceiling_hit),
+        "n_dropped_kplus1": float(matched.n_dropped_kplus1),
+        "n_peaks": float(len(peaks)),
+        "n_instances": float(len(matches)),
+        "n_candidates": float(len(candidates)),
+        "pairwise_pairs_sampled": float(cast.pairwise_pairs_sampled),
+        "pairwise_capped": 1.0 if cast.pairwise_capped else 0.0,
+    }
+    postprocess_ms = (perf_counter() - t_post) * 1000.0
+    latency = LatencyBreakdown(
+        preprocess_ms=preprocess_ms, inference_ms=inference_ms, postprocess_ms=postprocess_ms
+    )
+    diagnostics = Diagnostics(
+        notes=(
+            f"{matched.n_crop_matched} matched crop keypoint(s) -> "
+            f"{len(matched.correspondences)} correspondence(s); "
+            f"{len(matches)} instance(s) verified from {len(peaks)} peak(s) "
+            f"({config.decomposition}, {config.voting_mode}).",
+        ),
+        metrics=metrics,
+        correspondences=diag_correspondences,
+        hough_peaks=tuple(diag_peaks),
+    )
+
+    # 9. Assemble the result. METHOD-12: multiple distinct models are returned; there is no
+    #    single-best short-circuit anywhere above.
+    trimmed_candidates = tuple(sorted(candidates, key=lambda c: -c.score)[:_MAX_CANDIDATES])
+    if not matches:
+        empty = _empty(
+            f"no geometric model met the {config.min_inliers}-inlier floor "
+            f"(matched {len(matched.correspondences)} correspondence(s), "
+            f"{len(peaks)} peak(s)); the crop may be too self-similar for this method.",
+            metrics,
+            latency,
+        )
+        return empty.model_copy(
+            update={"candidates": trimmed_candidates, "diagnostics": diagnostics}
+        )
+
+    return SearchResult(
+        method="sparse-geo",
+        method_version=_METHOD_VERSION,
+        outcome=SearchOutcome.OK,
+        matches=matches,
+        latency=latency,
+        threshold_applied=float(config.min_inliers),
+        candidates=trimmed_candidates,
+        diagnostics=diagnostics,
+    )

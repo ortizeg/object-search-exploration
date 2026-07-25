@@ -18,7 +18,10 @@ cost of adding a method (INFRA-10).
 # below *is* the set of installed methods -- no plugin scan, no auto-discovery. Each import
 # is "unused" by name (hence noqa: F401) but load-bearing: importing the module runs its
 # @register_method decorator, which is the entire cost of adding a method.
-from object_search.search import ncc  # noqa: F401  (registers "ncc")
+from object_search.search import (
+    ncc,  # noqa: F401  (registers "ncc")
+    sparse_geo,  # noqa: F401  (registers "sparse-geo")
+)
 from object_search.search.registry import (
     DuplicateMethodError,
     MethodInfo,
