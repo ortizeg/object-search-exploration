@@ -150,6 +150,34 @@ def _parse_sidecar(path: Path, image_id: str) -> GroundTruth:
     )
 
 
+def chipset_image_ids() -> tuple[str, ...]:
+    """Every chipset image id that has a committed sidecar, in canvas-size order.
+
+    The benchmark's model-free CI subset (EVAL-19) sweeps this set; deriving it from the files
+    on disk rather than hardcoding ``chipset-01..10`` means a regenerated set with a different
+    length stays correct.
+    """
+    chipset_dir = repo_root() / _GT_ROOTS[0]
+    if not chipset_dir.is_dir():
+        return ()
+    return tuple(sorted(path.name[: -len(".gt.json")] for path in chipset_dir.glob("*.gt.json")))
+
+
+def scene_path(image_id: str) -> Path | None:
+    """Absolute path to the scene image for ``image_id``, or ``None`` if not on disk.
+
+    Searches the GT roots for ``<image_id>.png`` then ``<image_id>.jpg`` (basketball frames are
+    JPEG). The benchmark loads the committed pixels rather than regenerating, so the number a
+    method scores is the number a human would see in the UI.
+    """
+    for base in (repo_root() / r for r in _GT_ROOTS):
+        for suffix in (".png", ".jpg"):
+            candidate = base / f"{image_id}{suffix}"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 @cache
 def load_ground_truth(image_id: str, root: Path | None = None) -> GroundTruth | None:
     """Load the ground truth for ``image_id``, or ``None`` if no sidecar exists.
