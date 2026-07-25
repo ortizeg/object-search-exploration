@@ -62,3 +62,47 @@ docstring (mirrored verbatim so the two cannot drift).
 - **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
 - **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
+
+## Cross-cutting — applies to every method
+
+These are not any single method's backlog; they are structural robustness work and deferred
+whole methods, recorded here so the reasoning survives (IDEA.md §12).
+
+### Lattice fitting as post-detection verification (highest leverage)
+
+**Not built. Likely the single highest-leverage robustness item for the shelf / PCB / tile /
+lattice images**, and the reason those scenes are in the demo set.
+
+Every method above treats each instance independently. But the objects being hunted are
+overwhelmingly arranged on a **regular grid** — chips on a PCB, products on a shelf, tiles on a
+floor. A grid is a strong, cheap prior that none of the detectors currently uses:
+
+- **Fit a 2-D lattice** (two basis vectors + an origin) to the *set* of accepted detections by
+  robust voting on the pairwise offset vectors between matches. A handful of confident detections
+  is enough to recover the lattice.
+- **Recover misses:** every lattice cell with no detection is a predicted location. Re-score just
+  those cells (a cheap local NCC or embedding check) to recover instances the detector dropped —
+  directly attacking the recall collapse `sparse-geo` and `dino-dense` show on the chipset.
+- **Kill false positives:** a "detection" that sits off-lattice, where no grid cell predicts an
+  instance, is almost certainly spurious and can be dropped.
+
+This recovers misses and removes false positives *more effectively than tuning any single
+detector's threshold*, because it adds information (the arrangement) rather than trading precision
+against recall on the same per-instance score. It is method-agnostic — it consumes the accepted
+match set and would sit in `search/common/` as an optional post-verification offering, wired into
+whichever method opts in. Deferred from Milestone 1 to keep each method readable and self-contained.
+
+### Deferred whole methods (IDEA.md §12)
+
+**Method 4 — exemplar-conditioned detectors and counters.** Open-vocabulary / exemplar
+detectors (T-Rex2, CountGD) and few-shot counters (FamNet, BMNet+, SAFECount, CounTR, LOCA,
+CACViT). T-Rex2 is arguably the closest off-the-shelf fit to the "draw one box, get the rest"
+workflow. **Deferred because** the weights are heavy and licence-encumbered, ONNX export is not a
+solved path, and several are API-gated — all three conflict with the local-first, ONNX-first,
+no-cloud constraints. This corner of the field moves fast; re-check what has landed and what has a
+clean ONNX export before committing to any one.
+
+**Method 6 — one-shot personalized segmentation.** PerSAM / PerSAM-F, Matcher, SegGPT / Painter,
+SAM 2 memory-bank propagation. **Deferred because** Milestone 1's output contract is boxes, not
+masks. It becomes cheap once Method 5's FastSAM proposal stage exists (the masks are already being
+produced), which makes it a natural Milestone 3 rather than a Milestone 1 method.
