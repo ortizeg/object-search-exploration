@@ -74,7 +74,9 @@ class SyntheticImage:
 
     image: npt.NDArray[np.uint8]
     boxes: tuple[BBox, ...]
-    spec: SyntheticSpec
+    # ``None`` for the chip-insertion set, which reuses this dataclass but is not driven by a
+    # SyntheticSpec (its provenance lives in the chipset sidecar instead).
+    spec: SyntheticSpec | None
     slice_metadata: SliceMetadata
 
 
@@ -300,7 +302,7 @@ def save(out: SyntheticImage, image_path: Path) -> Path:
     sidecar = image_path.with_suffix(".gt.json")
     payload = {
         "image": image_path.name,
-        "spec": out.spec.model_dump(mode="json"),
+        "spec": out.spec.model_dump(mode="json") if out.spec is not None else None,
         "slice_metadata": out.slice_metadata.model_dump(mode="json"),
         "boxes": [box.model_dump(mode="json") for box in out.boxes],
     }
