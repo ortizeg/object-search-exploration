@@ -38,11 +38,20 @@ import numpy as np
 import numpy.typing as npt
 from loguru import logger
 
+from object_search.explorations import list_explorations
+from object_search.explorations.marker_conditioned import MarkerConditionedConfig
+from object_search.explorations.marker_conditioned import run as _marker_run
 from object_search.provenance import repo_root
 from object_search.schemas import BBox, ExemplarBox, SearchResult
 from object_search.search import get_method, list_methods
 from object_search.search.common import viz
-from object_search.synthetic.generator import DEMO_SPECS, synthesize
+from object_search.search.proposals import ProposalBackend
+from object_search.synthetic.generator import (
+    DEMO_SPECS,
+    MARKER_DEMO_SPECS,
+    synthesize,
+    synthesize_markers,
+)
 
 # The committed default output root. The gallery lives in the repo at docs/samples/<method>/.
 _DEFAULT_OUT = repo_root() / "docs" / "samples"
@@ -187,6 +196,146 @@ def render_samples(
             rows.append((image_id, result))
             logger.debug(
                 "rendered sample {}/{}: {} match(es)", spec.name, image_id, len(result.matches)
+            )
+        written.append(_write_index(out_dir, spec.name, rows))
+
+    return sorted(written)
+
+
+# -- the marker exploration gallery (Milestone 2) -----------------------------------------
+#
+# The exploration analogue of the method loop above. Where ``render_samples`` iterates the
+# *method* registry, ``render_marker_samples`` iterates the *exploration* registry and renders
+# the marker-conditioned exploration over its own committed demo images -- the same fixed-query,
+# byte-identical-regeneration contract, one directory below ``docs/samples/<exploration>/``.
+#
+# A model-free marker finder keeps the marker step reproducible and dependency-light; only the
+# proposal stage needs a model, and it is injected as ``backend`` so a test can drive the whole
+# renderer with a deterministic stub and no ONNX weight at all. The committed gallery is rendered
+# by ``render-samples`` with a real (CPU, so reproducible) FastSAM backend.
+
+# The marker-finding method used for the committed marker gallery: model-free and deterministic.
+# Named here (not in the api/frontend layers, which stay method-name-free) purely as render config.
+_MARKER_FINDER = "ncc"
+
+# Overlay colours (BGR), mirroring frontend/js/overlay.js so the committed panels and the live UI
+# read the same: marker boxes + arrows in gold, the chosen proposal in blue, the connector orange.
+_MARKER_BOX_BGR = (102, 209, 255)
+_CHOSEN_PROPOSAL_BGR = (255, 160, 90)
+_MARKER_LINK_BGR = (66, 140, 255)
+# Fixed arrow length in scene pixels; LINE_8 (no anti-aliasing) keeps every draw byte-stable.
+_MARKER_ARROW_LEN = 26.0
+
+
+def _draw_marker_result(
+    scene: npt.NDArray[np.uint8], result: SearchResult, exploration_name: str
+) -> npt.NDArray[np.uint8]:
+    """Draw the marker layer on the scene: marker boxes, per-marker pointing arrows and their
+    reference points, the chosen proposal per marker, and a connector between the two.
+
+    Everything is drawn with ``cv2.LINE_8`` (no anti-aliasing) so the panel is byte-identical on
+    re-render, exactly like the Milestone 1 gallery.
+    """
+    canvas = viz.draw_matches(scene, [])  # a fresh BGR copy with nothing drawn on it yet
+    diagnostics = result.diagnostics
+    markers = diagnostics.markers or ()
+    references = diagnostics.marker_reference_points or ()
+    directions = diagnostics.marker_directions or ()
+
+    for box in markers:
+        cv2.rectangle(canvas, (box.x, box.y), (box.x2 - 1, box.y2 - 1), _MARKER_BOX_BGR, 2)
+    for match in result.matches:
+        b = match.box
+        cv2.rectangle(canvas, (b.x, b.y), (b.x2 - 1, b.y2 - 1), _CHOSEN_PROPOSAL_BGR, 2)
+
+    for i, reference in enumerate(references):
+        origin = (round(reference.x), round(reference.y))
+        if i < len(result.matches):
+            chosen = result.matches[i].box
+            cv2.line(
+                canvas,
+                origin,
+                (round(chosen.cx), round(chosen.cy)),
+                _MARKER_LINK_BGR,
+                1,
+                cv2.LINE_8,
+            )
+        direction = directions[i] if i < len(directions) else None
+        if direction is not None:
+            tip = (
+                round(reference.x + direction[0] * _MARKER_ARROW_LEN),
+                round(reference.y + direction[1] * _MARKER_ARROW_LEN),
+            )
+            cv2.arrowedLine(
+                canvas, origin, tip, _MARKER_BOX_BGR, 2, line_type=cv2.LINE_8, tipLength=0.35
+            )
+        cv2.circle(canvas, origin, 3, _MARKER_BOX_BGR, -1, lineType=cv2.LINE_8)
+
+    _ = exploration_name  # reserved for a future per-exploration caption; kept explicit.
+    return canvas
+
+
+def _render_marker_one(
+    scene: npt.NDArray[np.uint8],
+    exemplar: ExemplarBox,
+    result: SearchResult,
+    exploration_name: str,
+) -> npt.NDArray[np.uint8]:
+    """Compose the marker sample panel: the drawn marker exemplar beside the resolved result."""
+    query_tile = viz.draw_matches(scene, [], exemplar=exemplar)
+    result_tile = _draw_marker_result(scene, result, exploration_name)
+    tiles: list[tuple[str, npt.NDArray[np.uint8]]] = [
+        ("query (marker exemplar)", query_tile),
+        (f"{exploration_name}: {len(result.matches)} marker(s) resolved", result_tile),
+    ]
+    panel = viz.compose_panel(tiles)
+    return _downscale_to_width(panel, _MAX_PANEL_WIDTH)
+
+
+def render_marker_samples(
+    backend: ProposalBackend | None = None,
+    out_root: Path = _DEFAULT_OUT,
+) -> list[Path]:
+    """Render the marker-conditioned exploration over every marker demo image (Milestone 2).
+
+    Args:
+        backend: The proposal backend. ``None`` builds the default FastSAM backend (needs the
+            weight); a test injects a deterministic stub so the whole renderer runs model-free.
+        out_root: Root directory; the exploration writes to ``out_root/<exploration>/``.
+
+    Returns:
+        Every path written (PNG panels and ``index.md`` files), sorted, so a caller can assert on
+        them deterministically. Empty if no marker-conditioned exploration is registered.
+
+    The exemplar for each demo image is that image's first marker's exact ground-truth box -- the
+    "drawn" marker crop -- derived from the same seed the image is generated from, so the query set
+    is fixed without a second committed copy.
+    """
+    written: list[Path] = []
+    config = MarkerConditionedConfig(marker_method=_MARKER_FINDER)
+    for spec in list_explorations():
+        # Registry-driven: render the exploration whose config is the marker one, by identity of
+        # its config model rather than by a hardcoded exploration name.
+        if spec.config_model is not MarkerConditionedConfig:
+            continue
+        out_dir = out_root / spec.name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        rows: list[tuple[str, SearchResult]] = []
+        for image_id in sorted(MARKER_DEMO_SPECS):
+            marker_image = synthesize_markers(MARKER_DEMO_SPECS[image_id])
+            exemplar = ExemplarBox(box=marker_image.markers[0].box)
+            result = _marker_run(marker_image.image, exemplar, config, backend=backend)
+            panel = _render_marker_one(marker_image.image, exemplar, result, spec.name)
+            png_path = out_dir / f"{image_id}.png"
+            if not cv2.imwrite(str(png_path), panel):
+                raise OSError(f"failed to write marker sample panel to {png_path}")
+            written.append(png_path)
+            rows.append((image_id, result))
+            logger.debug(
+                "rendered marker sample {}/{}: {} marker(s)",
+                spec.name,
+                image_id,
+                len(result.matches),
             )
         written.append(_write_index(out_dir, spec.name, rows))
 
