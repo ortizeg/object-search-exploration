@@ -105,12 +105,31 @@ def chipset(
     typer.echo(f"wrote {len(written)} chip image(s) to {out}")
 
 
+_SAMPLES_DIR = repo_root() / "docs" / "samples"
+
+
 @app.command("render-samples")
-def render_samples() -> None:
-    """Placeholder: pre-rendered sample runs arrive in Phase 2 (DOC-02)."""
-    logger.error("render-samples is not implemented until Phase 2 (DOC-02)")
-    typer.echo("render-samples: implemented in Phase 2 (DOC-02). Nothing rendered.", err=True)
-    raise typer.Exit(code=1)
+def render_samples(
+    method: Annotated[
+        str | None, typer.Option("--method", help="Render one registered method, or all.")
+    ] = None,
+    out: Annotated[Path, typer.Option("--out", help="Gallery output root.")] = _SAMPLES_DIR,
+) -> None:
+    """Render the committed sample gallery under ``docs/samples/<method>/`` (DOC-02).
+
+    Iterates the method registry, so every registered method is rendered by default and a
+    method added in a later phase is picked up here with no code change.
+    """
+    from object_search.samples import render_samples as _render
+    from object_search.search import has_method
+
+    if method is not None and not has_method(method):
+        typer.echo(f"unknown method {method!r}; nothing rendered", err=True)
+        raise typer.Exit(code=1)
+
+    names = [method] if method is not None else None
+    paths = _render(names, out_root=out)
+    typer.echo(f"rendered {len(paths)} sample artifact(s) under {out}")
 
 
 @app.command("benchmark")

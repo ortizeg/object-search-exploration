@@ -39,10 +39,17 @@ def test_synth_unknown_spec_exits_nonzero(tmp_path: Path) -> None:
     assert "unknown spec" in result.output
 
 
-def test_render_samples_fails_loudly() -> None:
-    result = runner.invoke(app, ["render-samples"])
+def test_render_samples_exits_zero_and_writes(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["render-samples", "--method", "ncc", "--out", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "ncc" / "index.md").is_file()
+    assert list((tmp_path / "ncc").glob("*.png"))
+
+
+def test_render_samples_unknown_method_exits_nonzero(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["render-samples", "--method", "nope", "--out", str(tmp_path)])
     assert result.exit_code == 1
-    assert "Phase 2" in result.output
+    assert "unknown method" in result.output
 
 
 def test_benchmark_fails_loudly() -> None:
