@@ -84,3 +84,21 @@ class SearchResponse(BaseModel):
 
     run_id: int
     result: SearchResult
+
+
+class RatingResponse(BaseModel):
+    """The body of a successful ``POST /ratings``.
+
+    The request body is the domain :class:`~object_search.schemas.records.Rating` itself, so
+    nothing new is needed there -- its ``wrong_count`` / ``missed_count`` already default to
+    ``None`` (EVAL-17). This response carries only the new row id; every derived number
+    (precision, recall, the thumbs rate) is read back from ``GET /stats``, never echoed here,
+    because a rating is stored raw and interpreted only in the query layer (EVAL-07).
+
+    Attributes:
+        rating_id: The row id the rating was persisted under.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rating_id: int

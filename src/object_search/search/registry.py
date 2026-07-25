@@ -110,6 +110,26 @@ def register_method(
     return decorator
 
 
+def unregister(name: str) -> None:
+    """Remove the method registered under ``name`` -- the symmetric partner of registration.
+
+    Registration is normally a permanent, import-time side effect, so production code never
+    calls this. It exists for **test isolation**: a throwaway method registered for one test
+    (an always-raising stub exercising the error path, say) must not leak into the global
+    registry that a later test enumerates, or that later test sees a phantom method it cannot
+    run. A registration with no clean-up is the same shared-mutable-state trap the registry's
+    duplicate check guards against, one level up.
+
+    Raises:
+        UnknownMethodError: If no method registered under ``name`` -- removing a name that was
+            never registered is a bug worth surfacing, not a silent no-op.
+    """
+    try:
+        del _REGISTRY[name]
+    except KeyError:
+        raise UnknownMethodError(f"cannot unregister unknown method {name!r}") from None
+
+
 def has_method(name: str) -> bool:
     """True if a method registered under ``name``."""
     return name in _REGISTRY

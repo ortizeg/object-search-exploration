@@ -1,20 +1,26 @@
 """Task 3: ``/search`` persists provenance + latency + candidates; errors are typed (API-08).
 
-A throwaway method that always raises is registered once here to exercise the error path
-without depending on a real method failing. It is registered under a name that appears in no
-production module, so the API-01 grep test is unaffected.
+A throwaway method that always raises is registered to exercise the error path without
+depending on a real method failing. It is registered under a name that appears in no
+production module (so the API-01 grep test is unaffected) **and only for the duration of this
+module's tests** -- an autouse fixture registers it in setup and unregisters it in teardown, so
+it never leaks into the global registry that another test file (e.g. the sample renderer, which
+runs every registered method) enumerates.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import numpy as np
 import numpy.typing as npt
+import pytest
 from pydantic import BaseModel, ConfigDict
 from starlette.testclient import TestClient
 
 from object_search.schemas.geometry import ExemplarBox
 from object_search.schemas.search import SearchResult
-from object_search.search import has_method, register_method
+from object_search.search import register_method, unregister
 
 _RAISER = "test-raiser"
 
@@ -23,7 +29,14 @@ class _RaiserConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-if not has_method(_RAISER):
+@pytest.fixture(autouse=True)
+def _register_raiser() -> Iterator[None]:
+    """Register the always-raising stub for this module's tests, then remove it again.
+
+    Scoped and cleaned up on purpose: a module-level registration would permanently pollute
+    the global registry, and a later test that renders a sample per registered method would
+    then try to run a method whose whole job is to raise.
+    """
 
     @register_method(
         name=_RAISER,
@@ -37,6 +50,11 @@ if not has_method(_RAISER):
         config: BaseModel,
     ) -> SearchResult:
         raise RuntimeError("boom: the method exploded")
+
+    try:
+        yield
+    finally:
+        unregister(_RAISER)
 
 
 # A concrete exemplar taken from chipset-01's ground truth (box 0, 24x24 near the top edge).

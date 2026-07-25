@@ -30,6 +30,7 @@ from object_search.search.registry import (
     list_methods,
     method_schemas,
     register_method,
+    unregister,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "list_methods",
     "method_schemas",
     "register_method",
+    "unregister",
 ]
