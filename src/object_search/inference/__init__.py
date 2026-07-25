@@ -13,6 +13,7 @@ from object_search.inference.onnx_inferencer import (
     ONNXInputSpec,
     PreprocessInfo,
 )
+from object_search.inference.superpoint import SuperPointInferencer, SuperPointResult
 
 __all__ = [
     "BaseInferencer",
@@ -22,4 +23,6 @@ __all__ = [
     "ONNXInputSpec",
     "PostProcessor",
     "PreprocessInfo",
+    "SuperPointInferencer",
+    "SuperPointResult",
 ]

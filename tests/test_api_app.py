@@ -30,6 +30,13 @@ def test_lifespan_migrates_store_and_loads_present_weights(
         real_setup(level, log_file)
 
     monkeypatch.setattr(lifespan_module, "setup_logging", counting_setup)
+    # Point models_dir at an empty temp dir so the session registry is deterministically empty
+    # regardless of which gitignored weights the developer has fetched locally (Phase 5 makes
+    # superpoint.onnx genuinely loadable, so relying on the real models/ dir being empty is not
+    # hermetic). The load-list-is-empty intent is still asserted below.
+    empty_models = tmp_path / "models"
+    empty_models.mkdir()
+    monkeypatch.setattr(lifespan_module, "models_dir", lambda: empty_models)
 
     app = create_app(db_path=db, uploads_dir=tmp_path / "uploads", log_level="WARNING")
 
@@ -45,10 +52,12 @@ def test_lifespan_migrates_store_and_loads_present_weights(
             conn.close()
         assert version == 1
         # The session registry is a real dict on app.state (API-07). Phase 6 lands the first
-        # ONNX weight (dinov2_small.onnx), so the registry is no longer necessarily empty: it
-        # holds a session for exactly the registered models whose weights are present on disk
-        # and skips the absent ones. This must pass both with and without the gitignored weight,
-        # so it asserts the registry MATCHES on-disk presence rather than assuming either state.
+        # ONNX weight (dinov2_small.onnx) and Phase 5 lands superpoint.onnx, so the registry is
+        # no longer inherently empty: it holds a session for exactly the registered models whose
+        # weights are present, and skips the absent ones. models_dir is monkeypatched to an empty
+        # temp dir above so the outcome is deterministic (present == {}) regardless of what the
+        # developer has fetched; the assertion expresses the general "registry MATCHES on-disk
+        # presence" invariant rather than hardcoding either state.
         sessions = app.state.sessions
         assert isinstance(sessions, dict)
         models_directory = lifespan_module.models_dir()

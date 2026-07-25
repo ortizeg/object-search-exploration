@@ -31,7 +31,7 @@ checkpoints in each phase.
 - [x] **Phase 2: Method 1 + shared primitives** - `ncc`, calibration/peaks/nms/viz, sample-run renderer
 - [x] **Phase 3: Backend API** - FastAPI endpoints and the SQLite run + rating store
 - [x] **Phase 4: Web UI** - Canvas box drawing, schema-driven config, overlays, rating widget, stats
-- [ ] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
+- [x] **Phase 5: Method 2** - `sparse-geo` classical + SuperPoint, Hough voting, per-peak RANSAC
 - [x] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
 - [ ] **Phase 7: Method 5** - FastSAM proposals + DINOv2 region embeddings, `propose-retrieve`
 - [ ] **Phase 8: Evaluation & docs** - Benchmark, paired comparison, charts, docs, Milestone 2 spec
@@ -228,12 +228,12 @@ we are hunting.
 
 Plans:
 
-- [ ] 05-01: Classical backend (SIFT/AKAZE/ORB), many-to-many top-k matching with the
+- [x] 05-01: Classical backend (SIFT/AKAZE/ORB), many-to-many top-k matching with the
       standard ratio test disabled and optional k+1 ratio, Hough voting with soft binning
       and the three voting modes, per-peak RANSAC with degeneracy rejection, exemplar
       self-match labelling, low-keypoint diagnostic
 
-- [ ] 05-02: SuperPoint ONNX backend behind the same interface (gated through
+- [x] 05-02: SuperPoint ONNX backend behind the same interface (gated through
       `library-review`), sequential-RANSAC decomposition alternative, `docs/methods/sparse-geo.md`,
       sample runs
 

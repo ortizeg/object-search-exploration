@@ -20,6 +20,20 @@ None of the following is built in Phase 2; all are captured here and in the `ncc
 - **Discriminative correlation filters (MOSSE/KCF)** trained on the single exemplar crop, so
   the filter learns to suppress background instead of correlating raw pixels.
 
+## `sparse-geo` (Method 2 — sparse keypoint matching + geometric verification)
+
+None of the following is built in Phase 5; all are captured here and in the `sparse_geo.py`
+docstring (mirrored verbatim so the two cannot drift).
+
+- **Multi-model fitting (J-linkage / T-linkage)** as a third decomposition strategy alongside
+  Hough voting and sequential RANSAC.
+- **DISK / ALIKED backends** — additional learned detectors and the permissive-licence escape
+  from SuperPoint's non-commercial terms.
+- **Post-hoc orientation/scale assignment for frameless keypoints** via local gradient
+  histograms, which would unlock `single-4dof` voting for a learned backend.
+- **LoFTR / RoMa dense matching** with correspondence-field clustering for low-texture objects
+  (a research spike — the ONNX export is awkward).
+
 ## `dino-dense` (Method 3 — DINOv2 dense-token prototype matching)
 
 None of the following is built in Phase 6; all are captured here and in the `dino_dense.py`
