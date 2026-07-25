@@ -238,6 +238,42 @@ export class Viewport {
   }
 
   /**
+   * Clear the canvas and draw the image, leaving the 2-D context in the image-space
+   * transform so overlays (result boxes, diagnostics) can be layered on top in image px.
+   * Returns the context (already in image space) or ``null`` when there is no image.
+   *
+   * This is the shared first step of every frame: `render` uses it for the rubber-band, and
+   * `overlay.js` uses it to compose results and diagnostics without re-clearing or
+   * re-measuring the transform (which must be identical for every layer of one frame).
+   *
+   * @returns {CanvasRenderingContext2D | null}
+   */
+  paintImage() {
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) return null;
+    // Clear in raw backing-store space.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (!this.image) return null;
+    // One absolute setTransform per frame (never accumulate). Now the context IS image space.
+    ctx.setTransform(this.zoom, 0, 0, this.zoom, this.panX, this.panY);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.image, 0, 0);
+    return ctx;
+  }
+
+  /**
+   * Image px -> backing-store px (the space the 2-D context draws in). Unlike
+   * `imageToScreen`, this omits `rect.left/top`, so it is what an overlay uses to place a
+   * fixed-size label or dot on the canvas itself.
+   * @param {number} ix @param {number} iy
+   * @returns {{x:number, y:number}}
+   */
+  imageToBacking(ix, iy) {
+    return { x: ix * this.zoom + this.panX, y: iy * this.zoom + this.panY };
+  }
+
+  /**
    * Redraw the image and any overlay boxes. Overlay boxes are given in image px and stroked
    * inside the image-space transform, so the server's integers are used verbatim — no
    * client-side arithmetic between the box the API returned and the box the rater sees.
@@ -245,16 +281,8 @@ export class Viewport {
    * @param {Array<{x:number,y:number,w:number,h:number,color?:string}>} [boxes]
    */
   render(boxes = []) {
-    const ctx = this.canvas.getContext("2d");
+    const ctx = this.paintImage();
     if (!ctx) return;
-    // Clear in raw backing-store space.
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    if (!this.image) return;
-    // One absolute setTransform per frame (never accumulate). Now the context IS image space.
-    ctx.setTransform(this.zoom, 0, 0, this.zoom, this.panX, this.panY);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(this.image, 0, 0);
     for (const box of boxes) {
       ctx.lineWidth = 1 / this.zoom; // 1 backing-store px regardless of zoom
       ctx.strokeStyle = box.color || "#00e5ff";

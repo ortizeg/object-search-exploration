@@ -119,19 +119,19 @@ which kind of image, and at what latency.
       rating is attributable to an exact method + config
 
 - [x] **UI-02**: Canvas box drawing with zoom/pan, redraw, and clear
-- [ ] **UI-03**: Results overlaid on the image with per-match scores
-- [ ] **UI-04**: Toggleable diagnostics overlay (similarity heatmap, keypoints, proposals)
-- [ ] **UI-05**: Tiered rating widget — thumbs up/down (required, one click); wrong matches
+- [x] **UI-03**: Results overlaid on the image with per-match scores
+- [x] **UI-04**: Toggleable diagnostics overlay (similarity heatmap, keypoints, proposals)
+- [x] **UI-05**: Tiered rating widget — thumbs up/down (required, one click); wrong matches
       via either per-match verdicts on the overlay or a bare `wrong_count`; `missed_count`;
       unratable/skip; free-text note. **No 1–5 star scale.**
 
-- [ ] **UI-06**: Stats dashboard showing per-method thumbs-up rate, precision/recall where
+- [x] **UI-06**: Stats dashboard showing per-method thumbs-up rate, precision/recall where
       ground truth exists, and latency percentiles
 
 - [x] **UI-07**: Config form generated from the method's JSON Schema, so a new method needs
       zero frontend changes
 
-- [ ] **UI-08**: Count fields render **empty, never prepopulated with 0**, with one-click
+- [x] **UI-08**: Count fields render **empty, never prepopulated with 0**, with one-click
       "all correct" / "none missed" buttons that write an explicit `0`; per-match verdicts
       require an explicit confirm action before they count as assessed
 
@@ -182,7 +182,7 @@ which kind of image, and at what latency.
 - [ ] **EVAL-15**: Paired comparisons produce a win/loss/tie record and a Bradley-Terry (or
       Elo) ranking, not just a comparison of independent means
 
-- [ ] **EVAL-16**: The duplicate/fragment convention is defined once and shown in the UI —
+- [x] **EVAL-16**: The duplicate/fragment convention is defined once and shown in the UI —
       two boxes on one instance = 1 TP + 1 FP
 
 - [x] **EVAL-17**: **All human count fields are nullable and stored empty until entered.**
@@ -318,13 +318,13 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Phase 1 generator complete; Phase 8 consumption pending |
 | UI-01 | Phase 4 | Complete |
 | UI-02 | Phase 4 | Complete |
-| UI-03 | Phase 4 | Pending |
-| UI-04 | Phase 4 | Pending |
-| UI-05 | Phase 4 | Pending |
-| UI-06 | Phase 4 | Pending |
+| UI-03 | Phase 4 | Complete |
+| UI-04 | Phase 4 | Complete |
+| UI-05 | Phase 4 | Complete |
+| UI-06 | Phase 4 | Complete |
 | UI-07 | Phase 4 | Complete |
-| UI-08 | Phase 4 | Pending |
-| EVAL-16 | Phase 4 | Pending |
+| UI-08 | Phase 4 | Complete |
+| EVAL-16 | Phase 4 | Complete |
 | METHOD-02 | Phase 5 | Pending |
 | METHOD-03 | Phase 5 | Pending |
 | METHOD-04 | Phase 5 | Pending |

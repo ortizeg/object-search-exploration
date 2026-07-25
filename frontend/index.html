@@ -62,15 +62,37 @@
         <canvas id="stage" width="900" height="600">
           Your browser does not support the canvas element.
         </canvas>
+        <!-- Diagnostics overlay toggles. Built by main.js from the fields actually present in
+             the result payload — one checkbox per present field, never per method (UI-04). -->
+        <div id="overlay-toggles" class="overlay-toggles" hidden></div>
         <p class="stage-hint">
           Scroll to zoom, drag with the middle button to pan, drag with the left button to
           draw an exemplar box.
         </p>
       </section>
 
-      <!-- Right panel placeholder: rating widget / stats dashboard land here in 04-02. -->
+      <!-- Right panel: switches between the rating widget and the stats dashboard. -->
       <aside id="panel" class="panel">
-        <p class="muted">Results, rating, and the scoreboard appear here (Plan 04-02).</p>
+        <div class="panel-tabs" role="tablist">
+          <button id="tab-rating" class="tab active" type="button" role="tab">Rating</button>
+          <button id="tab-stats" class="tab" type="button" role="tab">Stats</button>
+        </div>
+
+        <section id="rating-view" class="panel-view" role="tabpanel">
+          <div id="rating-host">
+            <p class="muted">Run a search, then rate the result here.</p>
+          </div>
+        </section>
+
+        <section id="stats-view" class="panel-view" role="tabpanel" hidden>
+          <div class="stats-head">
+            <span class="control-label">Per-method scoreboard</span>
+            <button id="stats-refresh" type="button">Refresh</button>
+          </div>
+          <div id="stats-host">
+            <p class="muted">Open this tab (or submit a rating) to load the scoreboard.</p>
+          </div>
+        </section>
       </aside>
     </main>
 
