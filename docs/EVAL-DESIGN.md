@@ -1,0 +1,198 @@
+# Evaluation Design — Rigorous Four-Method Benchmark
+
+**Status: agreed design, not yet implemented.** This document is the spec a fresh session
+implements against. It supersedes the ad-hoc single-set benchmark (`EVAL-19` chipset) by turning
+the four-method comparison into a stratified, statistically honest experiment.
+
+## Why this exists
+
+The first benchmark scored all four methods on one deliberately NCC-favourable set (identical,
+axis-aligned, fixed-scale, low-texture chips). That was honest but incomplete: `sparse-geo`
+abstained for want of keypoints and `dino-dense` was too coarse for tiny objects, so their scores
+understated them in their intended regime. A single pooled table also averages a method's best and
+worst cases into a muddy middle. This design fixes both: **stratified regimes, each isolating one
+method's strength, with confidence intervals and a paired comparison** — reported per-regime
+(the real result) and combined (a caveated headline).
+
+## 1. Unit of analysis — the load-bearing statistical decision
+
+**Instances within one image are not independent.** They share the same emblem, rendering, and
+background, so treating each of ~10 chips as an independent Bernoulli trial is *pseudoreplication*
+and shrinks confidence intervals ~3–4× below what is honest.
+
+**The unit of analysis is the image.** All confidence intervals come from **bootstrap resampling
+over images** (resample images with replacement, recompute the pooled metric, take the 2.5/97.5
+percentiles over ≥2000 resamples with a fixed seed). This respects clustering and works uniformly
+for proportions (P/R/F1) *and* for AP (which is not a proportion, so Wilson does not apply to it).
+
+- Wilson intervals are retained only for the human thumbs-up rate (a genuine per-run Bernoulli),
+  as already shipped.
+- Bootstrap is seeded (`np.random.default_rng(seed)`) so CIs are reproducible — same input,
+  identical intervals, per the project's determinism constraint.
+
+## 2. The five regimes (independent variables)
+
+Each regime is a stratum designed to isolate one method's strength. All are synthetic with
+**exact ground truth by construction** (no hand-labeling, no licensing), reusing the
+`achieved-count` and non-overlap discipline of the chipset generator.
+
+| Regime | Texture | Scale | Rotation | Brightness | Background | Favours |
+| --- | --- | --- | --- | --- | --- | --- |
+| **EASY** | low (flat shapes) | fixed | none | none | white | ① NCC |
+| **TEXTURED** | high (≥20 SIFT kpts) | fixed | none | none | mild gradient | ② sparse-geo |
+| **VARIED** | high | 0.6–1.6× | ±35° | ±25% | gradient | ③ dino-dense, ④ propose-retrieve |
+| **CLUTTERED** | high | 0.8–1.3× | ±20° | ±20% | noise + distractors | precision stress (all) |
+| **TINY-DENSE** | medium | fixed-small | none | none | white | over-segmentation stress (④) |
+
+- **EASY reuses the existing chip generator unchanged** — it is literally the v1 chips, kept as
+  the NCC-favourable stratum. Do not redesign it; point the regime at the existing `chipset`
+  specs (or a thin wrapper) so the "easy chips like the first version" subset is preserved
+  verbatim.
+- TEXTURED/VARIED/CLUTTERED use a new **textured-emblem** generator (spec in §6).
+- TINY-DENSE stresses NMS/over-segmentation: many small instances close together (but still
+  non-overlapping in ground truth).
+
+Every regime records its factor levels in the sidecar `slice_metadata`, so the harness can also
+report **per-factor marginals** (e.g. recall vs. scale-variation level) in addition to per-regime.
+
+## 3. Sample budget (chosen: 5 regimes × ~40 images)
+
+- **~40 images per regime, 5 regimes ⇒ ~200 images total.** ~10 instances/image ⇒ ~400
+  ground-truth instances per regime.
+- **Multiple seeds per regime** (e.g. 40 images = 40 distinct seeds) so the estimate captures
+  *generation* variance, not one lucky layout. The seed schedule is fixed and documented, so the
+  whole set regenerates byte-identically.
+- Honest per-regime bootstrap CI half-widths land around **±5–8%** on recall/precision at this n;
+  tighter where a method is near 0 or 1. The paired analysis (§5) carries the method-comparison
+  claims with far more power than the absolute per-method CIs.
+- Generation and the full benchmark run are cheap enough to re-run on demand; keep the images
+  small where possible to respect the 2 MB pre-commit limit (downscale the largest canvases, or
+  mark oversized ones regenerate-only in `LICENSES.md`).
+
+**Dev/test discipline:** hold out a small **dev set** (a few images per regime, distinct seeds)
+for any config/threshold choices; **freeze the test set** and never tune against it. The report
+states that method configs are defaults, not fitted to the test images.
+
+## 4. Metrics and IoU protocol (chosen: mAP@[.5:.95] + @0.5)
+
+Per method, per regime, and combined:
+
+- **Precision, recall, F1** at IoU 0.5, each with a **bootstrap-over-images 95% CI**.
+- **AP@0.5** (all-point interpolation, from the EVAL-08 sub-threshold candidate log) **and
+  mAP@[.5:.95]** (COCO-style: AP averaged over IoU thresholds 0.50, 0.55, …, 0.95). Report both;
+  the averaged mAP is the headline box-quality number and may reorder methods versus the lenient
+  @0.5.
+- **Abstentions and errors** as distinct outcomes (already shipped) — never folded into a zero.
+- **Latency** as median + IQR per method and per canvas size (already have the breakdown).
+- **Combined = a caveated summary only.** Pooling across regimes averages best and worst cases;
+  the report must label the combined row "summary, not a verdict" and direct the reader to the
+  per-regime table, which is the actual result.
+
+## 5. The comparison claim (chosen: paired Bradley-Terry + bootstrap CIs)
+
+The scientifically interesting claims are comparisons ("④ beats ① on VARIED", "① beats all on
+EASY", the crossover). Pairing removes image-to-image variance and is the efficient way to make
+them.
+
+- **Paired runs:** the same exemplar box through all four methods on the same image (EVAL-05,
+  already built). Per image, per regime, record win/loss/tie between each method pair (scored
+  against exact GT — e.g. higher F1, or higher AP, wins; ties within a tolerance).
+- **Bradley-Terry** (EVAL-15, already built, with the complete-separation ε-regularisation and
+  scale-pinning) fit **per regime and overall**, reported **with uncertainty** — bootstrap the
+  BT strengths over images to get CIs on the ranking, not a bare order.
+- Also report the simple **paired win-rate matrix** per regime (method × method), which is easy to
+  read and needs no model.
+- **Effect sizes with CIs**, not just significance: report ΔAP / Δrecall between the top methods
+  per regime with a bootstrap CI on the difference.
+
+## 6. Textured-emblem generator (the one genuinely new generator)
+
+A distinct, richly-textured base patch, generated once per image from the seed, that **must yield
+≥ 20 SIFT keypoints** (`cv2.SIFT_create().detect`) — the load-bearing correctness test; without it
+`sparse-geo` abstains and the TEXTURED/VARIED regimes prove nothing. Build it by layering, in fixed
+RNG order:
+
+1. base fill + a low-frequency colour gradient,
+2. 4–8 overlapping filled colour shapes (circles/rects/triangles/polygons),
+3. a few high-contrast thin line/arc accents (these are what SIFT keys on),
+4. a fine high-frequency speckle/noise field (blobs for the detector),
+5. an asymmetric mark so orientation is unambiguous (aids rotation recovery / avoids symmetric
+   degeneracy).
+
+Deterministic: `cv2.LINE_8`, no antialias, one `np.random.default_rng`. Each instance paste applies
+the regime's scale, rotation, and brightness jitter — **same object identity, varied appearance**.
+Ground-truth box = the exact AABB of the transformed emblem (from the warped corners), pairwise
+IoU 0. Distractors (a *different* emblem) are pasted but excluded from GT. Sidecars use the **same
+format as the chipset** so `eval/labels.py` loads them with no new parser.
+
+## 7. What to reuse vs. what is new
+
+**Reuse (shipped, tested):** `eval/metrics.py` (P/R/F1/AP matching), `eval/labels.py` (GT loader +
+sidecar format), `eval/paired.py` (same-box-all-methods), `eval/bradley_terry.py` (with its
+separation guard), `store/wilson.py`, the chipset generator (for EASY), the benchmark Hydra entry,
+the registry-iterating sample renderer, `_DEMO_SUBDIRS` discovery.
+
+**New:**
+- The **textured-emblem generator** (§6) and the five **regime specs** with their fixed seed
+  schedules; committed sets under `assets/demo/<regime>/` (EASY points at the existing chipset).
+- A **bootstrap-CI module** (`eval/bootstrap.py`): resample images, recompute any metric, return
+  point + 95% CI; seeded.
+- **mAP@[.5:.95]** in `eval/metrics.py` (loop the existing AP over IoU thresholds and average).
+- **Per-regime + per-factor aggregation** in the benchmark, and **bootstrapped BT** in the paired
+  analysis.
+- Wiring the regimes into `_DEMO_SUBDIRS`, `conf/benchmark.yaml`, and a `dev`/`test` split marker.
+- **Report v2** (§8).
+
+## 8. Report v2
+
+Regenerate `docs/reports/benchmark-report.html` (self-contained; charts inline SVG, overlays
+base64) with:
+
+1. **Method descriptions, numbered ① – ④ as implemented**, each one line reminding the reader what
+   it is, with a footnote that the source-research numbering is 1, 2, 3, 5 (Methods 4 and 6 were
+   deferred):
+   - **① NCC** — template matching (`cv2.matchTemplate`), pyramid scale search. Zero weights.
+   - **② sparse-geo** — SIFT/SuperPoint keypoints → many-to-many kNN → Hough voting → per-peak
+     RANSAC. Ratio test disabled (it would suppress repeats).
+   - **③ dino-dense** — DINOv2 dense patch features → prototype cosine similarity → connected
+     components.
+   - **④ propose-retrieve** — FastSAM class-agnostic proposals → DINOv2 region embeddings →
+     nearest-neighbour retrieval.
+2. **Per-regime scoreboards** (P/R/F1/AP@0.5/mAP with bootstrap CIs) — the real results.
+3. **Combined summary** with the explicit "summary, not a verdict" caveat.
+4. **Crossover chart** across regimes; **per-factor marginals** (recall vs scale/rotation/texture).
+5. **Paired win-rate matrices** and the **Bradley-Terry ranking with CIs**, per regime and overall.
+6. **Overlays from each regime** — the same query box, all four methods, so each method is shown
+   in both a weak and a strong regime.
+7. The honest caveats block (abstention semantics, no test-set tuning, synthetic-not-photographic).
+
+## 9. Suggested implementation phases (for the fresh session)
+
+- **Phase A — datasets:** textured-emblem generator + 5 regime specs + committed sets + `/images`
+  and benchmark wiring + the ≥20-keypoints / non-overlap / achieved-count / determinism tests.
+- **Phase B — statistics:** `eval/bootstrap.py`, mAP@[.5:.95], per-regime + per-factor
+  aggregation, bootstrapped Bradley-Terry, paired win-rate matrices; edge-case tests
+  (abstention, undefeated method, thin slices).
+- **Phase C — report v2:** the regenerated HTML report per §8, plus a `pixi run report` command so
+  it regenerates from `results.json` deterministically, and a note in the README.
+
+Each phase is one PR against a protected-in-spirit `main`, gates green, leave open for review.
+
+## 10. Acceptance criteria
+
+- The dataset has 5 labelled regimes, ~40 images each, regenerable byte-identically from a fixed
+  seed schedule; a textured emblem provably yields ≥20 SIFT keypoints; all GT is exact and
+  non-overlapping; achieved counts are recorded, never requested N.
+- Every reported P/R/F1/AP carries a bootstrap-over-images 95% CI; mAP@[.5:.95] is reported
+  alongside AP@0.5.
+- A paired Bradley-Terry ranking with CIs is reported per regime and overall, and degrades
+  gracefully when a method is undefeated in a regime.
+- The report shows per-regime results (primary), a caveated combined summary, per-factor
+  marginals, and overlays of each method in a weak and a strong regime, with the four methods
+  described and numbered ① – ④.
+- No method config is tuned on the test set; the report says so.
+
+---
+*Agreed in session on 2026-07-25. Implements a stratified, CI-bearing, paired evaluation over five
+regimes. The EASY regime preserves the original easy-chip set verbatim so per-method strengths
+show against both easy and hard strata.*
