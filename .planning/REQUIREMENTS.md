@@ -41,7 +41,7 @@ which kind of image, and at what latency.
 
 ### Methods (METHOD)
 
-- [ ] **METHOD-01**: Method 1 `ncc` — `cv2.matchTemplate` with `TM_CCOEFF_NORMED`, image
+- [x] **METHOD-01**: Method 1 `ncc` — `cv2.matchTemplate` with `TM_CCOEFF_NORMED`, image
       pyramid for scale search (per-peak level index so output box size is correct), and an
       optional rotated-template bank (default angle set `[0]`)
 
@@ -81,16 +81,16 @@ which kind of image, and at what latency.
 - [x] **METHOD-08**: Shared peak extraction (`search/common/peaks.py`) offering `nms`,
       `local-max` (default, suppression radius tied to crop size), and `watershed` strategies
 
-- [ ] **METHOD-09**: Every method returns a `diagnostics` payload the UI can render
+- [x] **METHOD-09**: Every method returns a `diagnostics` payload the UI can render
       (similarity map, keypoint correspondences, Hough peaks, proposal set)
 
-- [ ] **METHOD-10**: Every method module carries a `ROBUSTNESS BACKLOG` docstring section,
+- [x] **METHOD-10**: Every method module carries a `ROBUSTNESS BACKLOG` docstring section,
       mirrored into `docs/methods/<name>.md`
 
-- [ ] **METHOD-11**: Every method documents its pre-processing and post-processing explicitly,
+- [x] **METHOD-11**: Every method documents its pre-processing and post-processing explicitly,
       in both the module docstring and `docs/methods/<name>.md`
 
-- [ ] **METHOD-12**: Multiple instances per image are assumed throughout; no method may
+- [x] **METHOD-12**: Multiple instances per image are assumed throughout; no method may
       short-circuit to a single best match
 
 ### API (API)
@@ -208,7 +208,7 @@ which kind of image, and at what latency.
       permissively-licensed generic repeated-instance photos (shelf, PCB, parking lot,
       tiles), and generated synthetic images — with a `LICENSES.md` recording provenance
 
-- [ ] **DOC-02**: **Pre-rendered sample runs committed to disk for every method** — a fixed
+- [x] **DOC-02**: **Pre-rendered sample runs committed to disk for every method** — a fixed
       exemplar box per demo image, run through each method, results rendered as images under
       `docs/samples/<method>/`, regenerable by one CLI command
 
@@ -288,14 +288,14 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | INFRA-11 | Phase 1 | Complete |
 | EVAL-03 | Phase 1 | Complete |
 | DOC-01 | Phase 1 | Complete |
-| METHOD-01 | Phase 2 | Pending |
+| METHOD-01 | Phase 2 | Complete |
 | METHOD-07 | Phase 2 | Complete |
 | METHOD-08 | Phase 2 | Complete |
-| METHOD-09 | Phase 2 | Pending |
-| METHOD-10 | Phase 2 | Pending |
-| METHOD-11 | Phase 2 | Pending |
-| METHOD-12 | Phase 2 | Pending |
-| DOC-02 | Phase 2 | Pending |
+| METHOD-09 | Phase 2 | Complete |
+| METHOD-10 | Phase 2 | Complete |
+| METHOD-11 | Phase 2 | Complete |
+| METHOD-12 | Phase 2 | Complete |
+| DOC-02 | Phase 2 | Complete |
 | API-01 | Phase 3 | Pending |
 | API-02 | Phase 3 | Pending |
 | API-03 | Phase 3 | Pending |

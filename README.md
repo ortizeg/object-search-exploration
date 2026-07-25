@@ -40,9 +40,18 @@ Method numbering follows the project brief, which is why there is no Method 4.
 ## Sample runs
 
 Pre-rendered sample runs are committed under `docs/samples/` so the behaviour of each method
-is reviewable without running anything.
+is reviewable without running anything. Regenerate the whole gallery with `pixi run samples`
+(deterministic — it regenerates byte-for-byte).
 
-**Not yet populated** — Phase 2 renders the first samples, alongside Method 1.
+Method 1 (`ncc`) is rendered under [`docs/samples/ncc/`](docs/samples/ncc/) — see the method
+write-up in [`docs/methods/ncc.md`](docs/methods/ncc.md). On the plain lattice it finds all
+twelve identical instances; on the solid-rectangle `lattice-touching` scene it honestly
+abstains, because a textureless crop has nothing for NCC to correlate.
+
+![ncc on the plain lattice](docs/samples/ncc/lattice-plain.png)
+
+Each method registered in a later phase gains its own `docs/samples/<method>/` gallery with no
+change to the renderer.
 
 ## Project layout
 
