@@ -16,8 +16,12 @@ from object_search.store.wilson import wilson_interval
 
 
 def test_z_at_95_percent_is_exact() -> None:
+    # The 95% z is 1.9599639845400534. NormalDist().inv_cdf is pure Python but calls
+    # math.log/math.sqrt, whose last ULP is libm-dependent: macOS arm64 yields ...534,
+    # Linux x86_64 yields ...536. Pin to 1e-12 -- 12 significant figures, three orders of
+    # magnitude below the ~4e-6 gap to the textbook 1.96, but robust to platform libm.
     z = NormalDist().inv_cdf(1 - (1 - 0.95) / 2)
-    assert z == 1.9599639845400534
+    assert z == pytest.approx(1.9599639845400534, abs=1e-12)
 
 
 def test_wilson_source_computes_z_and_never_hardcodes_1_96() -> None:
@@ -33,15 +37,21 @@ def test_n_zero_returns_none_not_zero_one() -> None:
 
 def test_zero_of_ten_closed_form() -> None:
     result = wilson_interval(0, 10)
-    assert result == (0.0, 0.2775327998628891)
-    # Lower bound is exactly 0.0, and NOT -0.0.
+    # 1e-12 tolerance on the upper bound absorbs libm last-ULP variance (see z test).
+    assert result == pytest.approx((0.0, 0.2775327998628891), abs=1e-12)
+    # Lower bound is exactly 0.0, and NOT -0.0 -- an exact requirement, not approximate.
+    assert result is not None
     lower = result[0]
     assert lower == 0.0
     assert math.copysign(1.0, lower) == 1.0  # positive zero, guards the JSON -0.0 artifact
 
 
 def test_ten_of_ten_closed_form() -> None:
-    assert wilson_interval(10, 10) == (0.722467200137111, 1.0)
+    # Lower bound n/(n+z^2); 1e-12 tolerance for libm last-ULP variance. Upper is exact 1.0.
+    result = wilson_interval(10, 10)
+    assert result == pytest.approx((0.722467200137111, 1.0), abs=1e-12)
+    assert result is not None
+    assert result[1] == 1.0  # closed form pins the upper bound exactly
 
 
 def test_zero_of_three_lower_bound_is_positive_zero() -> None:
