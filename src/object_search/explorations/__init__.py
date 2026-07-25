@@ -12,6 +12,7 @@ generalised -- adding an exploration is exactly one new file plus one import lin
 # import is "unused" by name (hence noqa: F401) but load-bearing: importing the module runs its
 # @register_exploration decorator, which -- plus the new file -- is the whole cost of adding one.
 from object_search.explorations import (
+    marker_conditioned,  # noqa: F401  (registers "marker-conditioned")
     same_image_search,  # noqa: F401  (registers "same-image-search", the default adapter)
 )
 from object_search.explorations.markers import (

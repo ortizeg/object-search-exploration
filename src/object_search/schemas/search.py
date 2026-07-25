@@ -200,6 +200,14 @@ class Diagnostics(BaseModel):
     correspondences: tuple[Correspondence, ...] | None = None
     hough_peaks: tuple[HoughPeak, ...] | None = None
     proposals: tuple[BBox, ...] | None = None
+    # Marker-conditioned exploration (Milestone 2). Named, optional, and parallel by index:
+    # ``markers[i]`` is the i-th found marker box, ``marker_reference_points[i]`` the point its
+    # proposals were scored from, and ``marker_directions[i]`` its unit pointing vector or
+    # ``None`` for a symmetric marker. The overlay renders arrows from these by field presence,
+    # exactly as it renders the heatmap or proposals of other methods.
+    markers: tuple[BBox, ...] | None = None
+    marker_reference_points: tuple[Point, ...] | None = None
+    marker_directions: tuple[tuple[float, float] | None, ...] | None = None
 
 
 # ---------------------------------------------------------------------------- outcome
