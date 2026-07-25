@@ -194,6 +194,14 @@ which kind of image, and at what latency.
       mutually exclusive with them, validated `0 ≤ wrong_count ≤ R`. If both are present,
       per-match wins and the discrepancy is flagged, not silently reconciled
 
+- [ ] **EVAL-19**: **Chip-insertion benchmark set** — 10 generated images, each with a
+      *different* randomly-generated chip pasted `N ∈ {5, 10, 15}` times at random
+      **non-overlapping** positions on a white background, across 10 canvas sizes ramping from
+      small to very large. Ground truth is exact and known by construction, so precision,
+      recall, and AP are computable per method with no human rating and no hand-labelling.
+      This is the parameter-tuning and method-comparison harness: an objective, zero-cost
+      signal that can be re-run after every config change.
+
 ### Demo Assets & Docs (DOC)
 
 - [ ] **DOC-01**: Demo image set — basketball broadcast frames from the sibling project,
@@ -307,6 +315,7 @@ Deferred to a future milestone. Tracked but not in the current roadmap.
 | EVAL-14 | Phase 3 | Pending |
 | EVAL-17 | Phase 3 | Pending |
 | EVAL-18 | Phase 3 | Pending |
+| EVAL-19 | Phase 1 (generator) + Phase 8 (benchmark consumption) | Pending |
 | UI-01 | Phase 4 | Pending |
 | UI-02 | Phase 4 | Pending |
 | UI-03 | Phase 4 | Pending |

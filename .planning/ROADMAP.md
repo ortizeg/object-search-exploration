@@ -44,7 +44,7 @@ checkpoints in each phase.
 so that adding a search method later is a single new file, and a wrong ONNX model fails at
 load rather than at first frame.
 **Depends on**: Nothing (first phase)
-**Requirements**: INFRA-01, INFRA-02, INFRA-03, INFRA-04, INFRA-05, INFRA-06, INFRA-07, INFRA-08, INFRA-09, INFRA-10, INFRA-11, EVAL-03, DOC-01
+**Requirements**: INFRA-01, INFRA-02, INFRA-03, INFRA-04, INFRA-05, INFRA-06, INFRA-07, INFRA-08, INFRA-09, INFRA-10, INFRA-11, EVAL-03, EVAL-19, DOC-01
 **Success Criteria** (what must be TRUE):
 
   1. `pixi run lint`, `pixi run typecheck`, and `pixi run test` all pass locally and on a
@@ -62,6 +62,12 @@ load rather than at first frame.
 
   5. A demo image set exists on disk with `LICENSES.md` recording the provenance and licence
      of every image.
+
+  6. The chip-insertion benchmark set (EVAL-19) generates 10 images across canvas sizes ramping
+     320×240 → 6000×4000, each with one distinct chip pasted 5, 10, or 15 times at strictly
+     non-overlapping positions — proven by a test asserting pairwise IoU is exactly 0 across all
+     ten, and that the recorded instance count is the count actually achieved rather than the
+     count requested.
 **Plans**: 1/2 plans executed
 
 Plans:
@@ -299,7 +305,7 @@ Plans:
 predicts visible rather than hidden — and leave the repo readable to someone opening it
 cold.
 **Depends on**: Phase 5, Phase 6, Phase 7
-**Requirements**: EVAL-02, EVAL-04, EVAL-05, EVAL-06, EVAL-15, DOC-03, DOC-04, DOC-05, DOC-06
+**Requirements**: EVAL-02, EVAL-04, EVAL-05, EVAL-06, EVAL-15, EVAL-19, DOC-03, DOC-04, DOC-05, DOC-06
 **Success Criteria** (what must be TRUE):
 
   1. The benchmark produces a table of precision, recall, F1, AP, and latency for all four
@@ -318,6 +324,11 @@ cold.
   6. `docs/ROBUSTNESS-BACKLOG.md` aggregates every method's backlog, and `docs/MILESTONE-2.md`
      specifies the marker-conditioned proposal feature and the Milestone 1 components it
      reuses.
+
+  7. The chip-insertion set (EVAL-19) yields precision, recall, and AP per method with **no human
+     rating involved**, reported per canvas size and per instance count — and the whole chipset
+     benchmark runs in CI for the model-free methods (`ncc`, `sparse-geo` classical), since the
+     images regenerate deterministically and need no ONNX weights.
 **Plans**: 2 plans
 
 Plans:
