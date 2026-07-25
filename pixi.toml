@@ -60,6 +60,9 @@ mypy = ">=1.13"
 pre-commit = ">=4.0"
 httpx = ">=0.28"  # needed by fastapi's TestClient
 
+[feature.dev.dependencies]
+onnx = ">=1.22.0,<2"
+
 [environments]
 default = { features = ["dev"], solve-group = "default" }
 
