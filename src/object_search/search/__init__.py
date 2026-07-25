@@ -19,6 +19,7 @@ cost of adding a method (INFRA-10).
 # is "unused" by name (hence noqa: F401) but load-bearing: importing the module runs its
 # @register_method decorator, which is the entire cost of adding a method.
 from object_search.search import (
+    dino_dense,  # noqa: F401  (registers "dino-dense")
     ncc,  # noqa: F401  (registers "ncc")
     sparse_geo,  # noqa: F401  (registers "sparse-geo")
 )
