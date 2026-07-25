@@ -18,15 +18,23 @@
       <!-- Left control rail: mode, method, config, image, search. -->
       <aside class="rail">
         <!-- Exploration mode sits ABOVE the method selector (Milestone 2 seam, UI-09).
-             One option today; Milestone 2 adds an option rather than forking the app. -->
+             Populated by main.js from GET /explorations — Milestone 2 adds a member to the
+             registry, and this selector picks it up as data with no markup change. -->
         <div class="control">
           <label class="control-label" for="exploration">Exploration</label>
           <select id="exploration">
-            <option value="same-image">Same-image search</option>
+            <option value="" disabled selected>Loading explorations…</option>
           </select>
+          <small class="control-help">
+            The exploration decides how a drawn box is turned into results. Choosing one rebuilds
+            the config form below from that exploration's own schema.
+          </small>
         </div>
 
-        <div class="control">
+        <!-- Method control: shown only for a "method-wrapper" exploration (Milestone 1's
+             same-image search), where the config IS a method plus that method's own config.
+             An exploration configured entirely from its own schema hides this. -->
+        <div id="method-control" class="control">
           <label class="control-label" for="method">Method</label>
           <select id="method">
             <option value="" disabled selected>Choose a method…</option>
@@ -38,9 +46,10 @@
 
         <div class="control">
           <span class="control-label">Config</span>
-          <!-- form.js fills this from the selected method's JSON Schema (UI-07). -->
+          <!-- form.js fills this from the active exploration's JSON Schema (UI-07): the chosen
+               method's schema for a method-wrapper exploration, or the exploration's own. -->
           <div id="config" class="config-host">
-            <p class="muted">Select a method to configure it.</p>
+            <p class="muted">Select an exploration to configure it.</p>
           </div>
         </div>
 

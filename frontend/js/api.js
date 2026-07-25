@@ -21,6 +21,12 @@ export async function getMethods() {
   return r.json();
 }
 
+/** GET /explorations -> [{name, description, version, config_schema}]. Same shape as /methods. */
+export async function getExplorations() {
+  const r = await check(await fetch("/explorations"));
+  return r.json();
+}
+
 /** GET /images -> [{id, width, height, has_ground_truth}]. */
 export async function getImages() {
   const r = await check(await fetch("/images"));

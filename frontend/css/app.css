@@ -131,6 +131,11 @@ body {
   flex-direction: column;
   gap: 0.35rem;
 }
+/* A control set display:flex would otherwise ignore the `hidden` attribute; restore it so the
+   method control can be hidden for explorations configured entirely from their own schema. */
+.control[hidden] {
+  display: none;
+}
 .control-label {
   font-size: 0.72rem;
   text-transform: uppercase;

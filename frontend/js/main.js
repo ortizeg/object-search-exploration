@@ -5,7 +5,12 @@
 
 import { Viewport, finalizeBox } from "./viewport.js";
 import { buildForm } from "./form.js";
-import { getMethods, getImages, postSearch, getStats, imageUrl } from "./api.js";
+import { getMethods, getExplorations, getImages, postSearch, getStats, imageUrl } from "./api.js";
+import {
+  injectMethodEnums,
+  isMethodWrapperSchema,
+  buildExplorationBody,
+} from "./explorations.js";
 import {
   drawResults,
   drawQueryBox,
@@ -18,6 +23,10 @@ import { mountRating } from "./rating.js";
 import { renderStats } from "./stats.js";
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById("stage"));
+const explorationSelect = /** @type {HTMLSelectElement} */ (
+  document.getElementById("exploration")
+);
+const methodControl = document.getElementById("method-control");
 const methodSelect = /** @type {HTMLSelectElement} */ (document.getElementById("method"));
 const imageSelect = /** @type {HTMLSelectElement} */ (document.getElementById("image"));
 const configHost = document.getElementById("config");
@@ -40,12 +49,17 @@ const OVERLAY_SWATCH = {
   correspondences: "#c792ea",
   hough_peaks: "#ffb86c",
   proposals: "#5aa0ff",
+  markers: "#ffd166",
 };
 
 const viewport = new Viewport(canvas);
 
 const state = {
   /** @type {Array<{name:string, config_schema:object}>} */ methods: [],
+  /** @type {Array<{name:string, config_schema:object}>} */ explorations: [],
+  /** @type {string|null} */ exploration: null,
+  /** @type {boolean} true when the active exploration is a method-wrapper (same-image search) */
+  wrapperMode: true,
   /** @type {string|null} */ method: null,
   /** @type {{readValues:()=>object}|null} */ form: null,
   /** @type {string|null} */ imageId: null,
@@ -66,9 +80,14 @@ const state = {
   verdictMode: false,
 };
 
-/** True only once a method is selected — the single gate UI-01 depends on. */
+/**
+ * The UI-01 gate, generalised across explorations. A method-wrapper exploration still gates on
+ * a chosen method (draw a box only once a method is picked); an exploration configured from its
+ * own schema is ready as soon as it is selected. An image must always be loaded.
+ */
 function drawingEnabled() {
-  return state.method !== null && viewport.image !== null;
+  if (viewport.image === null) return false;
+  return state.wrapperMode ? state.method !== null : state.exploration !== null;
 }
 
 function setStatus(message) {
@@ -103,7 +122,7 @@ function renderScene() {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
   if (state.diagnostics) {
-    drawPointDiagnostics(viewport, state.diagnostics, state.overlayEnabled);
+    drawPointDiagnostics(viewport, state.diagnostics, state.overlayEnabled, state.matches);
   }
 }
 
@@ -206,7 +225,45 @@ async function loadImage(imageId) {
   canvas.setAttribute("aria-disabled", String(!drawingEnabled()));
 }
 
-/** Rebuild the config form for the selected method (UI-07). */
+/**
+ * Adopt an exploration by name (UI-09). Decides — purely from the exploration's schema shape,
+ * never from its name — whether it is a method-wrapper (Milestone 1's same-image search: pick a
+ * method, then that method's config) or configured entirely from its own schema (e.g. the marker
+ * exploration). The method control is shown only in the wrapper case; the config form is rebuilt
+ * from whichever schema is authoritative.
+ */
+function selectExploration(name) {
+  state.exploration = name || null;
+  const exploration = state.explorations.find((e) => e.name === name);
+  state.wrapperMode = exploration ? isMethodWrapperSchema(exploration.config_schema) : true;
+
+  if (methodControl) methodControl.hidden = !state.wrapperMode;
+
+  if (state.wrapperMode) {
+    // Same-image search: the config surface is the chosen method's own schema.
+    state.form = null;
+    selectMethod(methodSelect.value || null);
+  } else {
+    // The exploration owns its whole config. Inject the live method list as the enum of any
+    // method-reference field so `marker_method` renders as a real select, then build the form.
+    state.method = null;
+    const methodNames = state.methods.map((m) => m.name);
+    const schema = injectMethodEnums(exploration ? exploration.config_schema : {}, methodNames);
+    if (configHost) configHost.replaceChildren();
+    if (exploration) {
+      const { element, readValues } = buildForm(schema);
+      state.form = { readValues };
+      if (configHost) configHost.appendChild(element);
+    } else {
+      state.form = null;
+    }
+  }
+
+  searchButton.disabled = !drawingEnabled() || state.box === null;
+  canvas.setAttribute("aria-disabled", String(!drawingEnabled()));
+}
+
+/** Rebuild the config form for the selected method (UI-07) — the method-wrapper path only. */
 function selectMethod(name) {
   state.method = name || null;
   const method = state.methods.find((m) => m.name === name);
@@ -222,23 +279,36 @@ function selectMethod(name) {
   canvas.setAttribute("aria-disabled", String(!drawingEnabled()));
 }
 
-/** Run a search for the current box + method + config, then overlay the result. */
+/** Run a search for the current box + exploration + config, then overlay the result. */
 async function runSearch() {
-  if (!state.method || !state.imageId || !state.box) return;
+  if (!state.imageId || !state.box || !state.exploration) return;
+  if (state.wrapperMode && !state.method) return;
   const config = state.form ? state.form.readValues() : {};
-  const body = {
-    image_id: state.imageId,
-    exemplar: {
-      box: {
-        x: state.box.x0,
-        y: state.box.y0,
-        w: state.box.x1 - state.box.x0,
-        h: state.box.y1 - state.box.y0,
-      },
-    },
-    method: state.method,
-    config,
-  };
+
+  // Method-wrapper explorations post the chosen method + that method's config (the Milestone 1
+  // shape); any other exploration posts its own config wholesale, with the method as a label.
+  const body = state.wrapperMode
+    ? {
+        image_id: state.imageId,
+        exemplar: {
+          box: {
+            x: state.box.x0,
+            y: state.box.y0,
+            w: state.box.x1 - state.box.x0,
+            h: state.box.y1 - state.box.y0,
+          },
+        },
+        method: state.method,
+        config,
+        exploration: state.exploration,
+      }
+    : buildExplorationBody({
+        imageId: state.imageId,
+        box: state.box,
+        exploration: state.exploration,
+        config,
+        methodNames: state.methods.map((m) => m.name),
+      });
   setStatus("Searching…");
   try {
     const { run_id, result } = await postSearch(body);
@@ -277,7 +347,11 @@ canvas.addEventListener("pointerdown", (e) => {
   }
   // UI-01 gate: no method selected (or no image) => drawing is disabled, full stop.
   if (!drawingEnabled()) {
-    setStatus("Pick a method first — drawing is disabled until then.");
+    setStatus(
+      state.wrapperMode
+        ? "Pick a method first — drawing is disabled until then."
+        : "Pick an exploration and load an image first.",
+    );
     return;
   }
   canvas.setPointerCapture(e.pointerId);
@@ -418,7 +492,10 @@ if (statsRefresh) statsRefresh.addEventListener("click", () => void refreshStats
 
 // --- Control wiring -------------------------------------------------------------------
 
-methodSelect.addEventListener("change", () => selectMethod(methodSelect.value));
+explorationSelect.addEventListener("change", () => selectExploration(explorationSelect.value));
+methodSelect.addEventListener("change", () => {
+  if (state.wrapperMode) selectMethod(methodSelect.value);
+});
 imageSelect.addEventListener("change", () => {
   if (imageSelect.value) void loadImage(imageSelect.value).catch((err) => setStatus(err.message));
 });
@@ -436,8 +513,13 @@ resizeObserver.observe(canvas);
 
 async function bootstrap() {
   try {
-    const [methods, images] = await Promise.all([getMethods(), getImages()]);
+    const [methods, explorations, images] = await Promise.all([
+      getMethods(),
+      getExplorations(),
+      getImages(),
+    ]);
     state.methods = methods;
+    state.explorations = explorations;
 
     methodSelect.replaceChildren();
     const placeholder = new Option("Choose a method…", "", true, true);
@@ -445,6 +527,20 @@ async function bootstrap() {
     methodSelect.add(placeholder);
     for (const m of methods) {
       methodSelect.add(new Option(m.name, m.name));
+    }
+
+    // Populate the exploration selector from the registry. Default to the first method-wrapper
+    // exploration (Milestone 1's familiar mode) when there is one, else the first exploration —
+    // decided by schema shape, so no exploration is named here.
+    explorationSelect.replaceChildren();
+    for (const e of explorations) {
+      explorationSelect.add(new Option(e.name, e.name));
+    }
+    const defaultExploration =
+      explorations.find((e) => isMethodWrapperSchema(e.config_schema)) || explorations[0];
+    if (defaultExploration) {
+      explorationSelect.value = defaultExploration.name;
+      selectExploration(defaultExploration.name);
     }
 
     imageSelect.replaceChildren();
@@ -457,7 +553,11 @@ async function bootstrap() {
       await loadImage(images[0].id);
       imageSelect.value = images[0].id;
     }
-    setStatus("Ready. Pick a method, then draw a box.");
+    setStatus(
+      state.wrapperMode
+        ? "Ready. Pick a method, then draw a box."
+        : "Ready. Draw a box to run the selected exploration.",
+    );
   } catch (err) {
     setStatus(`Failed to load: ${err.message}`);
     // eslint-disable-next-line no-console

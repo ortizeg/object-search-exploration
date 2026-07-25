@@ -25,6 +25,13 @@ const COL_KEYPOINT = "#7cffb2";
 const COL_CORR = "#c792ea";
 const COL_HOUGH = "#ffb86c";
 const COL_PROPOSAL = "#5aa0ff";
+const COL_MARKER = "#ffd166"; // a found marker box + its pointing arrow
+const COL_MARKER_LINK = "#ff8c42"; // the thin connector from a marker to its chosen proposal
+
+// Fixed pixel length (backing space) of a drawn pointing arrow and its head, so arrows read the
+// same at any zoom, exactly like labels and dots.
+const MARKER_ARROW_LEN = 34;
+const MARKER_ARROW_HEAD = 8;
 
 // The named diagnostic fields the UI knows how to draw, in draw order. Presence-driven: a
 // field appears as a toggle only when the payload actually carries it. No method name here.
@@ -34,6 +41,7 @@ const DIAGNOSTIC_FIELDS = [
   { key: "correspondences", label: "Correspondences" },
   { key: "hough_peaks", label: "Hough peaks" },
   { key: "proposals", label: "Proposals" },
+  { key: "markers", label: "Markers & arrows" },
 ];
 
 /**
@@ -189,6 +197,86 @@ function _dot(ctx, viewport, ix, iy, color, radius) {
   ctx.fill();
 }
 
+/** Draw a fixed-length arrow (backing space) from (bx,by) along the unit vector (dx,dy). */
+function _arrow(ctx, bx, by, dx, dy, length, head) {
+  const dpr = _dpr();
+  const tx = bx + dx * length;
+  const ty = by + dy * length;
+  ctx.setLineDash([]);
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeStyle = COL_MARKER;
+  ctx.beginPath();
+  ctx.moveTo(bx, by);
+  ctx.lineTo(tx, ty);
+  ctx.stroke();
+  // Two barbs swept back from the tip so the arrow clearly points along the direction.
+  const angle = Math.atan2(dy, dx);
+  for (const offset of [Math.PI * 0.83, -Math.PI * 0.83]) {
+    ctx.beginPath();
+    ctx.moveTo(tx, ty);
+    ctx.lineTo(tx + head * Math.cos(angle + offset), ty + head * Math.sin(angle + offset));
+    ctx.stroke();
+  }
+}
+
+/**
+ * Draw the marker layer: each found marker's box (image space), a fixed-length pointing arrow
+ * from its reference point (backing space, only where a direction exists), and a thin connector
+ * to the proposal chosen for it. Presence-driven — the only knowledge used is the shape of the
+ * marker diagnostics fields, never the identity of the exploration that produced them.
+ * @param {import("./viewport.js").Viewport} viewport
+ * @param {object} diagnostics carrying markers[], marker_reference_points[], marker_directions[]
+ * @param {ReadonlyArray<{box:{x:number,y:number,w:number,h:number}}>} matches chosen proposals,
+ *   one per marker in index order
+ */
+function drawMarkerDiagnostics(viewport, diagnostics, matches) {
+  const ctx = viewport.canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = _dpr();
+  const markers = diagnostics.markers || [];
+  const refs = diagnostics.marker_reference_points || [];
+  const dirs = diagnostics.marker_directions || [];
+
+  // 1. Marker boxes in image space, so they track zoom and pan.
+  _imageSpace(ctx, viewport);
+  ctx.setLineDash([]);
+  ctx.lineWidth = (1.5 * dpr) / viewport.zoom;
+  ctx.strokeStyle = COL_MARKER;
+  for (const b of markers) {
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+  }
+  _screenSpace(ctx);
+
+  // 2. Per marker: the connector to its chosen proposal, the reference-point dot, then the
+  //    pointing arrow — all fixed-size in backing space so they read the same at any zoom.
+  for (let i = 0; i < refs.length; i += 1) {
+    const ref = refs[i];
+    if (!ref) continue;
+    const from = viewport.imageToBacking(ref.x, ref.y);
+
+    const chosen = matches[i] && matches[i].box;
+    if (chosen) {
+      const to = viewport.imageToBacking(chosen.x + chosen.w / 2, chosen.y + chosen.h / 2);
+      ctx.setLineDash([4 * dpr, 3 * dpr]);
+      ctx.lineWidth = dpr;
+      ctx.strokeStyle = COL_MARKER_LINK;
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    _dot(ctx, viewport, ref.x, ref.y, COL_MARKER, 3 * dpr);
+
+    // A direction exists only for a pointing marker; a symmetric one draws no arrow (by design).
+    const dir = dirs[i];
+    if (dir) {
+      _arrow(ctx, from.x, from.y, dir[0], dir[1], MARKER_ARROW_LEN * dpr, MARKER_ARROW_HEAD * dpr);
+    }
+  }
+}
+
 /**
  * Draw the point/vector diagnostics that sit over the boxes — keypoints, correspondences,
  * Hough peaks, proposals — each gated by its toggle and by field presence. The heatmap is
@@ -196,11 +284,17 @@ function _dot(ctx, viewport, ix, iy, color, radius) {
  * @param {import("./viewport.js").Viewport} viewport
  * @param {object} diagnostics
  * @param {Set<string>} enabled the field keys currently toggled on
+ * @param {ReadonlyArray<{box:{x:number,y:number,w:number,h:number}}>} [matches] chosen proposals,
+ *   one per marker, used to draw the marker→proposal connector when marker diagnostics are on
  */
-export function drawPointDiagnostics(viewport, diagnostics, enabled) {
+export function drawPointDiagnostics(viewport, diagnostics, enabled, matches = []) {
   const ctx = viewport.canvas.getContext("2d");
   if (!ctx || !diagnostics) return;
   const dpr = _dpr();
+
+  if (enabled.has("markers") && Array.isArray(diagnostics.markers)) {
+    drawMarkerDiagnostics(viewport, diagnostics, matches);
+  }
 
   if (enabled.has("proposals") && Array.isArray(diagnostics.proposals)) {
     _imageSpace(ctx, viewport);
