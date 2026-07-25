@@ -71,13 +71,13 @@ def insert_run(conn: sqlite3.Connection, run: RunRecord) -> int:
     error = result.error
 
     with conn:
-        # exploration is deliberately omitted so the column DEFAULT ('same-image-search')
-        # applies -- this is the Milestone 2 seam and RunRecord carries no exploration
-        # field yet, so letting the default fire both fills the column and proves it.
+        # exploration is now passed through explicitly (Milestone 2): RunRecord carries it and
+        # defaults it to 'same-image-search', so the default path stores exactly the value the
+        # column DEFAULT would have, and a marker-conditioned run stores 'marker-conditioned'.
         cursor = conn.execute(
             """
             INSERT INTO runs (
-                image_id, method, method_version,
+                exploration, image_id, method, method_version,
                 exemplar_x, exemplar_y, exemplar_w, exemplar_h, exemplar_label,
                 config_json, config_hash, outcome, error_kind, error_message,
                 retrieved, threshold_applied,
@@ -89,7 +89,7 @@ def insert_run(conn: sqlite3.Connection, run: RunRecord) -> int:
                 slice_rotation_min, slice_rotation_max, slice_clutter,
                 slice_exemplar_keypoint_count, diagnostics_json, created_at
             ) VALUES (
-                ?, ?, ?,
+                ?, ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?,
@@ -103,6 +103,7 @@ def insert_run(conn: sqlite3.Connection, run: RunRecord) -> int:
             )
             """,
             (
+                run.exploration,
                 run.image_id,
                 run.method,
                 result.method_version,
@@ -287,6 +288,7 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> RunRecord:
             label=row["exemplar_label"],
         ),
         method=row["method"],
+        exploration=row["exploration"],
         config_json=row["config_json"],
         config_hash=row["config_hash"],
         result=result,

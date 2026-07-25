@@ -32,6 +32,14 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+DEFAULT_EXPLORATION = "same-image-search"
+"""The default exploration a run belongs to (the Milestone 1 same-image search).
+
+This is the domain-level default; the store's ``runs.exploration`` column carries the same
+literal as its SQL ``DEFAULT`` (see ``store/schema.py``). A second exploration
+(``marker-conditioned``) adds rows, not a schema migration."""
+
+
 class SliceMetadata(BaseModel):
     """What kind of image this run was on, for per-slice failure analysis (EVAL-10).
 
@@ -133,6 +141,9 @@ class RunRecord(BaseModel):
         image_id: Stable identifier for the scene image (relative asset path or hash).
         exemplar: The box the user drew.
         method: Registry key of the method that ran.
+        exploration: Which exploration this run belongs to (the Milestone 2 seam). Defaults to
+            the same-image search so every Milestone 1 caller is unchanged; the store persists
+            this value rather than relying on the column DEFAULT.
         config_json: The **canonical** config JSON that was hashed, stored verbatim so a
             hash mismatch can be diffed rather than guessed at.
         config_hash: SHA-256 of ``config_json``.
@@ -147,6 +158,7 @@ class RunRecord(BaseModel):
     image_id: str = Field(min_length=1)
     exemplar: ExemplarBox
     method: str = Field(min_length=1)
+    exploration: str = Field(default=DEFAULT_EXPLORATION, min_length=1)
     config_json: str
     config_hash: str
     result: SearchResult

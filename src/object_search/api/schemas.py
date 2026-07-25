@@ -18,6 +18,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from object_search.schemas.geometry import ExemplarBox
+from object_search.schemas.records import DEFAULT_EXPLORATION
 from object_search.schemas.search import SearchResult
 
 
@@ -56,8 +57,11 @@ class SearchRequest(BaseModel):
         exemplar: The box the user drew (plus optional label).
         method: Registry key of the method to run, as returned by ``GET /methods``.
         config: Raw config object; validated against the method's ``config_model``.
-        exploration: The exploration this run belongs to; defaults to the same-image search
-            on the store side (the Milestone 2 seam), so callers omit it in Phase 3.
+        exploration: The exploration this run belongs to (the Milestone 2 seam). Defaults to the
+            same-image search, so every Milestone 1 caller is byte-for-byte unchanged; set it to
+            another registered exploration (e.g. the marker-conditioned one) to route there and
+            persist the run under that tag. The default is the imported ``DEFAULT_EXPLORATION``
+            constant, never a hardcoded name -- the API package names no exploration as a literal.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -66,7 +70,7 @@ class SearchRequest(BaseModel):
     exemplar: ExemplarBox
     method: str = Field(min_length=1)
     config: dict[str, object] = Field(default_factory=dict)
-    exploration: str | None = None
+    exploration: str = Field(default=DEFAULT_EXPLORATION, min_length=1)
 
 
 class SearchResponse(BaseModel):

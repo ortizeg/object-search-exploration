@@ -33,7 +33,7 @@ import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from object_search.schemas.geometry import BBox
+from object_search.schemas.geometry import BBox, Point
 from object_search.schemas.records import SliceMetadata
 
 # Rejection-sampling attempt cap for scatter mode. Hitting it means the canvas is too full;
@@ -333,4 +333,318 @@ DEMO_SPECS: Mapping[str, SyntheticSpec] = {
     "cluttered-distractors": SyntheticSpec(
         seed=4, mode="scatter", shape="plus", n_instances=8, clutter=0.6, n_distractors=8
     ),
+}
+
+
+# ======================================================================================
+# Marker mode (Milestone 2) -- markers with an *exact* tip, direction and centroid.
+#
+# The Milestone 1 generator draws objects to be *found*. This mode draws the query gesture
+# itself -- an arrow, a dot, a caret -- whose tip and pointing direction are known by
+# construction and so serve as exact oracles for the orientation estimator (M2-02). The
+# same two load-bearing properties hold: one ``np.random.default_rng(seed)`` drives every
+# draw in a fixed order, and shapes use ``cv2.LINE_8`` so pixels do not depend on the
+# OpenCV build. An arrow has a shaft plus a filled triangular head, so its heavier,
+# narrowing-to-a-point end is unambiguous -- exactly the signal the arrowhead-mass heuristic
+# keys off. A dot is rotationally symmetric and therefore carries **no** direction, which is
+# the spec-required "return the centroid and no guessed direction" case.
+# ======================================================================================
+
+MarkerName = Literal["arrow", "dot", "caret"]
+
+
+class MarkerSpec(BaseModel):
+    """Everything needed to draw one marker scene deterministically from ``seed``.
+
+    Attributes:
+        seed: The single seed the one RNG is built from.
+        width: Canvas width in pixels.
+        height: Canvas height in pixels.
+        marker: Which gesture to draw. ``arrow`` and ``caret`` point; ``dot`` does not.
+        n_markers: How many markers to place, non-overlapping.
+        arrow_len: Full tail-to-tip length of an arrow/caret in pixels; a dot's diameter is
+            derived from it so all markers occupy a comparable footprint.
+        rotation_jitter_deg: Unused placeholder kept symmetric with :class:`SyntheticSpec`;
+            each marker already draws a *fully* random orientation, which is the point.
+        with_targets: When true, draw a target object a known distance past each pointing
+            marker's tip, along its direction, and record its box in the ground truth.
+        target_gap: Pixels from the tip to the near edge of the target object.
+        thickness: Shaft/stroke thickness in pixels.
+        fg_color: Marker colour (BGR).
+        bg_color: Background colour (BGR).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    seed: int = 0
+    width: int = Field(default=640, ge=16)
+    height: int = Field(default=480, ge=16)
+    marker: MarkerName = "arrow"
+    n_markers: int = Field(default=3, ge=1)
+    arrow_len: int = Field(default=64, ge=8)
+    rotation_jitter_deg: float = Field(default=0.0, ge=0.0, le=180.0)
+    with_targets: bool = False
+    target_gap: int = Field(default=28, ge=0)
+    thickness: int = Field(default=3, ge=1)
+    fg_color: tuple[int, int, int] = (40, 90, 220)
+    bg_color: tuple[int, int, int] = (235, 235, 235)
+
+
+@dataclass(frozen=True)
+class MarkerGT:
+    """Exact ground truth for one drawn marker.
+
+    ``tip`` and ``centroid`` are always present; ``direction`` is a **unit** vector for a
+    pointing marker and ``None`` for a symmetric one (a dot). ``target`` is the box of the
+    pointed-at object when ``with_targets`` was set, else ``None``.
+    """
+
+    box: BBox
+    tip: Point
+    direction: tuple[float, float] | None
+    centroid: Point
+    target: BBox | None
+
+
+@dataclass(frozen=True)
+class MarkerImage:
+    """A generated marker scene and its exact per-marker ground truth."""
+
+    image: npt.NDArray[np.uint8]
+    markers: tuple[MarkerGT, ...]
+    spec: MarkerSpec
+
+
+def _aabb_of(points: npt.NDArray[np.float64], width: int, height: int) -> BBox:
+    """Clipped, half-open AABB of ``points`` (rows of ``(x, y)``)."""
+    pts = np.round(points).astype(np.int64)
+    x0 = max(0, min(int(pts[:, 0].min()), width - 1))
+    y0 = max(0, min(int(pts[:, 1].min()), height - 1))
+    x1 = max(0, min(int(pts[:, 0].max()), width - 1))
+    y1 = max(0, min(int(pts[:, 1].max()), height - 1))
+    return BBox(x=x0, y=y0, w=x1 - x0 + 1, h=y1 - y0 + 1)
+
+
+def _draw_arrow(
+    canvas: npt.NDArray[np.uint8],
+    center: tuple[float, float],
+    direction: tuple[float, float],
+    arrow_len: float,
+    thickness: int,
+    color: tuple[int, int, int],
+    *,
+    open_head: bool,
+) -> tuple[Point, npt.NDArray[np.float64]]:
+    """Draw an arrow (or caret) pointing along ``direction``; return its tip and hull points.
+
+    The head carries deliberately more mass than the tail: a *filled* triangle for an arrow,
+    an open V for a caret. That asymmetry -- heavy, narrowing head versus thin, flat tail --
+    is exactly what the estimator's arrowhead-mass heuristic recovers.
+    """
+    dx, dy = direction
+    nx, ny = -dy, dx  # unit perpendicular
+    cx, cy = center
+    half = arrow_len / 2.0
+    tip = (cx + dx * half, cy + dy * half)
+    tail = (cx - dx * half, cy - dy * half)
+
+    head_len = arrow_len * 0.35
+    head_half_w = arrow_len * 0.20
+    base = (tip[0] - dx * head_len, tip[1] - dy * head_len)
+    left = (base[0] + nx * head_half_w, base[1] + ny * head_half_w)
+    right = (base[0] - nx * head_half_w, base[1] - ny * head_half_w)
+
+    if open_head:
+        # Caret: shaft plus two open barbs, no fill -- still head-heavy but hollow.
+        cv2.line(
+            canvas,
+            (round(tail[0]), round(tail[1])),
+            (round(tip[0]), round(tip[1])),
+            color,
+            thickness,
+            lineType=cv2.LINE_8,
+        )
+        for barb in (left, right):
+            cv2.line(
+                canvas,
+                (round(tip[0]), round(tip[1])),
+                (round(barb[0]), round(barb[1])),
+                color,
+                thickness,
+                lineType=cv2.LINE_8,
+            )
+    else:
+        cv2.line(
+            canvas,
+            (round(tail[0]), round(tail[1])),
+            (round(tip[0]), round(tip[1])),
+            color,
+            thickness,
+            lineType=cv2.LINE_8,
+        )
+        head = np.array([tip, left, right], dtype=np.float64)
+        cv2.fillPoly(canvas, [np.round(head).astype(np.int32)], color, lineType=cv2.LINE_8)
+
+    hull = np.array([tail, tip, left, right], dtype=np.float64)
+    return Point(x=float(tip[0]), y=float(tip[1])), hull
+
+
+def _draw_target(
+    canvas: npt.NDArray[np.uint8],
+    tip: Point,
+    direction: tuple[float, float],
+    gap: float,
+    size: float,
+    color: tuple[int, int, int],
+    width: int,
+    height: int,
+) -> BBox:
+    """Draw a filled square target ``gap`` px past ``tip`` along ``direction``; return its box."""
+    dx, dy = direction
+    half = size / 2.0
+    tcx = tip.x + dx * (gap + half)
+    tcy = tip.y + dy * (gap + half)
+    corners = np.array(
+        [
+            (tcx - half, tcy - half),
+            (tcx + half, tcy - half),
+            (tcx + half, tcy + half),
+            (tcx - half, tcy + half),
+        ],
+        dtype=np.float64,
+    )
+    cv2.fillPoly(canvas, [np.round(corners).astype(np.int32)], color, lineType=cv2.LINE_8)
+    return _aabb_of(corners, width, height)
+
+
+def synthesize_markers(spec: MarkerSpec) -> MarkerImage:
+    """Draw ``spec.n_markers`` markers with exact tip/direction/centroid ground truth.
+
+    Placement is rejection-sampled to be non-overlapping, drawing from one
+    ``np.random.default_rng(spec.seed)`` in a fixed order (position, then orientation, per
+    marker) so the output is byte-identical for a given seed. A ``dot`` is drawn as a filled
+    circle and reports ``direction=None``; an ``arrow``/``caret`` reports a unit direction.
+    """
+    rng = np.random.default_rng(spec.seed)
+    canvas = np.empty((spec.height, spec.width, 3), dtype=np.uint8)
+    canvas[:, :] = spec.bg_color
+
+    # Footprint radius large enough that a target (if any) also clears its neighbours.
+    reach = spec.arrow_len * (1.0 if not spec.with_targets else 1.9)
+    radius = reach * 0.6
+    margin = radius + 2.0
+    min_gap = 2.0 * radius
+
+    centres: list[tuple[float, float]] = []
+    attempts = 0
+    while len(centres) < spec.n_markers and attempts < _SCATTER_MAX_ATTEMPTS:
+        attempts += 1
+        cx = float(rng.uniform(margin, spec.width - margin))
+        cy = float(rng.uniform(margin, spec.height - margin))
+        if all((cx - px) ** 2 + (cy - py) ** 2 >= min_gap**2 for px, py in centres):
+            centres.append((cx, cy))
+    if len(centres) < spec.n_markers:
+        logger.warning(
+            f"marker mode placed {len(centres)}/{spec.n_markers} markers after {attempts} "
+            f"attempts (canvas too full); recording the achieved count"
+        )
+
+    target_color = (spec.fg_color[1], spec.fg_color[2], spec.fg_color[0])
+    target_size = spec.arrow_len * 0.5
+
+    markers: list[MarkerGT] = []
+    for cx, cy in centres:
+        angle = float(rng.uniform(-np.pi, np.pi))
+        direction = (float(np.cos(angle)), float(np.sin(angle)))
+
+        if spec.marker == "dot":
+            radius_px = max(1, round(spec.arrow_len * 0.25))
+            cv2.circle(
+                canvas, (round(cx), round(cy)), radius_px, spec.fg_color, -1, lineType=cv2.LINE_8
+            )
+            box = BBox(
+                x=max(0, round(cx) - radius_px),
+                y=max(0, round(cy) - radius_px),
+                w=2 * radius_px + 1,
+                h=2 * radius_px + 1,
+            ).clipped_to(spec.width, spec.height)
+            markers.append(
+                MarkerGT(
+                    box=box,
+                    tip=Point(x=cx, y=cy),
+                    direction=None,
+                    centroid=Point(x=cx, y=cy),
+                    target=None,
+                )
+            )
+            continue
+
+        tip, hull = _draw_arrow(
+            canvas,
+            (cx, cy),
+            direction,
+            float(spec.arrow_len),
+            spec.thickness,
+            spec.fg_color,
+            open_head=(spec.marker == "caret"),
+        )
+        target = None
+        if spec.with_targets:
+            target = _draw_target(
+                canvas,
+                tip,
+                direction,
+                float(spec.target_gap),
+                target_size,
+                target_color,
+                spec.width,
+                spec.height,
+            )
+        markers.append(
+            MarkerGT(
+                box=_aabb_of(hull, spec.width, spec.height),
+                tip=tip,
+                direction=direction,
+                centroid=Point(x=cx, y=cy),
+                target=target,
+            )
+        )
+
+    return MarkerImage(image=canvas, markers=tuple(markers), spec=spec)
+
+
+def save_marker_image(out: MarkerImage, image_path: Path) -> Path:
+    """Write the PNG and a ``<stem>.markers.json`` sidecar carrying every marker's exact GT."""
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(image_path), out.image):
+        raise OSError(f"failed to write marker image to {image_path}")
+    sidecar = image_path.with_suffix(".markers.json")
+    payload = {
+        "image": image_path.name,
+        "spec": out.spec.model_dump(mode="json"),
+        "markers": [
+            {
+                "box": marker.box.model_dump(mode="json"),
+                "tip": marker.tip.model_dump(mode="json"),
+                "direction": list(marker.direction) if marker.direction is not None else None,
+                "centroid": marker.centroid.model_dump(mode="json"),
+                "target": marker.target.model_dump(mode="json") if marker.target else None,
+            }
+            for marker in out.markers
+        ],
+    }
+    sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    logger.info(f"wrote {image_path.name} with {len(out.markers)} marker(s)")
+    return image_path
+
+
+MARKER_DEMO_SPECS: Mapping[str, MarkerSpec] = {
+    # Bare arrows -- the clean orientation-estimation case.
+    "arrows": MarkerSpec(seed=11, marker="arrow", n_markers=4),
+    # Arrows each pointing at a known target object a fixed gap away.
+    "arrows-with-targets": MarkerSpec(
+        seed=12, marker="arrow", n_markers=3, with_targets=True, target_gap=30
+    ),
+    # Symmetric dots -- the "no direction" case.
+    "dots": MarkerSpec(seed=13, marker="dot", n_markers=5),
 }

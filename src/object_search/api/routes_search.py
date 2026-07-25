@@ -32,14 +32,15 @@ from object_search import provenance
 from object_search.api.errors import APIError
 from object_search.api.images import ImageNotFoundError, load_image_bgr, slice_metadata_for
 from object_search.api.schemas import SearchRequest, SearchResponse
-from object_search.schemas.records import Provenance, RunRecord
+from object_search.explorations import UnknownExplorationError, get_exploration
+from object_search.schemas.records import DEFAULT_EXPLORATION, Provenance, RunRecord
 from object_search.schemas.search import (
     LatencyBreakdown,
     MethodError,
     SearchOutcome,
     SearchResult,
 )
-from object_search.search import UnknownMethodError, get_method
+from object_search.search import SearchFn, UnknownMethodError, get_method
 from object_search.store.db import connect
 from object_search.store.runs import get_run, insert_run
 
@@ -65,19 +66,44 @@ def _field_errors(exc: ValidationError) -> list[dict[str, object]]:
 
 @router.post("/search", response_model=SearchResponse)
 def post_search(request: Request, body: SearchRequest) -> SearchResponse:
-    """Run a search, persist it with full provenance, and return the result plus run id."""
-    try:
-        spec = get_method(body.method)
-    except UnknownMethodError as exc:
-        raise APIError(404, "unknown_method", str(exc)) from exc
+    """Run a search, persist it with full provenance, and return the result plus run id.
+
+    Dispatch is registry-driven, not name-driven: the default exploration keeps the exact
+    Milestone 1 path (resolve the method, run it), and any other exploration is resolved from the
+    exploration registry and run through its ``run`` callable. Either way the run is persisted with
+    ``body.exploration`` as its tag, so a marker run lands under its own exploration tag with no
+    schema migration while the default path is byte-for-byte unchanged.
+    """
+    is_default = body.exploration == DEFAULT_EXPLORATION
+
+    # 1. Resolve the callable, its config model and its version -- from the method registry on the
+    #    default path, from the exploration registry otherwise. Both registries share the exact
+    #    ``(image, exemplar, config) -> SearchResult`` call shape, so the run flow below is common.
+    fn: SearchFn
+    if is_default:
+        try:
+            method_spec = get_method(body.method)
+        except UnknownMethodError as exc:
+            raise APIError(404, "unknown_method", str(exc)) from exc
+        config_model = method_spec.config_model
+        version = method_spec.version
+        fn = method_spec.fn
+    else:
+        try:
+            exploration_spec = get_exploration(body.exploration)
+        except UnknownExplorationError as exc:
+            raise APIError(404, "unknown_exploration", str(exc)) from exc
+        config_model = exploration_spec.config_model
+        version = exploration_spec.version
+        fn = exploration_spec.fn
 
     try:
-        config = spec.config_model.model_validate(body.config)
+        config = config_model.model_validate(body.config)
     except ValidationError as exc:
         raise APIError(
             422,
             "invalid_config",
-            f"config failed validation for method {body.method!r}",
+            f"config failed validation for exploration {body.exploration!r}",
             detail=_field_errors(exc),
         ) from exc
 
@@ -88,24 +114,25 @@ def post_search(request: Request, body: SearchRequest) -> SearchResponse:
 
     config_json = provenance.canonical_config_json(config)
     config_hash = provenance.config_hash(config)
-    captured = Provenance.capture(method_version=spec.version, config_hash=config_hash)
+    captured = Provenance.capture(method_version=version, config_hash=config_hash)
     slice_metadata = slice_metadata_for(body.image_id)
 
     started = perf_counter()
     try:
-        result = spec.fn(image, body.exemplar, config)
+        result = fn(image, body.exemplar, config)
     except Exception as exc:
         elapsed_ms = (perf_counter() - started) * 1000.0
         logger.warning(
-            "method {!r} raised on run against {!r}: {}: {}",
-            body.method,
+            "{} {!r} raised on run against {!r}: {}: {}",
+            "method" if is_default else "exploration",
+            body.method if is_default else body.exploration,
             body.image_id,
             type(exc).__name__,
             exc,
         )
         result = SearchResult(
             method=body.method,
-            method_version=spec.version,
+            method_version=version,
             outcome=SearchOutcome.ERROR,
             matches=(),
             latency=LatencyBreakdown(
@@ -122,6 +149,7 @@ def post_search(request: Request, body: SearchRequest) -> SearchResponse:
         image_id=body.image_id,
         exemplar=body.exemplar,
         method=body.method,
+        exploration=body.exploration,
         config_json=config_json,
         config_hash=config_hash,
         result=result,
