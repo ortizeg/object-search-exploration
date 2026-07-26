@@ -378,19 +378,19 @@ distractors, density, and cross-domain shift instead of only self-generated imag
 
   6. `docs/eval/research-datasets.md` documents each dataset (purpose, source link, annotation type,
      splits, strengths/weaknesses) and the tune-on-val → report-on-test protocol.
-**Plans**: 3 plans
+**Plans**: 3/3 plans executed (on offline fixtures; real licence-gated data fetched by the user)
 
 Plans:
 
-- [ ] 11-01-PLAN.md — Tracer: CARPK end-to-end (fetch + provenance + gitignore + native→sidecar
+- [x] 11-01-PLAN.md — Tracer: CARPK end-to-end (fetch + provenance + gitignore + native→sidecar
       converter + split-manifest schema + COCO AP sweep / MAE-RMSE-NAE metrics + benchmark row at
       1 exemplar), proving the whole research-dataset architecture on one dataset
-- [ ] 11-02-PLAN.md — Converters for FSCD-147 (+ dedup: 11 train↔test leaks + pixel-identical
+- [x] 11-02-PLAN.md — Converters for FSCD-147 (+ dedup: 11 train↔test leaks + pixel-identical
       dups), FSCD-LVIS (unseen), and RPINE; shared seeded val-carve helper; four committed split
       manifests (native / seeded-carve / test-only) with seed-stability guarantees
-- [ ] 11-03-PLAN.md — Seeded 1-&-3 exemplar sampler, full benchmark sweep
-      (method × dataset × {1,3} × {val,test}, CARPK/PUCPR+ test-only), literature-metric report
-      table, and `docs/eval/research-datasets.md` (DOC-07)
+- [x] 11-03-PLAN.md — Seeded 1-&-3 exemplar sampler + `run_multi_exemplar` k-shot late fusion,
+      full benchmark sweep (method × dataset × {1,3} × {val,test}, CARPK/PUCPR+ test-only),
+      literature-metric report table, and `docs/eval/research-datasets.md` (DOC-07)
 
 ## Progress
 
@@ -410,4 +410,4 @@ the shared DINOv2 inferencer. Valid parallel schedule: 5 ∥ 6, then 7, then 8.
 | 6. Method 3 | 0/2 | Not started | - |
 | 7. Method 5 | 1/2 | In Progress|  |
 | 8. Evaluation & docs | 2/2 | Complete | 2026-07-25 |
-| 11. Research-dataset evaluation harness | 0/2 | Not started | - |
+| 11. Research-dataset evaluation harness | 3/3 | Executed | 2026-07-26 |
