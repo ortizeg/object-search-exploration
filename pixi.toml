@@ -96,6 +96,9 @@ typecheck = "mypy src/"
 test = "pytest tests/ -v"
 quality = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 fetch-models = "python -m object_search.cli fetch-models"
+# Convert the research evaluation datasets (EVAL-21) into the gitignored datasets/ tree. CARPK is
+# licence-gated: `fetch-datasets --list` prints where a human drops the archive first (D-08).
+fetch-datasets = "python -m object_search.cli fetch-datasets"
 serve = "uvicorn object_search.api.app:app --reload --port 8000"
 samples = "python -m object_search.cli render-samples"
 report = "python scripts/build_report.py"

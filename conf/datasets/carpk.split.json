@@ -1,0 +1,13 @@
+{
+  "dataset": "carpk",
+  "seed": 0,
+  "val_strategy": "test-only",
+  "train": [],
+  "val": [],
+  "test": [
+    "carpk-fixture-01",
+    "carpk-fixture-02",
+    "carpk-fixture-03"
+  ],
+  "provenance_ref": "datasets/provenance.json"
+}

@@ -26,9 +26,15 @@ and hence AP, is recoverable from a single operating point's worth of data.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 from object_search.schemas.geometry import BBox
+
+# The COCO IoU sweep: 0.50, 0.55, ..., 0.95 (ten thresholds). Written as scaled integers and
+# divided so the thresholds are exact (0.05 has no finite binary representation, and a naive
+# ``arange`` drifts by ~1e-16, which would make AP50/AP75 miss the sweep points they must land on).
+_COCO_IOU_THRESHOLDS: tuple[float, ...] = tuple(t / 100 for t in range(50, 100, 5))
 
 
 def match_predictions(
@@ -185,3 +191,86 @@ def average_precision(
             ap += (recall - prev_recall) * interp[i]
             prev_recall = recall
     return ap
+
+
+def average_precision_coco(
+    candidates_with_scores: Sequence[tuple[BBox, float]],
+    gt_boxes: Sequence[BBox],
+) -> tuple[float, float, float]:
+    """COCO-style AP over the IoU sweep ``[0.50, 0.55, ..., 0.95]`` (EVAL-24).
+
+    This is the literature's detection metric (FSCD-147 / Counting-DETR), reported alongside the
+    project's existing single-IoU number so our results sit next to published work. It is a thin
+    generalisation, **not** a reimplementation: it calls :func:`average_precision` once per IoU
+    threshold, so by construction ``AP50`` is *exactly* the pre-existing single-IoU-0.5 AP and old
+    and new reports reconcile with no drift (the AP-convention constraint from ``08-CONTEXT.md``).
+
+    Args:
+        candidates_with_scores: The ranked ``(box, score)`` candidate log, identical to what
+            :func:`average_precision` consumes.
+        gt_boxes: The exact ground-truth instances.
+
+    Returns:
+        ``(AP, AP50, AP75)`` where ``AP`` is the mean over the ten COCO IoU thresholds, ``AP50``
+        is AP at IoU 0.5, and ``AP75`` is AP at IoU 0.75. All in ``[0.0, 1.0]``.
+
+    Raises:
+        ValueError: If ``gt_boxes`` is empty -- inherited from :func:`average_precision`, the same
+            guard, so the two functions refuse zero-ground-truth identically.
+    """
+    per_threshold = [
+        average_precision(candidates_with_scores, gt_boxes, iou) for iou in _COCO_IOU_THRESHOLDS
+    ]
+    ap = sum(per_threshold) / len(per_threshold)
+    ap50 = average_precision(candidates_with_scores, gt_boxes, 0.5)
+    ap75 = average_precision(candidates_with_scores, gt_boxes, 0.75)
+    return ap, ap50, ap75
+
+
+def counting_errors(
+    pred_counts: Sequence[int], true_counts: Sequence[int]
+) -> tuple[float, float, float]:
+    """Counting-comparability errors MAE, RMSE and NAE over predicted-vs-true counts (EVAL-24).
+
+    These are the class-agnostic-counting literature's headline numbers, added so a per-method
+    count error can be read next to published counting work. They are aggregate errors over a set
+    of images, not a per-image score.
+
+    * **MAE** ``= mean(|pred - true|)`` -- the primary error.
+    * **RMSE** ``= sqrt(mean((pred - true)^2))`` -- penalises large misses more.
+    * **NAE** ``= mean(|pred - true| / true)`` -- normalised, but **only over images with
+      ``true > 0``**. Dividing by a zero true count is undefined, so those images are skipped from
+      the NAE average explicitly (documented) rather than silently contributing an infinity or a
+      divide-by-zero; NAE is ``0.0`` when *every* image has ``true == 0``.
+
+    Args:
+        pred_counts: Predicted instance count per image.
+        true_counts: True instance count per image, aligned by index with ``pred_counts``.
+
+    Returns:
+        ``(MAE, RMSE, NAE)``.
+
+    Raises:
+        ValueError: If the two sequences differ in length, or are empty. An empty set has no mean.
+    """
+    if len(pred_counts) != len(true_counts):
+        raise ValueError(
+            f"pred_counts ({len(pred_counts)}) and true_counts ({len(true_counts)}) "
+            f"must be the same length"
+        )
+    if not pred_counts:
+        raise ValueError("counting_errors is undefined over an empty set of images")
+
+    deltas = [pred - true for pred, true in zip(pred_counts, true_counts, strict=True)]
+    mae = sum(abs(d) for d in deltas) / len(deltas)
+    rmse = math.sqrt(sum(d * d for d in deltas) / len(deltas))
+
+    # NAE guards true == 0 explicitly: a zero denominator is undefined, so those images are left
+    # out of the normalised average rather than fabricating an error term for them.
+    normalised = [
+        abs(pred - true) / true
+        for pred, true in zip(pred_counts, true_counts, strict=True)
+        if true > 0
+    ]
+    nae = sum(normalised) / len(normalised) if normalised else 0.0
+    return mae, rmse, nae

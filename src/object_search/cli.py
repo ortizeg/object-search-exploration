@@ -17,6 +17,7 @@ from typing import Annotated
 import typer
 from loguru import logger
 
+from object_search.eval import datasets as dataset_registry
 from object_search.inference import models as model_registry
 from object_search.log import setup_logging
 from object_search.provenance import repo_root
@@ -72,6 +73,45 @@ def fetch_models(
         return
 
     model_registry.fetch_all(force=force)
+
+
+@app.command("fetch-datasets")
+def fetch_datasets(
+    force: Annotated[bool, typer.Option("--force", help="Reconvert even if present.")] = False,
+    only: Annotated[str | None, typer.Option("--only", help="Fetch one dataset by key.")] = None,
+    list_only: Annotated[
+        bool, typer.Option("--list", help="Print the dataset registry and exit.")
+    ] = False,
+) -> None:
+    """Convert every registered research dataset into the gitignored ``datasets/`` tree (EVAL-21).
+
+    Licence-gated datasets (CARPK) are ``requires_manual``: a human accepts the licence and drops
+    the raw archive at the printed ``datasets/_incoming/<key>/`` path first. Raw bytes never enter
+    git; ``datasets/provenance.json`` records each file's SHA-256 + source URL + licence (D-08).
+    """
+    registry = dataset_registry.DATASET_REGISTRY
+
+    if list_only:
+        typer.echo(f"{len(registry)} registered dataset(s):")
+        for key in sorted(registry):
+            spec = registry[key]
+            drop = repo_root() / "datasets" / "_incoming" / spec.incoming_subdir
+            typer.echo(
+                f"  {key:10s} source={spec.source:16s} phase={spec.added_in_phase}  "
+                f"licence={spec.license}"
+            )
+            typer.echo(f"{'':12s}manual={spec.requires_manual}  drop archive at: {drop}")
+        return
+
+    if only is not None:
+        if only not in registry:
+            known = ", ".join(sorted(registry))
+            typer.echo(f"unknown dataset {only!r}; known: {known}", err=True)
+            raise typer.Exit(code=1)
+        dataset_registry.fetch(registry[only], force=force)
+        return
+
+    dataset_registry.fetch_all(force=force)
 
 
 @app.command("synth")

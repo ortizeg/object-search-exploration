@@ -54,10 +54,18 @@ from object_search.eval.labels import (
     GroundTruth,
     chipset_image_ids,
     load_ground_truth,
+    load_research_ground_truth,
     scene_path,
     textured_image_ids,
 )
-from object_search.eval.metrics import average_precision, match_predictions, precision_recall_f1
+from object_search.eval.metrics import (
+    average_precision,
+    average_precision_coco,
+    counting_errors,
+    match_predictions,
+    precision_recall_f1,
+)
+from object_search.eval.splits import research_image_ids
 from object_search.provenance import current_git_sha, repo_root
 from object_search.schemas.geometry import BBox
 from object_search.schemas.search import SearchOutcome
@@ -113,7 +121,13 @@ class BenchmarkConfig(BaseModel):
 
 
 class ImageResult(BaseModel):
-    """One method's result on one image: the metrics plus the slice keys it is grouped by."""
+    """One method's result on one image: the metrics plus the slice keys it is grouped by.
+
+    The research fields (``dataset``/``split``/``exemplar_count`` and the literature metrics
+    ``ap50``/``ap75``/``predicted_count``/``true_count``) are additive and default ``None``, so the
+    committed chipset/CI path constructs this exactly as before and stays byte-identical; they are
+    populated only on the research path (:func:`run_research_benchmark`).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -131,6 +145,14 @@ class ImageResult(BaseModel):
     ap: float | None
     latency_ms: float | None
     n_matches: int
+    # -- research-dataset additive fields (EVAL-22/24) --------------------------------
+    dataset: str | None = None
+    split: str | None = None
+    exemplar_count: int | None = None
+    ap50: float | None = None
+    ap75: float | None = None
+    predicted_count: int | None = None
+    true_count: int | None = None
 
 
 def _scale_bucket(gt: GroundTruth) -> str:
@@ -335,6 +357,251 @@ def run_benchmark(config: BenchmarkConfig) -> dict[str, Any]:
     out_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     logger.info("benchmark: wrote {}", out_path)
     return results
+
+
+# --------------------------------------------------------------------------- research path
+# The research sweep reuses the SAME _run_one scoring shape and the SAME micro-averaged
+# aggregation as the chipset path (D-10 one-loader philosophy applied to the runner): it differs
+# only in where scenes/labels come from (the gitignored datasets/ tree, addressed by explicit
+# path) and in the extra literature metrics it records (COCO AP50/AP75 and the per-image counts the
+# aggregate turns into MAE/RMSE/NAE). It is deliberately NOT in the Hydra CI subset, which stays
+# chipset-only (D per RESEARCH risk note); this is the 11-01 tracer proving one ncc x carpk x 1 x
+# test path, not the full method x dataset x {1,3} x {val,test} sweep (that is 11-03).
+
+
+def _load_research_scene(research_root: Path, image_id: str) -> npt.NDArray[np.uint8]:
+    """Read a converted research scene (co-located with its sidecar) as BGR uint8."""
+    path = research_root / f"{image_id}.png"
+    if not path.is_file():
+        raise FileNotFoundError(f"no research scene image at {path}")
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise OSError(f"failed to read research scene image {path}")
+    return np.asarray(image, dtype=np.uint8)
+
+
+def _run_one_research(
+    method: str,
+    image_id: str,
+    research_root: Path,
+    gt: GroundTruth,
+    iou_threshold: float,
+    *,
+    dataset: str,
+    split: str,
+    exemplar_count: int,
+) -> ImageResult:
+    """Run one method on one research image and score it with the full literature metric set.
+
+    Mirrors :func:`_run_one` (same match/precision/recall/candidate-log logic, same broad
+    error-catch so a missing weight degrades one cell rather than aborting the sweep) and adds the
+    COCO AP sweep plus the per-image predicted/true counts. The per-image ``ap`` field is the COCO
+    mean here (the literature's headline AP), with ``ap50``/``ap75`` alongside it.
+    """
+    canvas = f"{gt.width}x{gt.height}" if gt.width and gt.height else None
+    true_count = gt.achieved_count
+    spec = get_method(method)
+    try:
+        scene = _load_research_scene(research_root, image_id)
+        exemplar = gt.exemplar_at(exemplar_count)
+        result = spec.fn(scene, exemplar, spec.config_model())
+    except Exception as exc:
+        logger.warning("{} on research {}/{} failed: {}", method, dataset, image_id, exc)
+        return ImageResult(
+            image_id=image_id,
+            outcome="error",
+            canvas_size=canvas,
+            instance_count=true_count,
+            scale_bucket=_scale_bucket(gt),
+            tp=None,
+            fp=None,
+            fn=None,
+            precision=None,
+            recall=None,
+            f1=None,
+            ap=None,
+            latency_ms=None,
+            n_matches=0,
+            dataset=dataset,
+            split=split,
+            exemplar_count=exemplar_count,
+            ap50=None,
+            ap75=None,
+            predicted_count=None,
+            true_count=true_count,
+        )
+
+    pred_boxes = [match.box for match in result.matches]
+    tp, fp, fn = match_predictions(pred_boxes, gt.boxes, iou_threshold)
+    precision, recall, f1 = precision_recall_f1(tp, fp, fn)
+    candidate_log: list[tuple[BBox, float]] = [(m.box, m.score) for m in result.matches]
+    candidate_log += [(c.box, c.score) for c in result.candidates]
+    if candidate_log:
+        ap, ap50, ap75 = average_precision_coco(candidate_log, gt.boxes)
+    else:
+        ap, ap50, ap75 = 0.0, 0.0, 0.0
+
+    return ImageResult(
+        image_id=image_id,
+        outcome=result.outcome.value,
+        canvas_size=canvas,
+        instance_count=true_count,
+        scale_bucket=_scale_bucket(gt),
+        tp=tp,
+        fp=fp,
+        fn=fn,
+        precision=precision,
+        recall=recall,
+        f1=f1,
+        ap=ap,
+        latency_ms=result.latency.total_ms,
+        n_matches=len(result.matches),
+        dataset=dataset,
+        split=split,
+        exemplar_count=exemplar_count,
+        ap50=ap50,
+        ap75=ap75,
+        predicted_count=len(result.matches),
+        true_count=true_count,
+    )
+
+
+def _aggregate_research(records: list[ImageResult]) -> dict[str, Any]:
+    """Pool research per-image results: micro P/R/F1, macro AP/AP50/AP75, and MAE/RMSE/NAE.
+
+    Precision/recall/F1 are micro-averaged (same abstention-propagating convention as
+    :func:`_aggregate`); AP/AP50/AP75 are macro-averaged (mean of per-image AP, the standard mAP);
+    MAE/RMSE/NAE come from :func:`object_search.eval.metrics.counting_errors` over the per-image
+    predicted/true counts. All are ``None`` when nothing was scored.
+    """
+    scored = [r for r in records if r.tp is not None]
+    total_tp = sum(r.tp for r in scored if r.tp is not None)
+    total_fp = sum(r.fp for r in scored if r.fp is not None)
+    total_fn = sum(r.fn for r in scored if r.fn is not None)
+    precision, recall, f1 = (
+        precision_recall_f1(total_tp, total_fp, total_fn) if scored else (None, None, None)
+    )
+
+    aps = [r.ap for r in scored if r.ap is not None]
+    ap50s = [r.ap50 for r in scored if r.ap50 is not None]
+    ap75s = [r.ap75 for r in scored if r.ap75 is not None]
+
+    # Counting metrics over the images that carry both counts (narrow to int lists so the
+    # NULL-safe guard in counting_errors sees exactly the assessed images).
+    preds: list[int] = []
+    trues: list[int] = []
+    for r in scored:
+        if r.predicted_count is not None and r.true_count is not None:
+            preds.append(r.predicted_count)
+            trues.append(r.true_count)
+    mae: float | None
+    rmse: float | None
+    nae: float | None
+    if preds:
+        mae, rmse, nae = counting_errors(preds, trues)
+    else:
+        mae = rmse = nae = None
+
+    latencies = [r.latency_ms for r in records if r.latency_ms is not None]
+    return {
+        "n_images": len(records),
+        "n_scored": len(scored),
+        "n_errors": sum(1 for r in records if r.outcome == "error"),
+        "n_abstentions": sum(1 for r in records if r.outcome == SearchOutcome.EMPTY.value),
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "ap": statistics.fmean(aps) if aps else None,
+        "ap50": statistics.fmean(ap50s) if ap50s else None,
+        "ap75": statistics.fmean(ap75s) if ap75s else None,
+        "mae": mae,
+        "rmse": rmse,
+        "nae": nae,
+        "latency_ms": {
+            "p50": statistics.median(latencies) if latencies else None,
+            "mean": statistics.fmean(latencies) if latencies else None,
+            "max": max(latencies) if latencies else None,
+        },
+    }
+
+
+def run_research_benchmark(
+    method: str,
+    dataset: str,
+    split: str,
+    research_root: Path,
+    *,
+    exemplar_count: int = 1,
+    iou_threshold: float = 0.5,
+    manifest_root: Path | None = None,
+) -> dict[str, Any]:
+    """Run one method over a research dataset split, returning the report block (11-01 tracer).
+
+    The image ids come from the committed split manifest (:func:`research_image_ids`); each label is
+    the converted ``*.gt.json`` under ``research_root`` (tagged ``source="research"``), and each
+    scene is co-located beside it. The return carries one per-image row (each with
+    precision/recall/f1/ap/ap50/ap75 and the per-image counts) plus one pooled ``overall`` block
+    with the full literature-metric column set (P/R/F1 + AP/AP50/AP75 + MAE/RMSE/NAE).
+
+    Args:
+        method: Registry key, e.g. ``"ncc"``.
+        dataset: Dataset key, e.g. ``"carpk"``.
+        split: ``"train"`` / ``"val"`` / ``"test"``.
+        research_root: Directory of converted sidecars + co-located scenes (``datasets/<d>/<s>``).
+        exemplar_count: Exemplars to seed the run with (1 = the product operating point).
+        iou_threshold: IoU for a prediction to count as a true positive at the P/R/F1 level.
+        manifest_root: Optional base dir for the committed split manifest (tests use ``tmp_path``).
+
+    Returns:
+        A report block: ``method``/``dataset``/``split``/``exemplar_count``, ``coverage``,
+        ``overall`` (pooled metrics), and ``per_image`` (one row per labelled image).
+    """
+    if split not in ("train", "val", "test"):
+        raise ValueError(f"unknown split {split!r}; expected train/val/test")
+    ids = research_image_ids(dataset, split, manifest_root)  # type: ignore[arg-type]
+    logger.info(
+        "research benchmark: {} x {}/{} at {} exemplar(s) over {} image(s)",
+        method,
+        dataset,
+        split,
+        exemplar_count,
+        len(ids),
+    )
+
+    records: list[ImageResult] = []
+    unlabelled: list[str] = []
+    for image_id in ids:
+        gt = load_research_ground_truth(research_root / f"{image_id}.gt.json")
+        if gt is None:
+            unlabelled.append(image_id)
+            continue
+        records.append(
+            _run_one_research(
+                method,
+                image_id,
+                research_root,
+                gt,
+                iou_threshold,
+                dataset=dataset,
+                split=split,
+                exemplar_count=exemplar_count,
+            )
+        )
+
+    return {
+        "method": method,
+        "dataset": dataset,
+        "split": split,
+        "exemplar_count": exemplar_count,
+        "iou_threshold": iou_threshold,
+        "coverage": {
+            "images_requested": len(ids),
+            "images_labelled": len(records),
+            "images_unlabelled": sorted(unlabelled),
+        },
+        "overall": _aggregate_research(records),
+        "per_image": [r.model_dump() for r in records],
+    }
 
 
 @hydra.main(version_base=None, config_path="../../../conf", config_name="benchmark")
