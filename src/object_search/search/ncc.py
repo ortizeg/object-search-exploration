@@ -3,10 +3,12 @@
 What it does
 ------------
 Correlate the exemplar crop against the *whole* scene with ``cv2.matchTemplate`` and
-``TM_CCOEFF_NORMED``, over an image pyramid so instances at other scales are found, and
-turn the response peaks into boxes. No weights, no training, milliseconds per query. When
-the repeated instances are near-identical and near the exemplar's scale this is genuinely
-hard to beat, and it is the honest bar every learned method in this project must clear.
+``TM_CCOEFF_NORMED``, over an image pyramid **and a rotated-template bank** so instances at
+other scales and orientations are found, and turn the response peaks into boxes. No weights,
+no training. When the repeated instances are near-identical and near the exemplar's scale this
+is genuinely hard to beat, and it is the honest bar every learned method in this project must
+clear; the rotation bank + a distribution-aware accept rule (below) also let it recover a
+meaningful share of the rotated/rescaled repeats without giving up its fixed-scale strength.
 
 This file is meant to be read top to bottom by an ML practitioner. Readability outranks DRY
 (project convention): the numbered steps ``# 1.`` .. ``# 9.`` in :func:`search` match the
@@ -42,10 +44,23 @@ Post-processing (exact)
   ``argmax`` across pyramid levels favours the smallest template. Each level's map is
   therefore z-scored against its **own** median/MAD before peaks are compared or suppressed
   across levels; the raw score is carried alongside for the threshold and the candidate log.
-- Threshold: chosen by ``common.calibration`` (default ``self-similarity``, relative to the
-  exemplar's own ~1.0 self-match), never a hardcoded absolute number.
+- Threshold: chosen by the ``repeat-aware`` rule (default), never a hardcoded absolute number.
+  It reads the score distribution: if two or more *distinct* locations score near the exemplar's
+  own ~1.0 self-match the object is repeating near-identically, so the cut sits just below that
+  cluster (``self x 0.85``) -- high enough to reject the moderate (~0.5-0.76) false peaks a
+  rotated template throws on structured backgrounds, which a single low fixed cut cannot separate
+  because they outscore genuine *transformed* instances elsewhere. When only the exemplar's own
+  region sits up there, the instances are transformed and score lower, so the cut drops to the
+  permissive ``self x retain_frac`` (0.45) tail. The other ``common.calibration`` strategies
+  (``self-similarity``/``ratio``/``gmm``) remain selectable. Tuned to the distribution's *shape*,
+  never to ground-truth boxes; the same rule runs on every dataset.
 - Suppression: cross-level greedy IoU NMS over the accepted matches, prioritised by the
   cross-level-comparable z-score.
+- Candidate log (EVAL-08): the sub-threshold peaks, **deduplicated** by the same cross-level NMS
+  and with any that overlap an accepted match dropped, so matches + candidates form one clean
+  ranked detection set. Without this dedup a single instance -- detected at many (scale, angle)
+  pairs by the pyramid x rotation bank -- would enter the log dozens of times and each duplicate
+  would score as a false positive in the AP sweep, badly understating AP.
 
 Known failure modes
 --------------------
@@ -53,8 +68,12 @@ Known failure modes
   pixel on OpenCV 4.x (``0.0`` on 5.x) -- measured, undocumented, and never a NaN
   (PITFALLS.md 1.1). Step 1 guards on the crop's own std and abstains with ``outcome=EMPTY``
   rather than emitting a wall of confident false positives.
-- **Rotation/scale beyond the configured banks.** Instances rotated past ``angles_deg`` or
-  scaled past ``scales`` are missed; that is where ``dino-dense`` should win.
+- **Rotation/scale beyond the configured banks.** The default bank covers +/-35 deg and
+  scales 0.75-1.3; instances rotated or scaled past that are missed, and even inside the bank a
+  rotated-and-rescaled instance whose resampled correlation falls below ``self x retain_frac`` is
+  missed. Recall in the scale/pose regimes is genuinely partial (VARIED ~0.36) -- an inherent
+  ceiling of raw-intensity correlation, which is exactly where ``dino-dense`` and ``sparse-geo``
+  win.
 - **Lighting/pose change.** NCC correlates raw intensities, so an instance under different
   lighting scores low even when a human sees the same object.
 - **Cross-level noise-floor bias** (mitigated by the per-level z-score above; called out so
@@ -120,6 +139,14 @@ _MAD_TO_STD = 1.4826  # median-absolute-deviation -> std, for a Gaussian
 # A peak whose box overlaps the exemplar by at least this is the exemplar's own self-match,
 # labelled is_exemplar rather than dropped or double-counted (METHOD-04c).
 _EXEMPLAR_IOU = 0.5
+# repeat-aware calibration. A match at >= self_score * _REPEAT_NEAR_FRAC counts as "near the
+# self-match"; two or more of those means the object is repeating near-identically (the chipset
+# / fixed-scale case), where the honest cut sits just below that cluster at self_score *
+# _REPEAT_STRICT_FRAC -- high enough to reject the moderate (~0.5-0.76) false peaks a rotated
+# template throws on structured backgrounds, which no fixed low fraction can separate because
+# those false peaks outscore genuine transformed instances in the varied/cluttered regimes.
+_REPEAT_NEAR_FRAC = 0.9
+_REPEAT_STRICT_FRAC = 0.85
 
 
 class NCCConfig(BaseModel):
@@ -139,22 +166,29 @@ class NCCConfig(BaseModel):
         ),
     )
     angles_deg: tuple[float, ...] = Field(
-        default=(0.0,),
+        default=(-35.0, -23.3, -11.7, 0.0, 11.7, 23.3, 35.0),
         description=(
-            "Rotation bank in degrees. Default (0.0,) -- rotation is off because it is a "
-            "large constant-factor cost (levels x angles correlations) rarely needed here."
+            "Rotation bank in degrees. Default is a 7-step bank over +/-35 deg (~11.7 deg "
+            "spacing): raw-intensity correlation loses a rotated instance within ~10-15 deg, so "
+            "a bank this dense is what lets NCC recover the rotated repeats in the scale/pose "
+            "regimes. It is a constant-factor cost (levels x angles correlations); a caller who "
+            "knows the scene is axis-aligned can set (0.0,) to skip it. 7 angles measured best: "
+            "9 over-samples (adds false peaks, no recall gain), 5 leaves gaps."
         ),
     )
     threshold: float | None = Field(
         default=None,
         description="Fixed accept threshold on the raw NCC score. None => use the calibrator.",
     )
-    calibration: Literal["fixed", "self-similarity", "ratio", "gmm"] = Field(
-        default="self-similarity",
+    calibration: Literal["fixed", "self-similarity", "ratio", "gmm", "repeat-aware"] = Field(
+        default="repeat-aware",
         description=(
-            "How the accept threshold is chosen when `threshold` is None. self-similarity "
-            "cuts relative to the exemplar's own ~1.0 self-match; it is the recommended "
-            "default for NCC because absolute thresholds do not transfer across images."
+            "How the accept threshold is chosen when `threshold` is None. repeat-aware (default) "
+            "reads the score distribution: if several matches cluster near the exemplar's own "
+            "~1.0 self-match the object is repeating near-identically, so it cuts just below that "
+            "cluster (strict, rejects the rotated-template false peaks); otherwise the instances "
+            "are transformed and score lower, so it cuts at self_score * retain_frac to keep that "
+            "tail. self-similarity is the plain fixed-fraction cut; ratio/gmm are the controls."
         ),
     )
     peaks: Literal["nms", "local-max", "watershed"] = Field(
@@ -186,10 +220,17 @@ class NCCConfig(BaseModel):
         description="random_state for the gmm calibrator (its only genuinely stochastic step).",
     )
     retain_frac: float = Field(
-        default=0.7,
+        default=0.45,
         gt=0.0,
         le=1.0,
-        description="self-similarity accepts scores above self_score * retain_frac.",
+        description=(
+            "The permissive self-relative accept fraction: a match is kept above "
+            "self_score * retain_frac. Used directly by self-similarity, and as the "
+            "transformed-instance floor by repeat-aware. 0.45 because a rotated-and-rescaled "
+            "true instance correlates to roughly 0.4-0.6 of the exemplar's self-match once "
+            "resampling has degraded it; 0.45 sits on the broad F1 plateau across the varied/"
+            "cluttered regimes and is NOT fit to the ground-truth boxes (see docs/methods/ncc.md)."
+        ),
     )
 
 
@@ -364,7 +405,8 @@ def search(
         )
 
         level_count = 0
-        # 3. Optionally build the rotated-template bank (default angles_deg=(0.0,) => off).
+        # 3. Build the rotated-template bank (default: 7 angles over +/-35 deg). This is what
+        #    recovers rotated repeats; a caller who knows the scene is axis-aligned sets (0.0,).
         for angle, template, mask in _rotated_bank(base_template, config.angles_deg):
             tmpl_h, tmpl_w = template.shape[:2]
             if level_img.shape[0] < tmpl_h or level_img.shape[1] < tmpl_w:
@@ -419,41 +461,70 @@ def search(
 
         per_level_counts[f"peaks@{scale:g}"] = float(level_count)
 
-    # 7. Calibrate the threshold. self-similarity cuts relative to the exemplar's own
-    #    self-match; "fixed" is used whenever the caller pinned config.threshold. The calibrator
-    #    returns its reasoning too, which becomes an inspectable diagnostics note.
+    # 7. Calibrate the threshold. repeat-aware (default) reads the score distribution: near-
+    #    identical repeats cluster at the self-match and get a strict cut just below it, while a
+    #    transformed set (no such cluster) gets the permissive self_score * retain_frac cut.
+    #    "fixed" is used whenever the caller pinned config.threshold; the other strategies are the
+    #    shared calibration offerings. Every branch returns its reasoning as a diagnostics note.
     raw_scores = [record.raw_score for record in records]
     self_score, exemplar_key = _self_match_score(records, ex)
-    strategy: calibration.CalibrationStrategy = (
-        "fixed" if config.threshold is not None else config.calibration
-    )
-    calib = calibration.calibrate(
-        raw_scores or [0.0],
-        strategy=strategy,
-        fixed_threshold=config.threshold,
-        self_score=self_score,
-        retain_frac=config.retain_frac,
-        seed=config.seed,
-    )
+    if config.threshold is not None:
+        # A pinned threshold always wins, whatever calibration is configured.
+        calib = calibration.calibrate(
+            raw_scores or [0.0], strategy="fixed", fixed_threshold=config.threshold
+        )
+    elif config.calibration == "repeat-aware":
+        # Count DISTINCT near-self locations: the pyramid x rotation bank hits the exemplar's own
+        # region many times, so the near-self records are NMS-deduplicated before counting -- else
+        # every image would look like a near-identical repeat (see _repeat_aware_threshold).
+        near = [r for r in records if r.raw_score >= self_score * _REPEAT_NEAR_FRAC]
+        near_kept = nms.nms(
+            [r.box for r in near], [r.z_score for r in near], iou_threshold=config.nms_iou
+        )
+        calib = _repeat_aware_threshold(len(near_kept), self_score, retain_frac=config.retain_frac)
+    else:
+        # One of the shared offerings (self-similarity / ratio / gmm); MyPy narrows the Literal
+        # here because repeat-aware was handled just above.
+        calib = calibration.calibrate(
+            raw_scores or [0.0],
+            strategy=config.calibration,
+            self_score=self_score,
+            retain_frac=config.retain_frac,
+            seed=config.seed,
+        )
     threshold = calib.threshold
 
-    # 8. Split into matches and sub-threshold candidates. The top max_candidates peaks (ranked
-    #    by the cross-level z-score) are kept as Candidates WITH RAW SCORES regardless of the
-    #    threshold -- that is what makes an offline threshold sweep possible later (EVAL-08).
-    #    Peaks whose RAW score clears the threshold become Matches; final cross-level NMS (using
-    #    the z-score as the comparable priority) removes duplicates. METHOD-12: every accepted
-    #    peak survives -- there is no single-best short-circuit (no argmax-only path) anywhere.
+    # 8. Split into matches and sub-threshold candidates. Peaks whose RAW score clears the
+    #    threshold are cross-level NMS'd (z-score is the comparable priority) into the Matches.
+    #    METHOD-12: every accepted peak survives -- there is no single-best short-circuit anywhere.
     ordered = sorted(records, key=lambda r: (-r.z_score, r.box.y, r.box.x))
-    candidates = tuple(
-        Candidate(box=r.box, score=r.raw_score) for r in ordered[: config.max_candidates]
-    )
-
     accepted = [r for r in ordered if r.raw_score > threshold]
     kept_indices = nms.nms(
         [r.box for r in accepted], [r.z_score for r in accepted], iou_threshold=config.nms_iou
     )
     kept = [accepted[i] for i in kept_indices]
     matches = _build_matches(kept, ex, exemplar_key)
+
+    #    The candidate log (EVAL-08) is the sub-threshold peaks kept WITH RAW SCORES so an offline
+    #    threshold sweep can recover the full precision/recall curve. It is *deduplicated* first --
+    #    the pyramid x rotation bank detects one instance at many (scale, angle) pairs, so without
+    #    NMS a single location would enter the log dozens of times and each duplicate would score
+    #    as a false positive in the AP sweep, understating AP badly. Sub-threshold peaks are cross-
+    #    level NMS'd, and any that overlap an accepted match are dropped, so matches + candidates
+    #    form ONE clean deduplicated ranked set (which is what the benchmark feeds to AP).
+    below = [r for r in ordered if r.raw_score <= threshold]
+    below_indices = nms.nms(
+        [r.box for r in below], [r.z_score for r in below], iou_threshold=config.nms_iou
+    )
+    distinct_below = (
+        r
+        for r in (below[i] for i in below_indices)
+        if all(r.box.iou(k.box) < config.nms_iou for k in kept)
+    )
+    candidates = tuple(
+        Candidate(box=r.box, score=r.raw_score)
+        for r in list(distinct_below)[: config.max_candidates]
+    )
 
     # 9. Assemble diagnostics and the result.
     postprocess_ms = max(0.0, (perf_counter() - t_after_pre) * 1000.0 - inference_ms)
@@ -498,6 +569,47 @@ def search(
         threshold_applied=threshold,
         candidates=candidates,
         diagnostics=Diagnostics(notes=notes, metrics=metrics, similarity_heatmap=heatmap),
+    )
+
+
+def _repeat_aware_threshold(
+    n_near_instances: int,
+    self_score: float,
+    *,
+    retain_frac: float,
+) -> calibration.CalibrationResult:
+    """Distribution-aware NCC cut: strict when the object repeats near-identically, else permissive.
+
+    The rotated-template bank is what recovers rotated instances, but on a scene of near-identical
+    axis-aligned repeats (the chipset regime) those rotated templates also throw *moderate* false
+    peaks -- measured at raw 0.5-0.76, higher than genuine transformed instances score elsewhere,
+    so no single low fixed cut can separate the two across regimes. The distribution tells them
+    apart: when the true instances are near-identical they pile up AT the self-match (~1.0), so two
+    or more *distinct* locations at ``>= self_score * _REPEAT_NEAR_FRAC`` mean "near-identical
+    repeats" and the cut belongs just below that cluster (``self_score * _REPEAT_STRICT_FRAC``),
+    rejecting the moderate false peaks. When only the exemplar's own self-match sits up there, the
+    instances are transformed and score lower, so the cut drops to the permissive ``self_score *
+    retain_frac`` tail. ``n_near_instances`` is counted over DISTINCT locations (the near-self
+    records deduplicated by NMS in :func:`search`), because the pyramid x rotation bank detects the
+    exemplar's own region many times over -- counting raw peaks would call every image a repeat.
+    This is tuned to the *shape* of the score distribution, never to the ground-truth boxes, and
+    the same rule runs on every dataset (the cross-dataset fairness rule).
+    """
+    if n_near_instances >= 2:
+        threshold = self_score * _REPEAT_STRICT_FRAC
+        reason = (
+            f"{n_near_instances} distinct locations >= {_REPEAT_NEAR_FRAC:g} x self "
+            f"({self_score:.4f}): near-identical repeats -> strict cut self x "
+            f"{_REPEAT_STRICT_FRAC:g} = {threshold:.4f} to reject rotated-template false peaks"
+        )
+    else:
+        threshold = self_score * retain_frac
+        reason = (
+            f"only the self-match sits near self ({self_score:.4f}): instances look transformed "
+            f"-> permissive cut self x retain_frac {retain_frac:g} = {threshold:.4f}"
+        )
+    return calibration.CalibrationResult(
+        threshold=threshold, strategy="repeat-aware", reason=reason
     )
 
 
