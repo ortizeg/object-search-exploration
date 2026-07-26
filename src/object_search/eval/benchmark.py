@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import statistics
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -65,11 +65,20 @@ from object_search.eval.metrics import (
     match_predictions,
     precision_recall_f1,
 )
-from object_search.eval.splits import research_image_ids
+from object_search.eval.sampling import sample_exemplars
+from object_search.eval.splits import load_split_manifest, research_image_ids
 from object_search.provenance import current_git_sha, repo_root
-from object_search.schemas.geometry import BBox
-from object_search.schemas.search import SearchOutcome
+from object_search.schemas.geometry import BBox, ExemplarBox
+from object_search.schemas.search import (
+    Candidate,
+    LatencyBreakdown,
+    Match,
+    SearchOutcome,
+    SearchResult,
+)
 from object_search.search import get_method
+from object_search.search.common.nms import nms
+from object_search.search.registry import SearchFn
 
 # The classical, weight-free methods. The CI subset is exactly these two, because they need no
 # ONNX weights and so run without `fetch-models` (EVAL-19).
@@ -78,6 +87,13 @@ _MODEL_FREE_METHODS: tuple[str, ...] = ("ncc", "sparse-geo")
 # The scale-varied synthetic scenes to include in the full sweep so the crossover has a
 # learned-favourable side to show against the fixed-scale chipset.
 _SYNTHETIC_IMAGE_IDS: tuple[str, ...] = ("scatter-scaled", "cluttered-distractors")
+
+# The IoU above which two detections fused from DIFFERENT exemplar runs are treated as the same
+# instance and deduped (k-shot late fusion, Task 2). A repeated instance re-detected from each of
+# the k exemplars yields near-identical boxes (high IoU), so this collapses the union back to one
+# detection per instance rather than counting it k times. Uses the shared deterministic NMS
+# (tie-break `(-score, y, x)`), the same reproducibility guarantee the rest of the harness uses.
+_FUSION_NMS_IOU: float = 0.5
 
 
 class BenchmarkConfig(BaseModel):
@@ -95,6 +111,22 @@ class BenchmarkConfig(BaseModel):
         out: Output path for ``results.json``; resolved against the repo root when relative.
         ci_image_limit: Cap on chipset images in the CI subset, keeping CI runtime bounded while
             still spanning several canvas sizes.
+        datasets: Research dataset keys to sweep (e.g. ``("rpine", "carpk")``). Empty by default:
+            the research sweep is a separate path (:func:`run_research_sweep`) and is **never** part
+            of the CI subset, which stays chipset-only (RESEARCH risk note). The learned methods
+            need fetched weights and every dataset needs fetched (licence-gated) archives, so the
+            sweep is gated exactly like the full sweep gates on ``fetch-models``.
+        splits: Which splits to report per dataset -- ``val`` and ``test`` by default. A test-only
+            dataset (CARPK/PUCPR+) has no val ids in its manifest, so no val cell is ever emitted
+            for it (D-04); tuning is confined to val (D-02).
+        exemplar_counts: Operating points to score every method at -- ``1`` (the product's one-box
+            point) and ``3`` (the literature convention) by default (D-05).
+        seed: Config seed for the exemplar sampler's non-native draw (D-11), passed to
+            :func:`object_search.eval.sampling.sample_exemplars` -- never ``cv2.setRNGSeed``.
+        research_root: Base directory of converted research sidecars + co-located scenes
+            (``datasets/`` once fetched); each cell reads ``<research_root>/<dataset>/<split>/``.
+            Required to run the research sweep.
+        research_out: Output path for the research results file; gitignored like ``results.json``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -105,6 +137,13 @@ class BenchmarkConfig(BaseModel):
     iou_threshold: float = Field(default=0.5, gt=0.0, le=1.0)
     out: str = "docs/benchmark/results.json"
     ci_image_limit: int = Field(default=6, ge=1)
+    # -- research sweep dimensions (EVAL-23/24); kept out of the CI subset entirely --------
+    datasets: tuple[str, ...] = ()
+    splits: tuple[str, ...] = ("val", "test")
+    exemplar_counts: tuple[int, ...] = (1, 3)
+    seed: int = 0
+    research_root: str | None = None
+    research_out: str = "docs/benchmark/research-results.json"
 
     def resolve_run_set(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return the ``(methods, image_ids)`` actually swept, applying the CI subset rule."""
@@ -380,6 +419,95 @@ def _load_research_scene(research_root: Path, image_id: str) -> npt.NDArray[np.u
     return np.asarray(image, dtype=np.uint8)
 
 
+def _dedupe_matches(matches: list[Match], fusion_iou: float) -> tuple[Match, ...]:
+    """NMS-dedupe fused matches so one instance is not counted once per exemplar run."""
+    if not matches:
+        return ()
+    kept = nms([m.box for m in matches], [m.score for m in matches], fusion_iou)
+    return tuple(matches[i] for i in kept)
+
+
+def _dedupe_candidates(candidates: list[Candidate], fusion_iou: float) -> tuple[Candidate, ...]:
+    """NMS-dedupe the fused sub-threshold candidate log the same way as the matches."""
+    if not candidates:
+        return ()
+    kept = nms([c.box for c in candidates], [c.score for c in candidates], fusion_iou)
+    return tuple(candidates[i] for i in kept)
+
+
+def run_multi_exemplar(
+    spec_fn: SearchFn,
+    image: npt.NDArray[np.uint8],
+    exemplars: Sequence[ExemplarBox],
+    config: BaseModel,
+    *,
+    fusion_iou: float = _FUSION_NMS_IOU,
+) -> SearchResult:
+    """Run a method at ``k`` exemplars by **late fusion** in the eval layer (Task 2, EVAL-23).
+
+    This is the single mechanism ratified in the Task 2 checkpoint, and it is the *only* place the
+    harness knows how to query a method with more than one exemplar. The method's ``SearchFn`` and
+    all four method files are UNCHANGED: each still takes exactly one :class:`ExemplarBox`. Here we
+    call ``spec_fn`` **once per exemplar**, UNION the resulting matches and sub-threshold candidates
+    across the ``k`` runs, then dedupe overlapping detections with the shared deterministic NMS
+    (tie-break ``(-score, y, x)``), so a repeated instance re-found from each exemplar collapses to
+    a single detection rather than being counted ``k`` times. The ``k = 1`` case is a pass-through
+    of the single call, so 1 and 3 exemplars share this one code path.
+
+    Args:
+        spec_fn: The method's search callable (``MethodSpec.fn``). Called once per exemplar; not
+            wrapped or modified.
+        image: The BGR scene, shared across the ``k`` runs.
+        exemplars: The sampled exemplar boxes (from
+            :func:`object_search.eval.sampling.sample_exemplars`). Must be non-empty.
+        config: The method's config instance, shared across the ``k`` runs.
+        fusion_iou: IoU above which two detections from different runs are the same instance.
+
+    Returns:
+        One fused :class:`SearchResult`. ``k = 1`` returns the single call's result unchanged. For
+        ``k > 1`` the fused result carries the NMS-deduped matches and candidates, a latency that is
+        the sum across the runs (the fusion genuinely ran the method ``k`` times), and
+        ``outcome = OK`` when any match survived else ``EMPTY``. If every run errored, the first
+        error result is returned unchanged so the error payload is preserved.
+
+    Raises:
+        ValueError: If ``exemplars`` is empty -- a search needs at least one exemplar.
+    """
+    if not exemplars:
+        raise ValueError("run_multi_exemplar needs at least one exemplar")
+
+    results = [spec_fn(image, exemplar, config) for exemplar in exemplars]
+    if len(results) == 1:
+        return results[0]
+
+    non_error = [r for r in results if r.outcome is not SearchOutcome.ERROR]
+    if not non_error:
+        # Every run errored: preserve the first error result (and its payload) verbatim.
+        return results[0]
+
+    matches = [m for r in non_error for m in r.matches]
+    candidates = [c for r in non_error for c in r.candidates]
+    kept_matches = _dedupe_matches(matches, fusion_iou)
+    kept_candidates = _dedupe_candidates(candidates, fusion_iou)
+
+    template = non_error[0]
+    latency = LatencyBreakdown(
+        preprocess_ms=sum(r.latency.preprocess_ms for r in non_error),
+        inference_ms=sum(r.latency.inference_ms for r in non_error),
+        postprocess_ms=sum(r.latency.postprocess_ms for r in non_error),
+    )
+    outcome = SearchOutcome.OK if kept_matches else SearchOutcome.EMPTY
+    return SearchResult(
+        method=template.method,
+        method_version=template.method_version,
+        outcome=outcome,
+        matches=kept_matches,
+        latency=latency,
+        threshold_applied=template.threshold_applied,
+        candidates=kept_candidates,
+    )
+
+
 def _run_one_research(
     method: str,
     image_id: str,
@@ -390,6 +518,7 @@ def _run_one_research(
     dataset: str,
     split: str,
     exemplar_count: int,
+    seed: int = 0,
 ) -> ImageResult:
     """Run one method on one research image and score it with the full literature metric set.
 
@@ -403,8 +532,11 @@ def _run_one_research(
     spec = get_method(method)
     try:
         scene = _load_research_scene(research_root, image_id)
-        exemplar = gt.exemplar_at(exemplar_count)
-        result = spec.fn(scene, exemplar, spec.config_model())
+        # k-shot LATE FUSION (Task 2): sample `exemplar_count` boxes and run the method once per
+        # box, then fuse. The sampled exemplars REMAIN in gt.boxes and are scored like any other
+        # instance, so the recall denominator (len(gt.boxes)) is identical at count=1 and count=3.
+        exemplars = sample_exemplars(gt, count=exemplar_count, seed=seed)
+        result = run_multi_exemplar(spec.fn, scene, exemplars, spec.config_model())
     except Exception as exc:
         logger.warning("{} on research {}/{} failed: {}", method, dataset, image_id, exc)
         return ImageResult(
@@ -533,6 +665,7 @@ def run_research_benchmark(
     *,
     exemplar_count: int = 1,
     iou_threshold: float = 0.5,
+    seed: int = 0,
     manifest_root: Path | None = None,
 ) -> dict[str, Any]:
     """Run one method over a research dataset split, returning the report block (11-01 tracer).
@@ -548,8 +681,11 @@ def run_research_benchmark(
         dataset: Dataset key, e.g. ``"carpk"``.
         split: ``"train"`` / ``"val"`` / ``"test"``.
         research_root: Directory of converted sidecars + co-located scenes (``datasets/<d>/<s>``).
-        exemplar_count: Exemplars to seed the run with (1 = the product operating point).
+        exemplar_count: Exemplars to seed the run with (1 = the product operating point). At >1 the
+            method is run once per sampled exemplar and the results are fused by
+            :func:`run_multi_exemplar`.
         iou_threshold: IoU for a prediction to count as a true positive at the P/R/F1 level.
+        seed: Config seed for the exemplar sampler's non-native draw (D-11).
         manifest_root: Optional base dir for the committed split manifest (tests use ``tmp_path``).
 
     Returns:
@@ -585,6 +721,7 @@ def run_research_benchmark(
                 dataset=dataset,
                 split=split,
                 exemplar_count=exemplar_count,
+                seed=seed,
             )
         )
 
@@ -604,6 +741,97 @@ def run_research_benchmark(
     }
 
 
+def run_research_sweep(config: BenchmarkConfig) -> dict[str, Any]:
+    """Sweep every method x dataset x {1,3 exemplars} x {val,test} and write the results file.
+
+    This is the 11-03 consuming layer: it reuses the proven :func:`run_research_benchmark` cell
+    (same ``_run_one_research`` scoring, same ``_aggregate_research`` literature-metric pooling) and
+    adds only the three swept dimensions. For every configured dataset it reads the committed split
+    manifest, and for each requested split that has ids it runs each ``exemplar_count`` through each
+    method, reading converted sidecars + scenes from ``<research_root>/<dataset>/<split>/``.
+
+    Two protocol rules are enforced structurally, not by hope:
+
+    * **D-04 -- CARPK/PUCPR+ are test-only.** A test-only dataset's manifest has empty ``val`` ids,
+      so ``ids_for("val")`` is empty and that split is skipped: **no val cell is ever emitted** for
+      it, and tuning cannot touch it.
+    * **The CI subset is never here.** This function is separate from :func:`run_benchmark`; the CI
+      model-free chipset subset (``ci=true``) never reaches it, so the research sweep is gated on
+      fetched archives/weights exactly like the full sweep gates on ``fetch-models``.
+
+    The per-cell block carries the full literature column set (P/R/F1 + AP/AP50/AP75 + MAE/RMSE/NAE)
+    via ``run_research_benchmark(...)["overall"]``. Results are written to ``config.research_out``
+    (gitignored, environment-dependent) -- distinct from the committed report the render step emits.
+
+    Args:
+        config: A :class:`BenchmarkConfig` with ``datasets``/``splits``/``exemplar_counts``/``seed``
+            set and ``research_root`` pointing at the converted dataset tree.
+
+    Returns:
+        The results mapping written to ``config.research_out``: provenance (``git_sha``), the swept
+        dimensions, and a ``cells`` list of one block per (method, dataset, split, exemplar_count).
+
+    Raises:
+        ValueError: If ``research_root`` is unset -- there is nowhere to read scenes/labels from.
+    """
+    if config.research_root is None:
+        raise ValueError("run_research_sweep needs research_root set (the converted datasets tree)")
+    base = Path(config.research_root)
+    if not base.is_absolute():
+        base = repo_root() / base
+
+    cells: list[dict[str, Any]] = []
+    for dataset in config.datasets:
+        manifest = load_split_manifest(dataset)
+        for split in config.splits:
+            if not manifest.ids_for(split):  # type: ignore[arg-type]
+                # Test-only datasets (CARPK/PUCPR+) have empty val ids -> never a val cell (D-04).
+                logger.info("research sweep: {}/{} has no ids; skipping", dataset, split)
+                continue
+            cell_root = base / dataset / split
+            for count in config.exemplar_counts:
+                for method in config.methods:
+                    block = run_research_benchmark(
+                        method,
+                        dataset,
+                        split,
+                        cell_root,
+                        exemplar_count=count,
+                        iou_threshold=config.iou_threshold,
+                        seed=config.seed,
+                    )
+                    cells.append(
+                        {
+                            "method": method,
+                            "dataset": dataset,
+                            "split": split,
+                            "exemplar_count": count,
+                            "coverage": block["coverage"],
+                            "overall": block["overall"],
+                        }
+                    )
+
+    results: dict[str, Any] = {
+        "git_sha": current_git_sha(),
+        "iou_threshold": config.iou_threshold,
+        "seed": config.seed,
+        # Names how the 3-exemplar numbers were produced, for the report caption and the doc.
+        "fusion": "k-shot late fusion",
+        "datasets": list(config.datasets),
+        "splits": list(config.splits),
+        "exemplar_counts": list(config.exemplar_counts),
+        "cells": cells,
+    }
+
+    out_path = Path(config.research_out)
+    if not out_path.is_absolute():
+        out_path = repo_root() / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    logger.info("research sweep: wrote {} ({} cell(s))", out_path, len(cells))
+    return results
+
+
 @hydra.main(version_base=None, config_path="../../../conf", config_name="benchmark")
 def main(cfg: DictConfig) -> None:
     """Hydra entry point (``pixi run bench`` / ``pixi run bench-ci``).
@@ -617,6 +845,24 @@ def main(cfg: DictConfig) -> None:
         raise TypeError(f"benchmark config resolved to {type(raw).__name__}, expected a mapping")
     config = BenchmarkConfig.model_validate(raw)
     run_benchmark(config)
+
+
+@hydra.main(version_base=None, config_path="../../../conf", config_name="benchmark")
+def main_research(cfg: DictConfig) -> None:
+    """Hydra entry point for the RESEARCH sweep (``pixi run bench-research``).
+
+    Composes the same ``conf/benchmark.yaml`` (validated into :class:`BenchmarkConfig`) but runs
+    :func:`run_research_sweep` over the ``datasets`` / ``splits`` / ``exemplar_counts`` dimensions
+    rather than the chipset :func:`run_benchmark`. It is a separate entry precisely so the research
+    sweep stays OUT of the default/CI chipset path; it needs ``research_root`` (the converted,
+    fetched ``datasets/`` tree) on the CLI and so is gated on fetched archives, like ``bench`` on
+    models.
+    """
+    raw = OmegaConf.to_container(cfg, resolve=True)
+    if not isinstance(raw, dict):
+        raise TypeError(f"benchmark config resolved to {type(raw).__name__}, expected a mapping")
+    config = BenchmarkConfig.model_validate(raw)
+    run_research_sweep(config)
 
 
 if __name__ == "__main__":
