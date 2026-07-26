@@ -3,32 +3,35 @@
 Generated from `results.json` by `pixi run bench-charts`. Do not hand-edit; re-run the benchmark and regenerate. `n/a` is an **abstention** (nothing returned, so the rate is undefined) -- never read it as zero.
 
 - IoU threshold: **0.5** | AP convention: all-point interpolation (COCO-style), from the EVAL-08 candidate log
-- Coverage: 12 labelled / 12 requested
-- Git SHA at run: `15b4278241e1d227917d3bda2260fed4ef09b3e2`
+- Coverage: 60 labelled / 60 requested
+- Git SHA at run: `b58df496b2440b3cc965e899974fda359a0dc401`
 
 ## Pooled metrics by method
 
 | method | precision | recall | F1 | mean AP | abstentions | errors | p50 ms |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ncc` | 0.913 | 0.922 | 0.918 | 0.484 | 0 | 0 | 238.0 |
-| `sparse-geo` | 0.833 | 0.097 | 0.174 | 0.083 | 11 | 0 | 76.4 |
-| `dino-dense` | 0.276 | 0.078 | 0.121 | 0.190 | 0 | 0 | 2259.2 |
-| `propose-retrieve` | 0.748 | 0.951 | 0.838 | 0.635 | 0 | 0 | 291.5 |
+| `ncc` | 0.972 | 0.531 | 0.687 | 0.364 | 1 | 0 | 104.6 |
+| `sparse-geo` | 0.729 | 0.711 | 0.720 | 0.629 | 11 | 0 | 82.7 |
+| `dino-dense` | 0.127 | 0.026 | 0.043 | 0.058 | 0 | 0 | 492.6 |
+| `propose-retrieve` | 0.716 | 0.985 | 0.829 | 0.598 | 0 | 0 | 371.2 |
+| `owlv2-oneshot` | 0.509 | 0.878 | 0.645 | 0.499 | 0 | 0 | 4209.7 |
 
 ## Recall by scale bucket (the NCC-vs-sparse-geo crossover)
 
 | method | fixed-scale recall | varied-scale recall |
 | --- | --- | --- |
-| `ncc` | 0.989 | 0.300 |
-| `sparse-geo` | 0.108 | 0.000 |
-| `dino-dense` | 0.086 | 0.000 |
-| `propose-retrieve` | 0.978 | 0.700 |
+| `ncc` | 0.811 | 0.140 |
+| `sparse-geo` | 0.714 | 0.708 |
+| `dino-dense` | 0.041 | 0.004 |
+| `propose-retrieve` | 0.994 | 0.971 |
+| `owlv2-oneshot` | 0.855 | 0.909 |
 
 ## p50 latency by canvas size (ms)
 
-| method | 320x240 | 512x384 | 800x600 | 960x640 | 1024x768 | 1600x1200 | 2048x1536 | 2560x1920 | 3200x2400 | 4096x3072 | 6000x4000 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ncc` | 49.9 | 40.5 | 92.4 | 118.9 | 132.5 | 341.0 | 610.4 | 893.7 | 1449.0 | 2603.0 | 5670.9 |
-| `sparse-geo` | 11.0 | 11.6 | 26.5 | 35.3 | 45.1 | 107.6 | 202.7 | 275.2 | 445.9 | 1122.6 | 2289.9 |
-| `dino-dense` | 208.5 | 135.8 | 458.1 | 722.1 | 960.5 | 4157.7 | 5052.0 | 4200.1 | 4025.7 | 4088.5 | 3557.9 |
-| `propose-retrieve` | 270.0 | 274.1 | 222.5 | 355.1 | 269.0 | 228.4 | 336.7 | 531.5 | 355.2 | 639.7 | 308.9 |
+| method | 320x240 | 512x384 | 640x480 | 800x600 | 960x640 | 1024x768 | 1600x1200 | 2048x1536 | 2560x1920 | 3200x2400 | 4096x3072 | 6000x4000 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `ncc` | 21.8 | 41.7 | 65.9 | 101.1 | 139.0 | 165.7 | 358.6 | 620.5 | 975.2 | 1582.3 | 2761.4 | 5481.6 |
+| `sparse-geo` | 6.6 | 12.8 | 73.5 | 76.3 | 38.3 | 108.5 | 109.5 | 218.7 | 293.1 | 456.7 | 928.8 | 1353.8 |
+| `dino-dense` | 190.5 | 189.4 | 272.8 | 490.8 | 728.1 | 1024.5 | 4188.2 | 4257.2 | 4191.7 | 4163.5 | 4216.3 | 3478.9 |
+| `propose-retrieve` | 263.2 | 277.6 | 364.4 | 368.0 | 387.8 | 383.2 | 246.6 | 358.0 | 561.7 | 379.5 | 683.7 | 323.1 |
+| `owlv2-oneshot` | 4933.9 | 4021.9 | 4208.1 | 4218.2 | 4624.2 | 4225.2 | 4016.2 | 4037.2 | 4028.7 | 4019.1 | 4076.8 | 4137.1 |
