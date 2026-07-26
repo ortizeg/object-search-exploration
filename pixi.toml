@@ -116,7 +116,7 @@ bench-ci = "python -m object_search.eval.benchmark ci=true"
 # tree. Gated on fetch-datasets (+ fetched models for the learned methods), never in CI. Needs
 # research_root + datasets on the CLI, e.g.:
 #   pixi run bench-research research_root=datasets datasets=[rpine,fscd147,fscd_lvis,carpk]
-bench-research = "python -c 'from object_search.eval.benchmark import main_research; main_research()'"
+bench-research = "python -m object_search.eval.benchmark --research"
 # Render the committed, byte-identical charts + results.md from the last `bench` run (EVAL-06).
 bench-charts = "python -m object_search.eval.charts"
 synth = "python -m object_search.cli synth"

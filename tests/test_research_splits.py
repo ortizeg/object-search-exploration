@@ -19,7 +19,7 @@ from object_search.eval.splits import (
 from object_search.provenance import file_sha256, repo_root
 
 _RESEARCH = repo_root() / "tests" / "fixtures" / "research"
-_CONF = repo_root() / "conf" / "datasets"
+_CONF = repo_root() / "dataset_splits"
 
 
 def _read_split_json(dataset: str) -> dict[str, list[str]]:

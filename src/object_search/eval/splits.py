@@ -1,9 +1,10 @@
 """Committed split manifests for the research datasets (EVAL-22, D-02/D-03/D-04).
 
 A research dataset's raw images are gitignored and fetched, but **which image is in which split**
-is a committed, diffable fact -- so the manifests live under ``conf/datasets/<dataset>.split.json``
-(with the Hydra benchmark config), *outside* the gitignored ``datasets/`` tree, and CI can read
-them with no fetch (Task 1, option-a).
+is a committed, diffable fact -- so the manifests live under ``dataset_splits/<dataset>.split.json``
+(outside the gitignored ``datasets/`` tree, so CI reads them with no fetch). They are kept out of
+``conf/`` on purpose: Hydra treats every ``conf/`` subdirectory as a config group, so a
+``conf/datasets/`` dir would collide with the ``datasets`` sweep key and break ``bench-research``.
 
 The manifest is a frozen Pydantic model so a typo (an unknown ``val_strategy``, a non-tuple split)
 fails loudly at load. ``val_strategy`` records *how* the val split was obtained, which is not
@@ -28,9 +29,10 @@ from object_search.provenance import repo_root
 
 ValStrategy = Literal["native", "seeded-carve", "test-only"]
 
-# Committed manifests live here, beside the Hydra benchmark config and outside the gitignored
-# datasets/ tree, so no .gitignore negation is needed (Task 1, option-a).
-_MANIFEST_DIR = Path("conf") / "datasets"
+# Committed manifests live here, outside BOTH the gitignored datasets/ tree AND the Hydra config
+# dir: conf/datasets/ would register as a Hydra config group and collide with the `datasets` sweep
+# key on `pixi run bench-research`. No .gitignore negation is needed (dataset_splits/ is unignored).
+_MANIFEST_DIR = Path("dataset_splits")
 
 # The config seed and val fraction the committed seeded-carve manifests were built from, so the
 # build is reproducible and the manifests are byte-stable (D-03/D-11). A different seed here moves
@@ -89,7 +91,7 @@ def _manifest_path(dataset: str, root: Path | None = None) -> Path:
 
 
 def load_split_manifest(dataset: str, root: Path | None = None) -> ResearchSplitManifest:
-    """Load ``conf/datasets/<dataset>.split.json`` into a validated :class:`ResearchSplitManifest`.
+    """Load ``dataset_splits/<dataset>.split.json`` into a validated :class:`ResearchSplitManifest`.
 
     Args:
         dataset: The dataset key, e.g. ``"carpk"``.
@@ -218,7 +220,7 @@ def build_manifest(
 
 
 def write_split_manifest(manifest: ResearchSplitManifest, *, root: Path | None = None) -> Path:
-    """Write ``manifest`` to ``conf/datasets/<dataset>.split.json`` with sorted keys (D-11).
+    """Write ``manifest`` to ``dataset_splits/<dataset>.split.json`` with sorted keys (D-11).
 
     Sorted-key JSON with a trailing newline mirrors the provenance canonical-JSON discipline, so the
     committed manifest is stable across regenerations and diffs cleanly.

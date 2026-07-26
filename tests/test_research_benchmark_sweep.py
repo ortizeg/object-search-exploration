@@ -18,6 +18,7 @@ licence gate, no ONNX weights -- exactly the model-free surface CI can run. It p
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -201,3 +202,43 @@ def test_ci_subset_excludes_research_even_with_datasets_configured() -> None:
     methods, images = config.resolve_run_set()
     assert methods == ("ncc", "sparse-geo")
     assert all(i.startswith("chipset") for i in images)
+
+
+# ------------------------------------------------------------ CLI entrypoint (regression)
+
+
+def test_bench_research_cli_entrypoint_dispatches_and_resolves(tmp_path: Path) -> None:
+    """`pixi run bench-research` must reach the sweep through the REAL Hydra CLI.
+
+    Guards two defects the direct-``run_research_sweep`` unit tests could not see (both fire during
+    arg/config parsing, before any sidecar is read, so their ABSENCE from the output proves the fix
+    regardless of the run's own exit status):
+
+    1. the ``--research`` sentinel selects ``main_research`` from WITHIN ``benchmark.py``'s
+       ``__main__`` so Hydra resolves its file-relative ``config_path``. A ``python -c`` call left
+       the function's module non-``__main__`` -> ``Primary config module 'conf' not found``.
+    2. ``datasets=[...]`` is a plain key override, needing the split manifests OUTSIDE ``conf/``.
+       Under ``conf/datasets/`` Hydra reads it as a config group -> ``Could not override
+       'datasets'`` / ``No match in the defaults list``.
+    """
+    proc = subprocess.run(  # noqa: S603  # fixed argv (interpreter + module), no untrusted input
+        [
+            sys.executable,
+            "-m",
+            "object_search.eval.benchmark",
+            "--research",
+            f"research_root={tmp_path}",
+            "datasets=[carpk]",
+            "splits=[test]",
+            "exemplar_counts=[1]",
+            "methods=[ncc]",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo_root(),
+        check=False,
+    )
+    combined = proc.stdout + proc.stderr
+    assert "Primary config module 'conf' not found" not in combined, combined
+    assert "Could not override 'datasets'" not in combined, combined
+    assert "No match in the defaults list" not in combined, combined

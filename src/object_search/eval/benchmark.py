@@ -865,5 +865,17 @@ def main_research(cfg: DictConfig) -> None:
     run_research_sweep(config)
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # pragma: no cover - CLI dispatch, exercised via subprocess not import
+    import sys
+
+    # `bench-research` passes a leading `--research` sentinel selecting the research sweep. It is
+    # stripped here BEFORE @hydra.main seizes argv, so `main_research` runs with THIS file as the
+    # `__main__` module -- which is what lets Hydra resolve its file-relative `config_path`. A
+    # `python -c` call or a separate entry module leaves `main_research`'s module non-`__main__`,
+    # so Hydra falls back to a package-style `conf` lookup and dies with "Primary config module
+    # 'conf' not found" (conf/ is a plain directory with no __init__.py, by design).
+    if "--research" in sys.argv[1:]:
+        sys.argv.remove("--research")
+        main_research()
+    else:
+        main()

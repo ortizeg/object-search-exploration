@@ -30,9 +30,9 @@ models/
 # Raw research data (CARPK, FSCD-*, RPINE) is large and licence-restricted; it is never
 # committed and arrives only via `pixi run fetch-datasets`, which records SHA-256 + source
 # URL + licence in datasets/provenance.json. The committed, diffable facts live OUTSIDE this
-# tree: split manifests in conf/datasets/ and the offline test fixtures in tests/fixtures/.
-# Leading slash anchors this to the REPO-ROOT datasets/ only, so the committed conf/datasets/
-# manifests are NOT swept up by an unanchored `datasets/` rule.
+# tree: split manifests in dataset_splits/ and the offline test fixtures in tests/fixtures/.
+# Leading slash anchors this to the REPO-ROOT datasets/ only, so the committed dataset_splits/
+# manifests (kept out of conf/ so Hydra does not see a `datasets` config group) are untouched.
 /datasets/
 
 # --- local data stores ------------------------------------------------------
