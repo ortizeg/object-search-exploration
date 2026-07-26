@@ -57,7 +57,6 @@ from object_search import provenance
 from object_search.eval.converters import (
     convert_carpk,
     convert_fscd147,
-    convert_fscd_lvis,
     convert_rpine,
 )
 
@@ -74,7 +73,6 @@ _CONVERTERS: Mapping[str, Callable[[Path, Path], list[Path]]] = {
     "carpk": convert_carpk,
     "pucpr_plus": convert_carpk,
     "fscd147": convert_fscd147,
-    "fscd_lvis": convert_fscd_lvis,
     "rpine": convert_rpine,
 }
 
@@ -571,38 +569,71 @@ def normalize_fscd147(hf_dir: Path, dataset_dir: Path) -> NormalizedDataset:
 
 
 def normalize_fscd_lvis(hf_dir: Path, dataset_dir: Path) -> NormalizedDataset:
-    """Reshape the unzipped FSCD-LVIS HF layout into ``convert_fscd_lvis``'s expected raw tree.
+    """Reshape the unzipped FSCD-LVIS (unseen) HF layout into ``convert_rpine``'s raw tree.
 
-    UNVERIFIED: the FSCD_LVIS.zip (6.3GB) has not been downloaded (anonymous access is IP-blocked at
-    that size), so its exact internal layout is unconfirmed. By ANALOGY to FSCD-147, this looks for
-    the converter's own marker (``annotations.json`` with per-image ``annotations[]`` +
-    ``exemplar_category`` + ``box_examples_coordinates``) plus an ``images/`` dir anywhere in the
-    extracted tree; if found it runs ``convert_fscd_lvis`` UNCHANGED into
-    ``datasets/fscd_lvis/<default_split>/``. If the marker is absent (the real zip differs), it logs
-    that a real normalizer + HF token are needed and returns an empty result so ``fetch`` degrades
-    gracefully -- never crashing the sweep.
+    CONFIRMED real layout (verified against the downloaded 6.3GB zip): ``FSCD_LVIS/images/
+    <file_name>`` + ``FSCD_LVIS/annotations/unseen_instances_{train,test}.json`` (COCO: ``images[]``
+    + ``annotations[]`` with ``bbox`` in xywh). In the **unseen** split every image carries exactly
+    ONE category -- all boxes are the target class, with **no distractors** as delivered -- so
+    FSCD-LVIS-unseen is single-class-per-image, exactly the shape ``convert_rpine`` handles (all
+    boxes are GT; exemplars are sampled from them, seeded). The normalizer writes RPINE-style
+    ``annotations/<id>.txt`` (``x1 y1 x2 y2`` px, degenerate boxes dropped) + ``images/`` and runs
+    ``convert_rpine`` UNCHANGED. HF unseen ``test`` -> our ``test``; unseen ``train`` -> our
+    ``train`` (a val slice is carved from train later, D-03). A future SEEN-split variant would be
+    multi-class with distractors (filter COCO boxes by the exemplar category); the unseen release
+    ships neither distractors nor explicit exemplar boxes, so single-class GT + sampled exemplars is
+    exactly right.
     """
-    marker = _find_path(hf_dir, "annotations.json")
-    if marker is None:
+    test_ann = _find_path(hf_dir, "unseen_instances_test.json")
+    images_src = _find_path(hf_dir, "images")
+    if test_ann is None or images_src is None:
         logger.warning(
-            "fscd_lvis: no annotations.json under {} -- the FSCD_LVIS.zip internal layout is "
-            "UNVERIFIED and could not be reshaped. A real download (HF_TOKEN) is needed to confirm "
-            "its structure and finish `normalize_fscd_lvis`.",
+            "fscd_lvis: could not locate unseen_instances_test.json + images/ under {} "
+            "(the FSCD_LVIS.zip layout may have changed).",
             hf_dir,
         )
         return NormalizedDataset(splits={}, sidecars=[], image_sources={})
-    raw = marker.parent
-    out = dataset_dir / DATASET_REGISTRY["fscd_lvis"].default_split
-    written = convert_fscd_lvis(raw, out)
-    image_sources = {
-        image_id: Path(src)
-        for image_id, src in _image_sources_from_sidecars(written, raw / "images").items()
-    }
-    return NormalizedDataset(
-        splits={DATASET_REGISTRY["fscd_lvis"].default_split: out},
-        sidecars=sorted(written),
-        image_sources=image_sources,
-    )
+    ann_dir = test_ann.parent
+    splits: dict[str, Path] = {}
+    sidecars: list[Path] = []
+    image_sources: dict[str, Path] = {}
+    for coco_name, our_split in (
+        ("unseen_instances_test.json", "test"),
+        ("unseen_instances_train.json", "train"),
+    ):
+        coco_path = ann_dir / coco_name
+        if not coco_path.is_file():
+            continue
+        coco = json.loads(coco_path.read_text(encoding="utf-8"))
+        id_to_name = {img["id"]: img["file_name"] for img in coco["images"]}
+        boxes_by_image: dict[int, list[tuple[int, int, int, int]]] = {}
+        for annotation in coco["annotations"]:
+            x, y, w, h = annotation["bbox"]
+            box = (round(x), round(y), round(x + w), round(y + h))
+            if box[2] <= box[0] or box[3] <= box[1]:  # drop degenerate (convert_rpine rejects them)
+                continue
+            boxes_by_image.setdefault(annotation["image_id"], []).append(box)
+        raw = dataset_dir / "_raw" / our_split
+        (raw / "annotations").mkdir(parents=True, exist_ok=True)
+        (raw / "images").mkdir(parents=True, exist_ok=True)
+        for image_id, boxes in boxes_by_image.items():
+            file_name = id_to_name.get(image_id)
+            if not file_name or not boxes:
+                continue
+            source_image = images_src / str(file_name)
+            if not source_image.is_file():
+                continue
+            lines = "".join(f"{x1} {y1} {x2} {y2}\n" for x1, y1, x2, y2 in boxes)
+            stem = Path(str(file_name)).stem
+            (raw / "annotations" / f"{stem}.txt").write_text(lines, encoding="utf-8")
+            _link_or_copy(source_image, raw / "images" / str(file_name))
+        out = dataset_dir / our_split
+        written = convert_rpine(raw, out)
+        splits[our_split] = out
+        sidecars.extend(written)
+        for image_id_str, src in _image_sources_from_sidecars(written, raw / "images").items():
+            image_sources[image_id_str] = Path(src)
+    return NormalizedDataset(splits=splits, sidecars=sorted(sidecars), image_sources=image_sources)
 
 
 _NORMALIZERS: Mapping[str, Callable[[Path, Path], NormalizedDataset]] = {

@@ -12,7 +12,6 @@ from pathlib import Path
 
 from object_search.eval.converters import (
     convert_fscd147,
-    convert_fscd_lvis,
     convert_rpine,
 )
 from object_search.eval.labels import load_research_ground_truth
@@ -57,30 +56,6 @@ def test_convert_fscd147_skips_train_pseudo_boxes(tmp_path: Path) -> None:
     out_root = tmp_path / "fscd147" / "test"
     convert_fscd147(_RESEARCH / "fscd147", out_root)
     assert not (out_root / "fscd147-fixture-train-1.gt.json").is_file()
-
-
-# --------------------------------------------------------------------------- FSCD-LVIS converter
-
-
-def test_convert_fscd_lvis_emits_only_target_category_boxes(tmp_path: Path) -> None:
-    out_root = tmp_path / "fscd_lvis" / "test"
-    sidecars = convert_fscd_lvis(_RESEARCH / "fscd_lvis", out_root, protocol="unseen")
-    assert sidecars
-
-    gt = load_research_ground_truth(out_root / "fscd-lvis-fixture-test-1.gt.json")
-    assert gt is not None
-    # The fixture has 4 target-category boxes + 2 distractor boxes; only the 4 targets are GT
-    # (distractor rejection is the point -- returning a distractor is a false positive, not GT).
-    assert gt.achieved_count == 4
-    assert len(gt.exemplar_indices) == 3
-    assert all(isinstance(box, BBox) for box in gt.boxes)
-
-
-def test_convert_fscd_lvis_rejects_unsupported_protocol(tmp_path: Path) -> None:
-    import pytest
-
-    with pytest.raises(NotImplementedError, match="unseen"):
-        convert_fscd_lvis(_RESEARCH / "fscd_lvis", tmp_path / "out", protocol="seen")
 
 
 # --------------------------------------------------------------------------- RPINE converter

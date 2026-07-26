@@ -389,8 +389,8 @@ def test_fetch_rpine_via_huggingface_maps_val_to_test(
 def test_fetch_fscd_lvis_via_huggingface_happy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # FSCD-LVIS is wired BY ANALOGY: the normalizer locates the converter's annotations.json marker
-    # inside the zip and runs convert_fscd_lvis unchanged. Exercised with the fixture tree.
+    # FSCD-LVIS (unseen) is single-class COCO: normalize_fscd_lvis reads unseen_instances_test.json
+    # (xywh boxes as GT) and runs convert_rpine (samples exemplars). Exercised on the fixture.
     zip_path = tmp_path / "src" / "FSCD_LVIS.zip"
     zip_path.parent.mkdir(parents=True)
     _zip_tree(_fixture_root("fscd_lvis"), zip_path)
@@ -410,8 +410,8 @@ def test_fetch_fscd_lvis_via_huggingface_happy(
 def test_fetch_fscd_lvis_unverified_structure_degrades_gracefully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The real FSCD_LVIS.zip layout is UNVERIFIED; if the marker is absent the fetch returns None
-    # (never crashes the sweep) and writes no provenance -- exactly like a missing manual archive.
+    # If the expected unseen_instances_test.json marker is absent (a changed zip layout), fetch
+    # returns None (never crashes the sweep) and writes no provenance -- like a missing archive.
     zip_path = tmp_path / "src" / "FSCD_LVIS.zip"
     zip_path.parent.mkdir(parents=True)
     with zipfile.ZipFile(zip_path, "w") as zf:

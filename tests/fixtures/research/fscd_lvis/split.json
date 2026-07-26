@@ -1,14 +1,14 @@
 {
   "train": [
-    "fscd-lvis-fixture-train-1",
-    "fscd-lvis-fixture-train-2",
-    "fscd-lvis-fixture-train-3",
-    "fscd-lvis-fixture-train-4",
-    "fscd-lvis-fixture-train-5",
-    "fscd-lvis-fixture-train-6"
+    "lvis-train-1",
+    "lvis-train-2",
+    "lvis-train-3",
+    "lvis-train-4",
+    "lvis-train-5",
+    "lvis-train-6"
   ],
   "test": [
-    "fscd-lvis-fixture-test-1",
-    "fscd-lvis-fixture-test-2"
+    "lvis-test-1",
+    "lvis-test-2"
   ]
 }

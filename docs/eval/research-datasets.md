@@ -64,19 +64,22 @@ Each does a **distinct** job; none is redundant (D-01).
   train↔test** (<https://arxiv.org/pdf/2409.15953>). Both are **de-duplicated on load** before any
   scoring (D-07), or precision/recall/counts inflate.
 
-### FSCD-LVIS (unseen split) — multi-class crowded scenes
+### FSCD-LVIS (unseen split) — LVIS-category counting, cross-domain generalization
 
-- **Purpose:** the **distractor-rejection** stress — several repeated classes share an image, so it
-  measures whether a method finds the *right* object, the gap FSC-147 leaves.
+- **Purpose (intended):** the **distractor-rejection** stress — several classes share an image, so a
+  method must find the *right* one. **Verified caveat:** in the mirrored **unseen** split every image
+  carries exactly **one** category (2,242/2,242 test images single-class), i.e. **no distractors as
+  delivered** — so the unseen release exercises open-category *generalization*, not distractor
+  rejection. Multi-class clutter lives in the SEEN split (`instances_*.json`) — a future variant.
 - **Source:** Counting-DETR <https://github.com/VinAIResearch/Counting-DETR> · split figures
-  <https://arxiv.org/html/2511.08048>
-- **Annotation type:** box exemplars + per-instance boxes, 377 LVIS classes. Only the
-  exemplar-category boxes are scored as GT; other-category boxes are the **distractors** and are
-  intentionally excluded, so returning one scores as a false positive.
+  <https://arxiv.org/html/2511.08048> · HF `ChipmunkG4/FSCD-147_FSCD-LVIS_temp`
+- **Annotation type:** COCO `unseen_instances_{train,test}.json` (xywh boxes, **single** target
+  category per image); no explicit exemplar boxes, so the harness samples exemplars from GT
+  (RPINE-style, via `convert_rpine`).
 - **Splits:** 3,959 train / — / 2,242 test (unseen protocol, no val → carve a **seeded** val from
   train). The unseen split is the standard Counting-DETR generalization eval.
-- **Strengths:** real multi-class clutter.
-- **Weaknesses / biases:** noisier labels; lower ceiling numbers.
+- **Strengths:** open-category generalization; LVIS visual diversity.
+- **Weaknesses / biases:** single-class as delivered (no distractor test); no native exemplars.
 
 ### CARPK (+ PUCPR+) — dense cars, cross-domain probe
 
@@ -200,7 +203,7 @@ against the real data (counts match the canonical datasets):
 |---|---|---|---|
 | RPINE | `ChipmunkG4/RPINE` (the TMR authors) | `<split>/images/*.jpg` + `<split>/labels/*.txt` (`x1 y1 x2 y2` px GT) + `<split>/exemplars.json` (queries); splits train/val | 3925 train imgs/labels 1:1; converter emits one sidecar/image |
 | FSCD-147 | `ChipmunkG4/FSCD-147_FSCD-LVIS_temp` → `FSCD_147.zip` | self-contained: `FSC147/images_384_VarV2/*.jpg` + COCO `instances_{val,test}.json` (xywh boxes) + `annotation_FSC147_384.json` (exemplars) | **1286 val + 1190 test** sidecars — exact canonical match |
-| FSCD-LVIS | same repo → `FSCD_LVIS.zip` (6.3 GB) | same authors, COCO-style; wired by analogy | **UNVERIFIED** pending download |
+| FSCD-LVIS (unseen) | same repo → `FSCD_LVIS.zip` (6.3 GB) | `FSCD_LVIS/images/*` + COCO `unseen_instances_{train,test}.json` (single-class xywh); normalized to `convert_rpine` | **2242 test** sidecars — canonical match |
 
 Notes:
 - **FSC-147 needs no separate entry** — its images are bundled inside `FSCD_147.zip`.

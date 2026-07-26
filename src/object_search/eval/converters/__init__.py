@@ -9,8 +9,8 @@ Each converter is a plain function ``convert_<dataset>(raw_root, out_root) -> li
 reads the gitignored raw tree and writes co-located sidecars under ``out_root``. There is still no
 base class and no registry decorator here on purpose (Rule of Three): the four converters share a
 *shape* (read native annotations -> emit the one ``*.gt.json`` schema), but each native format is
-different enough -- plain-text boxes (CARPK), COCO-style JSON with exemplar polygons (FSCD-147,
-FSCD-LVIS), all-repeats boxes (RPINE) -- that a shared abstraction would hide more than it saves.
+different enough -- plain-text boxes (CARPK, RPINE all-repeats), COCO-style JSON with exemplar
+polygons (FSCD-147) -- that a shared abstraction would hide more than it saves.
 The dataset->converter dispatch that *does* exist lives once, in :mod:`object_search.eval.datasets`.
 """
 
@@ -23,7 +23,6 @@ from object_search.eval.converters.fscd147 import (
     convert_fscd147,
     dedup_fscd147,
 )
-from object_search.eval.converters.fscd_lvis import convert_fscd_lvis
 from object_search.eval.converters.rpine import convert_rpine
 
 __all__ = [
@@ -31,7 +30,6 @@ __all__ = [
     "Fscd147Splits",
     "convert_carpk",
     "convert_fscd147",
-    "convert_fscd_lvis",
     "convert_rpine",
     "dedup_fscd147",
 ]
