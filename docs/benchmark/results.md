@@ -4,23 +4,23 @@ Generated from `results.json` by `pixi run bench-charts`. Do not hand-edit; re-r
 
 - IoU threshold: **0.5** | AP convention: all-point interpolation (COCO-style), from the EVAL-08 candidate log
 - Coverage: 60 labelled / 60 requested
-- Git SHA at run: `a052a651704cbc98092f960b35a96010e5ce792a`
+- Git SHA at run: `48e0b13fcd04d8b5845af99e64c26bdbcfb894ff`
 
 ## Pooled metrics by method
 
 | method | precision | recall | F1 | mean AP | abstentions | errors | p50 ms |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ncc` | 0.972 | 0.531 | 0.687 | 0.364 | 1 | 0 | 103.4 |
-| `sparse-geo` | 0.729 | 0.711 | 0.720 | 0.629 | 11 | 0 | 80.7 |
-| `dino-dense` | 0.474 | 0.698 | 0.565 | 0.475 | 0 | 0 | 518.3 |
-| `propose-retrieve` | 0.716 | 0.985 | 0.829 | 0.598 | 0 | 0 | 392.1 |
+| `ncc` | 0.972 | 0.531 | 0.687 | 0.364 | 1 | 0 | 121.5 |
+| `sparse-geo` | 0.884 | 0.770 | 0.823 | 0.751 | 6 | 0 | 117.3 |
+| `dino-dense` | 0.474 | 0.698 | 0.565 | 0.475 | 0 | 0 | 556.6 |
+| `propose-retrieve` | 0.716 | 0.985 | 0.829 | 0.598 | 0 | 0 | 412.1 |
 
 ## Recall by scale bucket (the NCC-vs-sparse-geo crossover)
 
 | method | fixed-scale recall | varied-scale recall |
 | --- | --- | --- |
 | `ncc` | 0.811 | 0.140 |
-| `sparse-geo` | 0.714 | 0.708 |
+| `sparse-geo` | 0.773 | 0.765 |
 | `dino-dense` | 0.661 | 0.749 |
 | `propose-retrieve` | 0.994 | 0.971 |
 
@@ -28,7 +28,7 @@ Generated from `results.json` by `pixi run bench-charts`. Do not hand-edit; re-r
 
 | method | 320x240 | 512x384 | 640x480 | 800x600 | 960x640 | 1024x768 | 1600x1200 | 2048x1536 | 2560x1920 | 3200x2400 | 4096x3072 | 6000x4000 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ncc` | 21.0 | 39.4 | 65.5 | 102.9 | 133.5 | 165.7 | 353.5 | 618.6 | 986.2 | 1574.2 | 2717.2 | 5591.2 |
-| `sparse-geo` | 8.1 | 13.1 | 71.7 | 78.5 | 39.8 | 103.1 | 116.0 | 228.2 | 305.6 | 471.2 | 1177.6 | 1615.8 |
-| `dino-dense` | 140.6 | 136.3 | 282.6 | 511.0 | 769.1 | 1074.9 | 4223.8 | 4583.6 | 4737.8 | 4361.3 | 4355.4 | 3760.5 |
-| `propose-retrieve` | 396.6 | 298.2 | 380.2 | 395.0 | 392.6 | 405.4 | 255.2 | 372.9 | 590.8 | 410.1 | 702.2 | 337.8 |
+| `ncc` | 36.8 | 46.2 | 75.6 | 119.5 | 157.6 | 188.4 | 410.7 | 710.1 | 1125.3 | 1767.8 | 3044.1 | 6561.1 |
+| `sparse-geo` | 13.4 | 16.5 | 95.5 | 108.3 | 44.1 | 133.8 | 132.8 | 281.0 | 381.8 | 590.2 | 1341.8 | 2240.5 |
+| `dino-dense` | 165.9 | 135.3 | 292.4 | 534.3 | 718.3 | 1118.1 | 4409.1 | 5377.1 | 5061.2 | 5002.5 | 5115.8 | 4146.4 |
+| `propose-retrieve` | 378.4 | 275.0 | 407.6 | 434.7 | 407.1 | 421.0 | 274.3 | 371.3 | 568.6 | 376.2 | 683.2 | 322.6 |
