@@ -126,8 +126,20 @@ def pooled(rows, metric):
         tp = sum(r["tp"] for r in rows)
         fn = sum(r["fn"] for r in rows)
         return tp / (tp + fn) if (tp + fn) else None
+    if metric == "f1":
+        tp = sum(r["tp"] for r in rows)
+        fp = sum(r["fp"] for r in rows)
+        fn = sum(r["fn"] for r in rows)
+        denom = 2 * tp + fp + fn
+        return (2 * tp) / denom if denom else None
     aps = [r["ap"] for r in rows if r.get("ap") is not None]
     return st.mean(aps) if aps else None
+
+
+def all_regime_rows(method):
+    """Every scored row across the four labelled regimes (the union of the shown strata)."""
+    rr = rows_by_regime(method)
+    return [r for reg in ("EASY", "TEXTURED", "VARIED", "CLUTTERED") for r in rr.get(reg, [])]
 
 
 def bootstrap_ci(rows, metric, n=2000):
@@ -206,6 +218,26 @@ def regime_table(reg):
             f"<tr><td class='mn'><span class='dot' style='background:{COLOR[m]}'></span>"
             f"{LABEL[m]}</td><td>{pct(p)}{ci_span(pci)}</td><td>{pct(r)}{ci_span(rci)}</td>"
             f"<td>{pct(ap)}</td><td>{len(rr)}</td></tr>"
+        )
+    return f"<table class='metrics'><tbody>{head}{''.join(rows_html)}</tbody></table>"
+
+
+def overall_table():
+    """Pooled precision/recall/F1/AP over all four regimes — a summary, not a verdict."""
+    head = (
+        "<tr><th>method</th><th>precision (95% CI)</th><th>recall (95% CI)</th>"
+        "<th>F1</th><th>AP</th><th>n img</th></tr>"
+    )
+    rows_html = []
+    for m in ORDER:
+        rr = all_regime_rows(m)
+        p, r = pooled(rr, "precision"), pooled(rr, "recall")
+        f1, ap = pooled(rr, "f1"), pooled(rr, "ap")
+        pci, rci = bootstrap_ci(rr, "precision"), bootstrap_ci(rr, "recall")
+        rows_html.append(
+            f"<tr><td class='mn'><span class='dot' style='background:{COLOR[m]}'></span>"
+            f"{LABEL[m]}</td><td>{pct(p)}{ci_span(pci)}</td><td>{pct(r)}{ci_span(rci)}</td>"
+            f"<td>{pct(f1)}</td><td>{pct(ap)}</td><td>{len(rr)}</td></tr>"
         )
     return f"<table class='metrics'><tbody>{head}{''.join(rows_html)}</tbody></table>"
 
@@ -381,9 +413,15 @@ card links its method doc (algorithm, pseudocode, config reference) and a primar
 <h2>The datasets</h2>
 {datasets_section()}
 
+<h2>Overall <span class='muted' style='font-size:13px'>— pooled across all four regimes</span></h2>
+<p class='sub'>Precision, recall, F1, and AP pooled over every image in the four regimes, each rate
+with a 95% bootstrap CI. <b>Read this as a summary, not a verdict:</b> pooling averages a method's
+best and worst regimes together, so a method that wins decisively in one and abstains in another
+lands in a misleading middle. The per-regime tables below are the real result.</p>
+{overall_table()}
+
 <h2>Results by regime <span class='muted' style='font-size:13px'>— the real story</span></h2>
-<p class='sub'>Per-regime is primary; a pooled "overall" would average each method's best and worst
-cases into a muddy middle. Precision and recall each carry a 95% bootstrap CI.</p>
+<p class='sub'>Per-regime is primary. Precision and recall each carry a 95% bootstrap CI.</p>
 {regime_blocks}
 
 <div class='callout'><b>The crossover, made concrete.</b> On <b>EASY</b> chips ① NCC is
