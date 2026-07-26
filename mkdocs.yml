@@ -1,0 +1,108 @@
+# mkdocs.yml — renders the existing docs/ Markdown tree into a themed, searchable static site.
+#
+# The source of truth is still the plain Markdown under docs/ (greppable, diffable, mirrored
+# from the method docstrings per the project conventions). This file only decides how that
+# Markdown is *presented*: the Material theme, a light/dark toggle, search, and the navigation
+# order. Serve locally with `pixi run docs`; CI builds it with `pixi run docs-build` and
+# publishes site/ to GitHub Pages.
+
+site_name: Object Search Exploration
+site_description: >-
+  Draw one box around an object; find every other instance in that same image — through any
+  of five interchangeable search methods, with subjective ratings and objective metrics.
+site_author: Enrique G. Ortiz
+repo_url: https://github.com/ortizeg/object-search-exploration
+repo_name: ortizeg/object-search-exploration
+docs_dir: docs
+# Fail the build on a broken internal link or bad nav reference, so a docs regression is caught
+# in CI rather than shipped as a dead page.
+strict: true
+
+theme:
+  name: material
+  palette:
+    # Light mode (default) with a toggle to dark.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  # Callouts (!!! note / !!! warning) used by the walkthrough and method docs.
+  - admonition
+  - pymdownx.details
+  # Fenced code with syntax highlighting + copy button.
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  # GitHub-style tables, task lists, and tilde/caret for the scoreboard and comparison tables.
+  - tables
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Interface walkthrough: walkthrough.md
+  - Methods:
+      - "1 · NCC (template match)": methods/ncc.md
+      - "2 · Sparse geometric": methods/sparse-geo.md
+      - "2 · Sparse geo — tuning": methods/sparse-geo-tuning.md
+      - "3 · DINO dense": methods/dino-dense.md
+      - "4 · OWLv2 one-shot": methods/owlv2-oneshot.md
+      - "5 · Propose–retrieve": methods/propose-retrieve.md
+  - Sample runs:
+      - NCC: samples/ncc/index.md
+      - Sparse geometric: samples/sparse-geo/index.md
+      - DINO dense: samples/dino-dense/index.md
+      - OWLv2 one-shot: samples/owlv2-oneshot/index.md
+      - Propose–retrieve: samples/propose-retrieve/index.md
+      - Marker-conditioned: samples/marker-conditioned/index.md
+  - Evaluation:
+      - Design: EVAL-DESIGN.md
+      - Benchmark results: benchmark/results.md
+      - Limitations: LIMITATIONS.md
+      - Datasets: DATASETS.md
+  - Explorations:
+      - Marker-conditioned: explorations/marker-conditioned.md
+      - Milestone 2: MILESTONE-2.md
+  - Library reviews:
+      - DINOv2: library-reviews/dinov2.md
+      - SuperPoint: library-reviews/superpoint.md
+      - FastSAM: library-reviews/fastsam.md
+      - OWLv2: library-reviews/owlv2.md
+  - Improvement reports:
+      - NCC: reports/ncc-improvement.md
+      - DINO dense: reports/dino-dense-improvement.md
+      - OWLv2: reports/owlv2-improvement.md
+      - Propose–retrieve: reports/propose-retrieve-improvement.md
+  - Robustness backlog: ROBUSTNESS-BACKLOG.md

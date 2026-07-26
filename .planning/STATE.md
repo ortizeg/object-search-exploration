@@ -33,11 +33,17 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-07-25 — Executed 01-02: schemas, registry, ONNXInferencer, synthetic +
-chip benchmark, fetch-models, demo assets. All gates green (90.34% coverage). PR #2 open, CI
-green. INFRA-07 branch protection unavailable on a private repo.
+Last activity: 2026-07-26 — Quick task 260726-lct: MkDocs Material docs site (`pixi run docs`),
+GitHub Pages deploy workflow, Playwright UI-screenshot capture, and an interface walkthrough
+page. `mkdocs build --strict` green.
 
 Progress: [█████████░] 88%
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
 
 ## Performance Metrics
 
