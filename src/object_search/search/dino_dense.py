@@ -1,13 +1,19 @@
-"""Method 3 -- DINOv2 dense-token prototype matching (the general-purpose default).
+"""Method 3 -- DINOv2 dense-token best-part matching (the general-purpose default).
 
 What it does
 ------------
-Embed the exemplar crop and the whole scene into DINOv2 dense patch tokens, **mean-pool** the
-crop tokens into a single prototype vector, and score every scene location by the **cosine
-similarity** of its token to that prototype. Threshold the resulting similarity map, run
-connected components, and turn each component into a box. Where NCC (Method 1) correlates raw
+Embed the exemplar crop and the whole scene into DINOv2 dense patch tokens. Score every scene
+token by the **mean of its top-``match_tokens`` cosine similarities to the crop's own tokens**
+(``max-token`` scoring, the default) -- "how well does the single best-matching part of the
+exemplar explain this location". Threshold the resulting high-contrast similarity map at a
+calibrated cut, run connected components **at that threshold**, keep each component whose area is
+consistent with the exemplar, and turn it into a box. Where NCC (Method 1) correlates raw
 intensities and so misses instances under pose or lighting change, DINOv2 features are
 appearance-robust, so this is the method that finds "the same object, differently posed".
+
+A ``prototype`` scoring mode (mean-pool the crop tokens into ONE vector, then dot) is retained as
+a readable baseline, but it produces a **low-contrast map on richly-textured objects** where every
+instance fuses into a single image-spanning blob -- the reason ``max-token`` is the default.
 
 This file is meant to be read top to bottom by an ML practitioner. Readability outranks DRY
 (project convention): the numbered steps ``# 1.`` .. ``# 9.`` in :func:`search` match the
@@ -28,31 +34,41 @@ method's, not the backbone's:
   an uncapped 6000 px scene is 180k+ tokens and OOMs. When a scene's long side exceeds the cap
   it is downscaled *and the cap is logged*, never silently truncated. Scenes at or below the cap
   run at native resolution.
-- **The exemplar crop is taken from the original BGR scene** and embedded on its own; its patch
-  tokens are mean-pooled into the prototype. Mean-pooling loses part structure (a known
-  limitation for articulated objects -- see the backlog), but it is the readable v1.
+- **The exemplar crop is taken from the original BGR scene** and embedded on its own. Under the
+  default ``max-token`` scoring its patch tokens are kept as a **bank** (one vector per part);
+  under ``prototype`` scoring they are mean-pooled into one vector. All tokens are L2-normalized.
 
 Post-processing (exact)
 -----------------------
-- **Both the prototype and every scene token are L2-normalized before the dot product.** The dot
-  of two L2-normalized vectors is cosine similarity; skipping the normalization yields an
-  unnormalized dot dominated by token *magnitude* (DINOv2's high-norm background artifact tokens
-  in particular), which is a different, wrong quantity. Order matters: normalize, then dot.
+- **All tokens are L2-normalized before any dot product**, so every score is a genuine cosine in
+  ``[-1, 1]`` rather than an unnormalized dot dominated by token *magnitude* (DINOv2's high-norm
+  background artifact tokens in particular). Order matters: normalize, then dot.
+- **``max-token`` scoring (default):** each scene token's score is the **mean of its top-k cosines
+  to the crop token bank**, where ``k = match_tokens``. This best-matching-part score is high on
+  true instances and low on background -- a far sharper contrast than the mean-pooled ``prototype``
+  dot, which averages the crop's diverse parts into a mushy vector that matches everything weakly.
 - **The similarity MAP is bilinearly upsampled, not the tokens.** Upsampling the ``(gh, gw)``
   cosine map to pixel resolution -- using the scale factors :meth:`DINOv2Inferencer.dense_tokens`
   returns so token centres land on their true pixels -- is cheap and correct; upsampling the
   384-d tokens first would be 384x the work for the same map.
-- **``connectedComponentsWithStats`` label 0 is the background and is skipped explicitly.**
-  Emitting label 0 would be a single full-image false positive. Each remaining component above
-  ``min_component_area`` becomes one box; its score is the peak similarity inside it.
-- **Threshold via ``common.calibration``** (default ``gmm``): absolute cosine thresholds do not
-  transfer across images for deep features, which is exactly what the calibration layer is for.
-  The score distribution handed to the calibrator is the token-resolution similarity map.
+- **Threshold via ``common.calibration`` OR the local ``contrast`` strategy (default).** Absolute
+  cosine thresholds do not transfer across images, so the cut is calibrated per image from the
+  score distribution. ``contrast`` blends a background anchor (``mean + std``) with a foreground
+  anchor (a fraction of the high percentile); on the high-contrast ``max-token`` map this tracks
+  the per-image optimum, where the old ``gmm`` posterior cut sat in the background shoulder and
+  under-thresholded (every instance fused into one image-spanning box).
+- **MATCH components are grown at the accept threshold ITSELF, never at a sub-threshold floor.** A
+  component's box is therefore the extent of the above-threshold region only; a low-contrast
+  shoulder below the threshold cannot bridge distinct instances into one blob. ``label 0`` (the
+  background) is skipped explicitly -- emitting it would be one image-sized false positive.
+- **Component area is bounded to the exemplar's size.** A component below ``min_area_frac`` x the
+  exemplar area is a fragment; one above ``max_area_frac`` x it is a merged/background blob. Both
+  are dropped so neither speckle nor a swallowing blob is emitted. The bounds scale with the
+  exemplar, so they hold across the 300x canvas range without per-image tuning.
 - **Sub-threshold candidates are retained** (EVAL-08): components found at a floor
-  ``candidate_margin`` below the accept threshold are logged with their raw similarity so an
-  offline threshold sweep can rebuild a PR curve. Components clearing the threshold become
-  matches; there is **no single-best short-circuit** (METHOD-12) -- connected components returns
-  as many instances as the image contains.
+  ``candidate_margin`` below the accept threshold are logged (candidate LOG only, never emitted as
+  matches) so an offline threshold sweep can rebuild a PR curve. There is **no single-best
+  short-circuit** (METHOD-12) -- every above-threshold component survives as a match.
 
 Known failure modes
 --------------------
@@ -62,9 +78,10 @@ Known failure modes
 - **Very large scenes hit the resolution cap.** Above ``scene_max_side`` the scene is downscaled
   (and it is logged), so effective localisation on a 6000 px image is coarser than the cap
   suggests.
-- **A single mean-pooled prototype loses part structure.** For articulated or non-compact
-  objects (the basketball-player frames) a many-to-many token similarity would do better; this
-  is a deliberate v1 simplification, not a bug.
+- **Small objects below the token grid.** On the fixed-scale chipset (chips ~36-46 px) a whole
+  instance spans ~2-3 stride-14 tokens, so its box is imprecise or merges with a neighbour and
+  often misses the IoU-0.5 bar. This is the same coarseness limit as above and is why NCC, not
+  this method, owns the flat-chip regime; ``max-token`` scoring does not change the grid pitch.
 - **Weights absent.** DINOv2 weights are gitignored and fetched by ``pixi run fetch-models``.
   With no weight present the method returns ``outcome=error`` with a ``model_unavailable`` note
   rather than raising, so the sample renderer and the API degrade honestly.
@@ -76,11 +93,18 @@ Deferred deliberately (mirrored in ``docs/methods/dino-dense.md`` and
 
 - **Sliding-window backbone inference** for very large scenes, so localisation no longer
   degrades at the resolution cap.
+- **Adaptive input resolution** -- size the scene so the exemplar spans >= N stride-14 tokens
+  (clamped to a hard max) instead of a fixed ``scene_max_side``. Measured ~6x chipset recall
+  (0.077 -> 0.554 on a small-chip subset); deferred because it costs latency, does not fix the
+  flat-chip precision, and chipset is NCC's regime (see docs/reports/dino-dense-improvement.md).
 - **Learned feature upsampling (FeatUp)** to recover sub-patch localisation from the stride-14
   grid without a full high-res forward pass.
 - **SAM-based box refinement** -- snap each coarse component box to the nearest segment mask.
-- **Many-to-many token similarity with spatial aggregation** instead of a single mean-pooled
-  prototype -- measurably better for articulated objects like the basketball frames.
+- **Spatially-structured (not order-free) part matching.** ``max-token`` scoring already does
+  many-to-many token similarity (DONE -- it replaced the mean-pooled prototype and lifted textured
+  F1 from ~0.03 to ~0.70), but it pools the top-k cosines with no geometric constraint on WHERE the
+  matching parts sit. Adding a spatial-consistency term (parts must be arranged like the exemplar)
+  would cut clutter false positives further.
 - **DINOv3 backbone swap** once a clean ONNX export exists.
 """
 
@@ -127,6 +151,19 @@ _SELF_MATCH_SCORE = 1.0
 # labelled is_exemplar rather than dropped or counted as a fresh discovery (METHOD-04c).
 _EXEMPLAR_IOU = 0.5
 _EPS = 1e-12  # guards a zero-norm division; a genuinely zero token is background, not a match
+# --- "contrast" calibration constants (properties of the max-token map, not per-query knobs) ---
+# The accept threshold is a 50/50 blend of two anchors on the similarity-map distribution:
+#   * a BACKGROUND anchor  = mean + _CONTRAST_STD_K * std   (where the background bulk ends), and
+#   * a FOREGROUND anchor   = _CONTRAST_PEAK_FRAC * p{_CONTRAST_PEAK_PCTL}  (a fraction of the
+#     near-peak, i.e. relative to the strongest matches rather than an absolute cosine).
+# Blending the two tracks the per-image optimum far better than a single Gaussian-mixture cut,
+# which sits in the background shoulder on this high-contrast map (see docs/methods/dino-dense.md).
+# Chosen on the EVAL-20 textured set: pooled F1 ~0.70 vs ~0.44 for gmm, on a broad plateau (not a
+# knife-edge fit). These are NOT fit to the ground-truth boxes -- only to the score distribution.
+_CONTRAST_STD_K = 1.0
+_CONTRAST_PEAK_PCTL = 99.5
+_CONTRAST_PEAK_FRAC = 0.85
+_CONTRAST_BLEND = 0.5  # weight on the background anchor; (1 - this) on the foreground anchor
 
 
 class DinoDenseConfig(BaseModel):
@@ -147,12 +184,35 @@ class DinoDenseConfig(BaseModel):
             "cap is logged. 1568 = 112 patches, a good high-res/'safe memory' balance."
         ),
     )
-    calibration: Literal["fixed", "self-similarity", "ratio", "gmm"] = Field(
-        default="gmm",
+    calibration: Literal["contrast", "fixed", "self-similarity", "ratio", "gmm"] = Field(
+        default="contrast",
         description=(
-            "How the accept threshold is chosen when `threshold` is None. gmm fits two modes "
-            "(foreground/background) on the similarity map; absolute cosine thresholds do not "
-            "transfer across images for deep features, which is why calibration is the default."
+            "How the accept threshold is chosen when `threshold` is None. `contrast` (default) "
+            "blends a background anchor (mean+std) with a foreground anchor (a fraction of the "
+            "high percentile) -- tuned for the high-contrast max-token map, where it tracks the "
+            "per-image optimum. `gmm` fits two modes but its cut sits in the background shoulder "
+            "here (it was the old default and shipped a single full-frame box). Absolute cosine "
+            "thresholds do not transfer across images, which is why calibration is the default."
+        ),
+    )
+    scoring: Literal["max-token", "prototype"] = Field(
+        default="max-token",
+        description=(
+            "How a scene token is scored against the exemplar crop. `max-token` scores each scene "
+            "token by the mean of its top-`match_tokens` cosine similarities to the crop's own "
+            "tokens (best-matching-part) -- this keeps the crop's spatial detail and yields a "
+            "high-contrast map where instances separate cleanly. `prototype` mean-pools the crop "
+            "tokens into ONE vector first; simpler but low-contrast on richly-textured objects "
+            "(all instances fuse into one blob), so it is retained only as a baseline."
+        ),
+    )
+    match_tokens: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "For `max-token` scoring: how many of the closest crop tokens are averaged per scene "
+            "token. 1 = pure nearest-token max (sharpest, noisiest); a few smooths single-token "
+            "flukes without washing the contrast back out."
         ),
     )
     threshold: float | None = Field(
@@ -173,7 +233,27 @@ class DinoDenseConfig(BaseModel):
         default=4,
         ge=1,
         description=(
-            "Minimum connected-component area in pixels; smaller blobs are dropped as noise."
+            "Absolute floor on connected-component area in pixels; smaller blobs are dropped as "
+            "noise. The effective floor is the LARGER of this and `min_area_frac` x exemplar area."
+        ),
+    )
+    min_area_frac: float = Field(
+        default=0.12,
+        ge=0.0,
+        description=(
+            "Size-relative floor: a component smaller than this fraction of the exemplar's area "
+            "is a fragment, not an instance, and is dropped. Ties the noise floor to the object "
+            "so it holds across the 300x canvas range without hand-tuning per image."
+        ),
+    )
+    max_area_frac: float = Field(
+        default=8.0,
+        gt=0.0,
+        description=(
+            "Size-relative ceiling: a component larger than this multiple of the exemplar's area "
+            "is a merged/background blob (an instance scaled up 1.6x with a rotated bounding box "
+            "tops out near 5x), not a single instance, and is dropped so it cannot swallow "
+            "several instances into one image-spanning false positive."
         ),
     )
     max_candidates: int = Field(
@@ -287,6 +367,63 @@ def _similarity_map(
     return (flat_norm @ prototype).reshape(gh, gw).astype(np.float32)
 
 
+def _contrast_threshold(sim_token: npt.NDArray[np.floating]) -> tuple[float, str]:
+    """Blend a background anchor (``mean + k*std``) with a foreground anchor
+    (``frac * high-percentile``) into one accept threshold, returning ``(threshold, reason)``.
+
+    The max-token map is high-contrast and heavy-tailed: a background bulk plus a thin tail of
+    true-instance tokens. ``mean + k*std`` marks where the bulk ends; ``frac * p99.5`` marks a
+    fraction of the near-peak. Their blend lands between the background and the instances across a
+    wide range of images -- where a two-Gaussian posterior cut does not, because the tiny
+    foreground weight drags its boundary down into the background shoulder. Operates on the
+    TOKEN-resolution map so it is invariant to the upsample factor.
+    """
+    arr = np.asarray(sim_token, dtype=np.float64).reshape(-1)
+    background = float(arr.mean() + _CONTRAST_STD_K * arr.std())
+    foreground = _CONTRAST_PEAK_FRAC * float(np.percentile(arr, _CONTRAST_PEAK_PCTL))
+    threshold = _CONTRAST_BLEND * background + (1.0 - _CONTRAST_BLEND) * foreground
+    reason = (
+        f"blend of background mean+{_CONTRAST_STD_K:g}std={background:.4f} and foreground "
+        f"{_CONTRAST_PEAK_FRAC:g}*p{_CONTRAST_PEAK_PCTL:g}={foreground:.4f} "
+        f"(w={_CONTRAST_BLEND:g}) -> cut at {threshold:.4f}"
+    )
+    return threshold, reason
+
+
+def _crop_token_bank(crop_grid: npt.NDArray[np.floating]) -> npt.NDArray[np.float32]:
+    """Flatten a ``(gh, gw, D)`` crop token grid into an ``(M, D)`` bank of **L2-normalized**
+    tokens -- the crop's parts kept separate, as opposed to :func:`_prototype_from_grid` which
+    collapses them to one vector. ``max-token`` scoring correlates each scene token against this
+    whole bank, so a scene location scores high only where it resembles some ACTUAL part of the
+    exemplar rather than the washed-out average of all its parts.
+    """
+    tokens = np.asarray(crop_grid, dtype=np.float32).reshape(-1, crop_grid.shape[-1])
+    return _l2_normalize(tokens, axis=1)
+
+
+def _maxtoken_similarity_map(
+    grid: npt.NDArray[np.floating],
+    bank: npt.NDArray[np.float32],
+    match_tokens: int,
+) -> npt.NDArray[np.float32]:
+    """Score every scene token by the **mean of its top-``match_tokens`` cosine similarities** to
+    the crop token bank (best-matching-part matching).
+
+    Both sides are L2-normalized, so ``scene_norm @ bank.T`` is a ``(N_scene, M)`` matrix of genuine
+    cosines. Taking, per scene token, the mean of its ``k`` largest entries answers "how well does
+    the single best-matching crop part explain this location", which is high on true instances and
+    low on background -- a far sharper contrast than one mean-pooled prototype produces. ``k`` is
+    clamped to the bank size so a tiny crop still works.
+    """
+    gh, gw, dim = grid.shape
+    scene = _l2_normalize(np.asarray(grid, dtype=np.float32).reshape(-1, dim), axis=1)
+    cosines = scene @ bank.T  # (N_scene, M): every scene token vs every crop token
+    k = min(match_tokens, cosines.shape[1])
+    # np.partition puts the k largest in the last k columns (unordered) -- all the mean needs.
+    topk = np.partition(cosines, -k, axis=1)[:, -k:]
+    return topk.mean(axis=1).reshape(gh, gw).astype(np.float32)
+
+
 def _upsample_similarity(
     sim_map: npt.NDArray[np.floating],
     scale_x: float,
@@ -315,6 +452,7 @@ def _extract_components(
     sim_full: npt.NDArray[np.float32],
     floor: float,
     min_area: int,
+    max_area: float,
     cap_scale: float,
     orig_w: int,
     orig_h: int,
@@ -325,13 +463,15 @@ def _extract_components(
     **Label 0 is skipped explicitly** -- it is the whole non-matching background and emitting it
     would be one image-sized false positive. Each remaining component's stats bbox is scaled from
     the (capped) inference resolution back to original scene pixels by dividing out ``cap_scale``.
+    A component outside ``[min_area, max_area]`` (both in capped-inference pixels) is dropped as a
+    fragment or a merged/background blob; ``max_area <= 0`` disables the ceiling.
     """
     mask = (sim_full >= floor).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     components: list[_Component] = []
     for label in range(1, count):  # 1.. : SKIP label 0, the background component
         area = int(stats[label, cv2.CC_STAT_AREA])
-        if area < min_area:
+        if area < min_area or (max_area > 0 and area > max_area):
             continue
         x = int(stats[label, cv2.CC_STAT_LEFT])
         y = int(stats[label, cv2.CC_STAT_TOP])
@@ -413,11 +553,14 @@ def search(
             error=MethodError(kind="model_unavailable", message=f"{_MODEL_KEY} weight not on disk"),
         )
 
-    # 2. Embed the exemplar crop, mean-pool its patch tokens into a prototype, L2-normalize it.
+    # 2. Embed the exemplar crop into DINOv2 tokens. `max-token` keeps every crop token (a bank of
+    #    the object's parts); `prototype` mean-pools them into one vector. The bank is the default
+    #    because a single prototype washes out contrast on textured objects (see the `scoring` doc).
     ex = exemplar.box
     crop = np.ascontiguousarray(image[ex.y : ex.y2, ex.x : ex.x2], dtype=np.uint8)
     crop_grid, _, _ = inferencer.dense_tokens(crop)
     prototype = _prototype_from_grid(crop_grid)
+    token_bank = _crop_token_bank(crop_grid)
 
     # 3. Run the SCENE at high resolution, capped at scene_max_side. A scene above the cap is
     #    downscaled and the cap is LOGGED -- never silently truncated. dense_tokens then snaps
@@ -452,47 +595,68 @@ def search(
     inference_ms = (perf_counter() - t_infer) * 1000.0
     gh, gw = grid.shape[0], grid.shape[1]
 
-    # 4. Cosine similarity = normalized prototype . normalized token grid -> a (gh, gw) map.
-    sim_token = _similarity_map(grid, prototype)
+    # 4. Score every scene token -> a (gh, gw) cosine-similarity map. `max-token` uses the mean of
+    #    each token's top-k cosines to the crop bank (high contrast); `prototype` dots against the
+    #    single mean-pooled vector (the low-contrast baseline).
+    if config.scoring == "max-token":
+        sim_token = _maxtoken_similarity_map(grid, token_bank, config.match_tokens)
+    else:
+        sim_token = _similarity_map(grid, prototype)
 
     # 5. Bilinearly upsample the MAP (not the tokens) to pixel resolution using the scale factors.
     sim_full = _upsample_similarity(sim_token, scale_x, scale_y)
 
-    # 6. Calibrate the accept threshold from the token-resolution similarity distribution.
-    #    self_score is 1.0 (the L2-normalized prototype's self-cosine); "fixed" is used whenever
-    #    the caller pinned config.threshold. The calibrator returns its reasoning too.
-    strategy: calibration.CalibrationStrategy = (
-        "fixed" if config.threshold is not None else config.calibration
-    )
-    calib = calibration.calibrate(
-        sim_token.reshape(-1),
-        strategy=strategy,
-        fixed_threshold=config.threshold,
-        self_score=_SELF_MATCH_SCORE,
-        retain_frac=config.retain_frac,
-        seed=config.seed,
-    )
-    threshold = calib.threshold
+    # 6. Calibrate the accept threshold from the token-resolution similarity distribution. A pinned
+    #    config.threshold wins; otherwise "contrast" (the default, tuned for this map) is computed
+    #    locally, and the classical strategies delegate to the shared calibrator. self_score is 1.0
+    #    (the L2-normalized prototype's self-cosine). Each path yields a (strategy, reason) for the
+    #    diagnostics note.
+    if config.threshold is not None:
+        threshold = config.threshold
+        calib_strategy, calib_reason = "fixed", f"caller-pinned threshold {threshold:.4f}"
+    elif config.calibration == "contrast":
+        threshold, calib_reason = _contrast_threshold(sim_token)
+        calib_strategy = "contrast"
+    else:
+        calib = calibration.calibrate(
+            sim_token.reshape(-1),
+            strategy=config.calibration,
+            fixed_threshold=None,
+            self_score=_SELF_MATCH_SCORE,
+            retain_frac=config.retain_frac,
+            seed=config.seed,
+        )
+        threshold, calib_strategy, calib_reason = calib.threshold, calib.strategy, calib.reason
 
-    # 7. Threshold -> connected components (label 0 skipped). Components are found at a floor
-    #    candidate_margin BELOW the accept threshold so sub-threshold near-misses are captured;
-    #    the split into matches vs candidates happens on the raw score in step 8.
+    # 7. MATCH components are grown at the accept threshold ITSELF -- NOT at a floor below it. The
+    #    box of a match is therefore the extent of the above-threshold region only; a low-contrast
+    #    shoulder just below the threshold can no longer bridge distinct instances into one
+    #    image-spanning blob (the bug that made this method return a single full-frame box).
+    #    Area bounds are tied to the exemplar so fragments and merged blobs drop out at any canvas
+    #    scale (both bounds are in capped-inference pixels, hence the cap_scale^2 factor).
+    #    METHOD-12: EVERY component above threshold survives -- no single-best short-circuit, so
+    #    connected components emits as many instances as the image actually contains.
+    exemplar_area_capped = ex.w * ex.h * cap_scale * cap_scale
+    min_area = max(config.min_component_area, round(config.min_area_frac * exemplar_area_capped))
+    max_area = config.max_area_frac * exemplar_area_capped
+    match_components = _extract_components(
+        sim_full, threshold, min_area, max_area, cap_scale, orig_w, orig_h
+    )
+    accepted = sorted(match_components, key=lambda c: (-c.score, c.box.y, c.box.x))
+    matches = _build_matches(accepted, ex)
+
+    # 8. CANDIDATE components (EVAL-08) are grown at a floor candidate_margin BELOW the threshold so
+    #    an offline PR sweep can rebuild the curve from sub-threshold near-misses. These feed the
+    #    candidate LOG ONLY and are never emitted as matches, so their coarser (possibly merged)
+    #    boxes cannot pollute the returned detections.
     candidate_floor = max(-1.0, threshold - config.candidate_margin)
-    components = _extract_components(
-        sim_full, candidate_floor, config.min_component_area, cap_scale, orig_w, orig_h
+    cand_components = _extract_components(
+        sim_full, candidate_floor, min_area, max_area, cap_scale, orig_w, orig_h
     )
-
-    # 8. Split into matches and sub-threshold candidates (EVAL-08). The top max_candidates
-    #    components (ranked by raw similarity) are kept as Candidates regardless of the threshold,
-    #    so an offline sweep can rebuild a PR curve. Components whose score clears the threshold
-    #    become Matches. METHOD-12: EVERY clearing component survives -- there is no single-best
-    #    short-circuit; connected components returns as many instances as the image contains.
-    ordered = sorted(components, key=lambda c: (-c.score, c.box.y, c.box.x))
+    ordered = sorted(cand_components, key=lambda c: (-c.score, c.box.y, c.box.x))
     candidates = tuple(
         Candidate(box=c.box, score=c.score) for c in ordered[: config.max_candidates]
     )
-    accepted = [c for c in ordered if c.score > threshold]
-    matches = _build_matches(accepted, ex)
 
     # 9. Assemble diagnostics (the similarity heatmap is the debug overlay) and the result.
     postprocess_ms = max(0.0, (perf_counter() - t_start) * 1000.0 - inference_ms)
@@ -507,17 +671,17 @@ def search(
         "grid_w": float(gw),
         "cap_scale": cap_scale,
         "cap_engaged": 1.0 if cap_engaged else 0.0,
-        "n_components": float(len(components)),
+        "n_components": float(len(match_components)),
         "n_candidates": float(len(candidates)),
         "n_matches": float(len(matches)),
         "sim_max": float(sim_token.max()),
         "sim_mean": float(sim_token.mean()),
     }
     notes = (
-        f"calibration[{calib.strategy}]: {calib.reason}",
+        f"calibration[{calib_strategy}]: {calib_reason}",
         (
-            f"kept {len(matches)} match(es) from {len(components)} component(s) on a {gh}x{gw} "
-            f"token grid; threshold {threshold:.4f} on cosine similarity"
+            f"kept {len(matches)} match(es) from {len(match_components)} component(s) "
+            f"on a {gh}x{gw} token grid; threshold {threshold:.4f} on cosine similarity"
             + (
                 f"; scene capped to {config.scene_max_side}px (x{cap_scale:.4f})"
                 if cap_engaged
@@ -531,7 +695,7 @@ def search(
             SearchOutcome.EMPTY,
             (
                 f"no DINOv2 component cleared the calibrated threshold {threshold:.4f} "
-                f"(best {float(sim_token.max()):.4f}); {calib.strategy}: {calib.reason}"
+                f"(best {float(sim_token.max()):.4f}); {calib_strategy}: {calib_reason}"
             ),
             threshold=threshold,
             latency=latency,

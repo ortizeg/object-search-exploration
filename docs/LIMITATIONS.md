@@ -85,19 +85,35 @@ From `.planning/POLISH-BACKLOG.md`:
 Real numbers over the committed 12-image demo set (chipset repeats + scale/clutter synthetics,
 IoU 0.5). Full tables and charts: [`benchmark/results.md`](benchmark/results.md).
 
+> **Note (superseded snapshot).** The table below is an early 12-image run. The current
+> objective benchmark is the 60-image set in [`benchmark/results.md`](benchmark/results.md),
+> where `sparse-geo` was subsequently tuned (spatial NMS + default changes) to **F1 0.823 /
+> AP 0.751** — see the [sparse-geo tuning log](methods/sparse-geo-tuning.md). The crossover
+> finding for `sparse-geo` still holds; only its magnitude changed.
+
 | method | precision | recall | F1 | mean AP | p50 latency |
 | --- | --- | --- | --- | --- | --- |
 | `ncc` | 0.913 | 0.922 | 0.918 | 0.484 | 238 ms |
 | `sparse-geo` | 0.833 | 0.097 | 0.174 | 0.083 | 76 ms |
-| `dino-dense` | 0.276 | 0.078 | 0.121 | 0.190 | 2259 ms |
+| `dino-dense` † | 0.276 | 0.078 | 0.121 | 0.190 | 2259 ms |
 | `propose-retrieve` | 0.748 | 0.951 | 0.838 | 0.635 | 291 ms |
 
-- **`dino-dense` underperforms on this set** — F1 **0.121**, the weakest of the four, and the
-  slowest (p50 **2.26 s**, up to ~5 s on the largest canvases). The stride-14 DINOv2 token grid is
-  too coarse to localise the small chips: the similarity map cannot separate adjacent tiny
-  instances, so recall craters (0.078). It is a poor fit for the small-repeated-instance regime the
-  chipset represents, and the benchmark says so. The robustness backlog records the fixes
-  (sliding-window inference, FeatUp upsampling, SAM box refinement).
+> **† Update (2026-07): the `dino-dense` row above is the *pre-fix* implementation.** The original
+> mean-pooled-prototype + `gmm` pipeline returned a single image-spanning box, so its F1 here
+> (0.121) reflects a bug, not the method's ceiling. It was reworked (`max-token` best-part scoring,
+> `contrast` calibration, threshold-level extraction) — textured F1 ≈ **0.03 → 0.70**, now beating
+> NCC on the scale/rotation and clutter regimes. See the
+> [engineering log](reports/dino-dense-improvement.md) and the current per-regime scores in the
+> [benchmark report](reports/benchmark-report.html). The stratified benchmark (chipset + textured)
+> is the authoritative source; this legacy 12-image table is kept for historical continuity only.
+
+- **`dino-dense` was weakest on this legacy set** — F1 **0.121**, and the slowest (p50 **2.26 s**).
+  The headline cause was the two post-processing bugs above (now fixed); a residual, *fundamental*
+  weakness remains on the tiny fixed-scale chips, where the stride-14 grid gives a 24–46 px chip
+  only ~2–3 tokens and localisation is coarse regardless of scoring. It is a poor fit for the
+  small-repeated-instance regime the chipset represents — NCC's regime by design — and that part of
+  the benchmark still says so. The robustness backlog records the resolution-oriented follow-ups
+  (adaptive input resolution, sliding-window inference, FeatUp upsampling).
 
 - **`sparse-geo` abstains on 11 of 12 images** — pooled recall **0.097**. The chips are
   near-identical and **low-texture**, so the exemplar crop yields fewer than the 20 SIFT keypoints

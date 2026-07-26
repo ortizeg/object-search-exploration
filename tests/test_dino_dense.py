@@ -27,8 +27,11 @@ from object_search.search import dino_dense, has_method
 from object_search.search.common import calibration
 from object_search.search.dino_dense import (
     DinoDenseConfig,
+    _contrast_threshold,
+    _crop_token_bank,
     _extract_components,
     _l2_normalize,
+    _maxtoken_similarity_map,
     _prototype_from_grid,
     _similarity_map,
     _upsample_similarity,
@@ -61,9 +64,15 @@ def _isolate_inferencer_cache() -> object:
 def test_config_defaults_match_the_locked_decisions() -> None:
     cfg = DinoDenseConfig()
     assert cfg.scene_max_side == 1568
-    assert cfg.calibration == "gmm"
+    # `contrast` + `max-token` are the defaults that lifted textured F1 from ~0.03 to ~0.70;
+    # `gmm` (the old default) sat in the background shoulder and shipped a single full-frame box.
+    assert cfg.calibration == "contrast"
+    assert cfg.scoring == "max-token"
+    assert cfg.match_tokens == 3
     assert cfg.threshold is None
     assert cfg.min_component_area == 4
+    assert cfg.min_area_frac == pytest.approx(0.12)
+    assert cfg.max_area_frac == pytest.approx(8.0)
     assert cfg.max_candidates == 50
     assert cfg.seed == 0
 
@@ -175,7 +184,9 @@ def _map_with_two_blobs() -> npt.NDArray[np.float32]:
 def test_extract_components_skips_label_zero_background() -> None:
     """The background is connected-components label 0 and must NOT be emitted as a box."""
     sim = _map_with_two_blobs()
-    comps = _extract_components(sim, floor=0.5, min_area=4, cap_scale=1.0, orig_w=400, orig_h=300)
+    comps = _extract_components(
+        sim, floor=0.5, min_area=4, max_area=0.0, cap_scale=1.0, orig_w=400, orig_h=300
+    )
     # Exactly the two foreground blobs -- not three (the background label 0 is skipped).
     assert len(comps) == 2
     # No component spans the whole image (which is what emitting label 0 would look like).
@@ -190,11 +201,66 @@ def test_extract_components_respects_min_area_and_cap_scale() -> None:
     sim = np.full((100, 100), 0.1, dtype=np.float32)
     sim[10:12, 10:12] = 0.9  # a 2x2 = area-4 blob
     sim[50, 50] = 0.9  # a 1-pixel blob (area 1) -- below min_area
-    comps = _extract_components(sim, floor=0.5, min_area=4, cap_scale=1.0, orig_w=100, orig_h=100)
+    comps = _extract_components(
+        sim, floor=0.5, min_area=4, max_area=0.0, cap_scale=1.0, orig_w=100, orig_h=100
+    )
     assert len(comps) == 1  # the 1-pixel blob was dropped
     # cap_scale halves capped-pixel coordinates back to original pixels.
-    comps2 = _extract_components(sim, floor=0.5, min_area=4, cap_scale=2.0, orig_w=100, orig_h=100)
+    comps2 = _extract_components(
+        sim, floor=0.5, min_area=4, max_area=0.0, cap_scale=2.0, orig_w=100, orig_h=100
+    )
     assert comps2[0].box.x == round(10 / 2.0)
+
+
+def test_extract_components_drops_oversized_merged_blobs() -> None:
+    """A component above ``max_area`` is a merged/background blob and must be dropped."""
+    sim = np.full((100, 100), 0.1, dtype=np.float32)
+    sim[10:14, 10:14] = 0.9  # a 4x4 = area-16 instance-sized blob (kept)
+    sim[40:90, 20:90] = 0.9  # a 50x70 = area-3500 merged/background blob (dropped by ceiling)
+    comps = _extract_components(
+        sim, floor=0.5, min_area=4, max_area=100.0, cap_scale=1.0, orig_w=100, orig_h=100
+    )
+    assert len(comps) == 1  # only the small blob survives the [4, 100] area window
+    assert comps[0].box.w < 10 and comps[0].box.h < 10
+
+
+def test_maxtoken_similarity_is_high_contrast_versus_prototype() -> None:
+    """max-token scoring separates a matching token from background more than the mean-pool dot.
+
+    Build a crop bank of two distinct part-vectors and a scene where one token equals part A,
+    one equals part B, and the rest are an unrelated background direction. The best-part score is
+    ~1 on the two instance tokens and low on background -- a wider gap than the prototype dot,
+    whose mean-of-two-parts vector only half-matches each true part.
+    """
+    part_a = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    part_b = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    background = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+    crop_grid = np.stack([part_a, part_b]).reshape(1, 2, 4)
+    bank = _crop_token_bank(crop_grid)
+    scene = np.stack([part_a, part_b, background, background]).reshape(2, 2, 4)
+
+    max_map = _maxtoken_similarity_map(scene, bank, match_tokens=1)
+    proto_map = _similarity_map(scene, _prototype_from_grid(crop_grid))
+    # max-token: the two instance tokens score ~1, background ~0.
+    assert max_map.reshape(-1)[0] == pytest.approx(1.0, abs=1e-5)
+    assert max_map.reshape(-1)[1] == pytest.approx(1.0, abs=1e-5)
+    assert max_map.reshape(-1)[2] == pytest.approx(0.0, abs=1e-5)
+    # The instance-vs-background contrast is strictly larger for max-token than for the prototype.
+    max_gap = float(max_map.reshape(-1)[0] - max_map.reshape(-1)[2])
+    proto_gap = float(proto_map.reshape(-1)[0] - proto_map.reshape(-1)[2])
+    assert max_gap > proto_gap
+
+
+def test_contrast_threshold_sits_between_background_bulk_and_foreground_tail() -> None:
+    """The contrast cut lands above the background bulk and below the instance tail."""
+    rng = np.random.default_rng(0)
+    background = rng.normal(0.30, 0.03, 2000)
+    foreground = rng.normal(0.80, 0.02, 60)  # a thin high tail, as real instances are
+    sim = np.concatenate([background, foreground]).astype(np.float32)
+    threshold, reason = _contrast_threshold(sim)
+    assert 0.35 < threshold < 0.80  # above the bulk, below the peak
+    assert float(background.mean()) < threshold < float(foreground.mean())
+    assert "blend" in reason and "cut at" in reason
 
 
 # ------------------------------------------------ model-free: the three strategies differ
