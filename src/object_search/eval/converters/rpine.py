@@ -104,9 +104,18 @@ def convert_rpine(raw_root: Path, out_root: Path, *, seed: int = 0) -> list[Path
     written: list[Path] = []
     for annotation_path in sorted(annotations_dir.glob("*.txt")):
         image_id = annotation_path.stem
-        image_path = images_dir / f"{image_id}.png"
-        if not image_path.is_file():
-            logger.warning("RPINE: {} has no image at {}, skipping", image_id, image_path)
+        # RPINE's native release ships PNG scenes; the HuggingFace mirror (ChipmunkG4/RPINE) ships
+        # JPG. Accept either -- this is the only difference between the two sources at this layer.
+        image_path = next(
+            (
+                candidate
+                for ext in (".png", ".jpg", ".jpeg")
+                if (candidate := images_dir / f"{image_id}{ext}").is_file()
+            ),
+            None,
+        )
+        if image_path is None:
+            logger.warning("RPINE: {} has no image in {}, skipping", image_id, images_dir)
             continue
 
         boxes = [

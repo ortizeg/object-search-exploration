@@ -184,3 +184,41 @@ revisited later as a count-MAE-only stress; they are out of scope this phase.
 Raw dataset images are large and licence-restricted: they are **gitignored** (`/datasets/`), fetched
 via `pixi run fetch-datasets`, and their SHA-256 + source URL + licence are recorded in a provenance
 manifest (D-08). No raw dataset file is ever tracked in git, and no dataset is re-hosted.
+
+## Obtaining the datasets
+
+`fetch-datasets` has two source kinds (see `object_search.eval.datasets`).
+
+### HuggingFace (automatic) — RPINE, FSCD-147, FSCD-LVIS
+
+These live on ungated HF dataset repos, so `pixi run fetch-datasets` downloads them anonymously (via
+`huggingface_hub`, with the Xet backend disabled) and **normalizes-in-fetch**: it reshapes the real HF
+layout into the tree each existing converter already expects and runs the converter unchanged. Verified
+against the real data (counts match the canonical datasets):
+
+| Dataset | HF repo (dataset) | Real layout | Verified counts |
+|---|---|---|---|
+| RPINE | `ChipmunkG4/RPINE` (the TMR authors) | `<split>/images/*.jpg` + `<split>/labels/*.txt` (`x1 y1 x2 y2` px GT) + `<split>/exemplars.json` (queries); splits train/val | 3925 train imgs/labels 1:1; converter emits one sidecar/image |
+| FSCD-147 | `ChipmunkG4/FSCD-147_FSCD-LVIS_temp` → `FSCD_147.zip` | self-contained: `FSC147/images_384_VarV2/*.jpg` + COCO `instances_{val,test}.json` (xywh boxes) + `annotation_FSC147_384.json` (exemplars) | **1286 val + 1190 test** sidecars — exact canonical match |
+| FSCD-LVIS | same repo → `FSCD_LVIS.zip` (6.3 GB) | same authors, COCO-style; wired by analogy | **UNVERIFIED** pending download |
+
+Notes:
+- **FSC-147 needs no separate entry** — its images are bundled inside `FSCD_147.zip`.
+- **RPINE ships real query exemplars** (`exemplars.json`); the converter currently samples exemplars
+  from GT — wiring the real exemplars through is a documented follow-up.
+- **Rate-limiting / token.** Anonymous HF downloads are IP-rate-limited (429). For the large pulls
+  (FSCD-LVIS, all of RPINE) set an `HF_TOKEN` in the environment (`huggingface-cli login`, or export
+  `HF_TOKEN`) before `pixi run fetch-datasets`; `_hf_download` honours it and degrades gracefully
+  (logs + returns `None`, never crashes the sweep) when a download fails.
+
+### Manual (licence-gated drop) — CARPK, PUCPR+
+
+CARPK/PUCPR+ have **no clean HuggingFace source** (the one CARPK repo is a third-party private Kaggle
+re-mirror in COCO format whose own notice asks it not be reused). They stay `requires_manual`: accept
+the licence, obtain the archive yourself, and drop it (or an extracted `Images/` + `Annotations/` tree)
+at `datasets/_incoming/<carpk|pucpr_plus>/`, then re-run `pixi run fetch-datasets`. Routes:
+- **Kaggle** — `kambojharyana/carpk-coco` (or the original CARPK upload), with your own Kaggle account
+  and after accepting the dataset's terms. Note it is COCO-reformatted, not the native `Annotations/`
+  + `Images/` layout the converter reads.
+- **Official** — the NTU CARPK/PUCPR+ terms-of-use page linked from https://lafi.github.io/LPN/ (request
+  form). This is the native format the converter expects.

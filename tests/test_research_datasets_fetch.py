@@ -12,7 +12,9 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+import huggingface_hub
 import pytest
+from PIL import Image
 from typer.testing import CliRunner
 
 from object_search.cli import app
@@ -114,17 +116,12 @@ def test_fetch_missing_archive_is_graceful(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("key", "drop_mode"),
     [
-        # Both a zipped drop and an already-extracted-tree drop, spread across all four native
-        # layouts (FSC's annotations.json marker, RPINE's annotations/ dir marker, CARPK's
-        # Annotations/ marker), plus one single-wrapping-dir zip to exercise the marker descent.
+        # CARPK is the manual (licence-gated) ``_incoming`` path: a plain zip, a single-wrapping-dir
+        # zip (exercising the raw-marker descent), and an already-extracted tree. The HF datasets
+        # (rpine/fscd147/fscd_lvis) take the download+normalize path, covered separately below.
+        ("carpk", "zip"),
         ("carpk", "wrapped-zip"),
-        ("fscd147", "zip"),
-        ("fscd147", "tree"),
-        ("fscd_lvis", "zip"),
-        ("fscd_lvis", "tree"),
-        ("rpine", "zip"),
-        ("rpine", "tree"),
-        ("rpine", "wrapped-zip"),
+        ("carpk", "tree"),
     ],
 )
 def test_fetch_resolves_each_dataset_from_incoming(
@@ -169,10 +166,10 @@ def test_fetch_resolves_each_dataset_from_incoming(
         assert entry["license"] == spec.license
 
 
-def test_fetch_missing_archive_is_graceful_for_fscd(tmp_path: Path) -> None:
+def test_fetch_missing_archive_is_graceful_for_pucpr(tmp_path: Path) -> None:
     # A licence-gated dataset with nothing dropped logs the drop instruction and returns None
-    # (T-11-05) -- not just CARPK; the graceful-absence path is generalized to every dataset.
-    spec = datasets.DATASET_REGISTRY["fscd147"]
+    # (T-11-05) -- not just CARPK; the graceful-absence path is generalized to every manual dataset.
+    spec = datasets.DATASET_REGISTRY["pucpr_plus"]
     assert datasets.fetch(spec, root=tmp_path) is None
     assert not (datasets.datasets_dir(tmp_path) / "provenance.json").is_file()
 
@@ -234,3 +231,246 @@ def test_fetch_datasets_unknown_key_errors() -> None:
     result = CliRunner().invoke(app, ["fetch-datasets", "--only", "nope"])
     assert result.exit_code == 1
     assert "unknown dataset" in result.output
+
+
+# ------------------------------------------------------------------ HuggingFace normalize-in-fetch
+# The three research datasets (rpine/fscd147/fscd_lvis) download the real HF layout and reshape it
+# into the layout each EXISTING converter already expects. These tests build tiny HF-shaped fixtures
+# and monkeypatch huggingface_hub's downloaders so NO network is touched, then assert the full
+# download -> normalize -> convert -> provenance path.
+
+
+def _fake_hf_hub_download(zip_path: Path, sha: str = "deadbeef1234"):  # noqa: ANN202
+    """A stand-in for ``hf_hub_download`` that returns ``zip_path`` from a snapshots-shaped cache
+    dir (so the resolved-revision extraction has a commit sha to find)."""
+
+    def _download(repo_id, filename, repo_type=None, token=None, **_kwargs):  # noqa: ANN202, ANN003
+        snapshot = zip_path.parent / "snapshots" / sha
+        snapshot.mkdir(parents=True, exist_ok=True)
+        target = snapshot / filename
+        target.write_bytes(zip_path.read_bytes())
+        return str(target)
+
+    return _download
+
+
+def _fake_snapshot_download(src_tree: Path):  # noqa: ANN202
+    """Stand-in for ``snapshot_download`` copying ``src_tree`` into the requested local dir."""
+
+    def _download(  # noqa: ANN202
+        repo_id, repo_type=None, local_dir=None, max_workers=None, token=None, **_kw: object
+    ):
+        _copy_tree(src_tree, Path(local_dir))
+        return str(local_dir)
+
+    return _download
+
+
+def _poly(x: int, y: int, w: int, h: int) -> list[list[int]]:
+    """A 4-corner exemplar polygon (the FSC-147 ``box_examples_coordinates`` shape)."""
+    return [[x, y], [x, y + h], [x + w, y + h], [x + w, y]]
+
+
+def _build_fscd147_hf_zip(dest_zip: Path, work: Path) -> None:
+    """Build a tiny FSCD-147 HF-shaped archive: FSC147/{annotations,images_384_VarV2}."""
+    root = work / "fscd147_src"
+    ann = root / "FSC147" / "annotations"
+    imgs = root / "FSC147" / "images_384_VarV2"
+    ann.mkdir(parents=True)
+    imgs.mkdir(parents=True)
+    for name in ("v1.jpg", "t1.jpg"):
+        Image.new("RGB", (40, 40), (120, 120, 120)).save(imgs / name)
+
+    def _coco(file_name: str, boxes_xywh: list[list[int]]) -> dict:
+        return {
+            "images": [{"file_name": file_name, "id": 1, "height": 40, "width": 40}],
+            "type": "instances",
+            "annotations": [
+                {"bbox": b, "image_id": 1, "category_id": 1, "id": i + 1, "iscrowd": 0}
+                for i, b in enumerate(boxes_xywh)
+            ],
+            "categories": [{"supercategory": "none", "id": 1, "name": "fg"}],
+        }
+
+    (ann / "instances_val.json").write_text(
+        json.dumps(_coco("v1.jpg", [[2, 2, 8, 8], [14, 2, 8, 8]]))
+    )
+    (ann / "instances_test.json").write_text(json.dumps(_coco("t1.jpg", [[2, 2, 10, 10]])))
+    a384 = {
+        # 4 exemplars for v1 exercises the normalizer's cap-to-3 (the canonical 3-shot protocol).
+        "v1.jpg": {
+            "box_examples_coordinates": [
+                _poly(2, 2, 6, 6),
+                _poly(14, 2, 6, 6),
+                _poly(2, 2, 6, 6),
+                _poly(14, 2, 6, 6),
+            ],
+            "points": [[3, 3]],
+        },
+        "t1.jpg": {
+            "box_examples_coordinates": [_poly(2, 2, 8, 8), _poly(2, 2, 8, 8), _poly(2, 2, 8, 8)],
+            "points": [],
+        },
+    }
+    (ann / "annotation_FSC147_384.json").write_text(json.dumps(a384))
+    (ann / "Train_Test_Val_FSC_147.json").write_text(
+        json.dumps({"train": [], "val": ["v1.jpg"], "test": ["t1.jpg"]})
+    )
+    _zip_tree(root, dest_zip)
+
+
+def _build_rpine_hf_tree(dest: Path) -> None:
+    """Build a tiny RPINE HF repo tree: <split>/{images/<id>.jpg,labels/<id>.txt,exemplars.json}."""
+    for split, stems in (("train", ("a", "b")), ("val", ("c",))):
+        (dest / split / "images").mkdir(parents=True)
+        (dest / split / "labels").mkdir(parents=True)
+        exemplars: dict[str, list[list[int]]] = {}
+        for stem in stems:
+            Image.new("RGB", (40, 40)).save(dest / split / "images" / f"{stem}.jpg")
+            (dest / split / "labels" / f"{stem}.txt").write_text("2 2 12 12\n14 2 24 12\n")
+            exemplars[stem] = [[2, 2, 12, 12]]
+        (dest / split / "exemplars.json").write_text(json.dumps(exemplars))
+
+
+def test_fetch_fscd147_via_huggingface(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    zip_path = tmp_path / "src" / "FSCD_147.zip"
+    zip_path.parent.mkdir(parents=True)
+    _build_fscd147_hf_zip(zip_path, tmp_path)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_hub_download(zip_path))
+
+    spec = datasets.DATASET_REGISTRY["fscd147"]
+    work = tmp_path / "work"
+    out = datasets.fetch(spec, root=work)
+    assert out is not None
+
+    for split, expected in (("val", 1), ("test", 1)):
+        sidecars = sorted((datasets.datasets_dir(work) / "fscd147" / split).glob("*.gt.json"))
+        assert len(sidecars) == expected, f"{split} should hold its OWN sidecars"
+        for sidecar in sidecars:
+            gt = load_research_ground_truth(sidecar)
+            assert gt is not None and gt.source == "research" and gt.boxes
+
+    manifest = json.loads((datasets.datasets_dir(work) / "provenance.json").read_text())
+    block = manifest["datasets"]["fscd147"]
+    assert block["hf_repo"] == spec.hf_repo_id
+    assert block["hf_revision"] == "deadbeef1234"
+    assert len(block["files"]) == 2  # one per converted image (v1 + t1)
+    for entry in block["files"]:
+        assert entry["sha256"]
+        assert entry["source_url"] == spec.source_url
+        assert entry["license"] == spec.license
+
+
+def test_fetch_rpine_via_huggingface_maps_val_to_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "rpine_src"
+    _build_rpine_hf_tree(src)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _fake_snapshot_download(src))
+
+    spec = datasets.DATASET_REGISTRY["rpine"]
+    work = tmp_path / "work"
+    out = datasets.fetch(spec, root=work)
+    assert out is not None
+
+    train = datasets.datasets_dir(work) / "rpine" / "train"
+    test = datasets.datasets_dir(work) / "rpine" / "test"  # HF val -> our test
+    assert len(list(train.glob("*.gt.json"))) == 2  # HF train
+    assert len(list(test.glob("*.gt.json"))) == 1  # HF val
+    assert list(train.glob("*.png")), "convert_rpine co-locates the scene beside the sidecar"
+    # The jpg source was accepted (the one allowed converter change) and loads back as research GT.
+    gt = load_research_ground_truth(sorted(train.glob("*.gt.json"))[0])
+    assert gt is not None and gt.source == "research" and gt.boxes
+
+    manifest = json.loads((datasets.datasets_dir(work) / "provenance.json").read_text())
+    assert manifest["datasets"]["rpine"]["hf_repo"] == spec.hf_repo_id
+
+
+def test_fetch_fscd_lvis_via_huggingface_happy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FSCD-LVIS is wired BY ANALOGY: the normalizer locates the converter's annotations.json marker
+    # inside the zip and runs convert_fscd_lvis unchanged. Exercised with the fixture tree.
+    zip_path = tmp_path / "src" / "FSCD_LVIS.zip"
+    zip_path.parent.mkdir(parents=True)
+    _zip_tree(_fixture_root("fscd_lvis"), zip_path)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_hub_download(zip_path))
+
+    spec = datasets.DATASET_REGISTRY["fscd_lvis"]
+    work = tmp_path / "work"
+    out = datasets.fetch(spec, root=work)
+    assert out is not None
+    sidecars = sorted((datasets.datasets_dir(work) / "fscd_lvis" / "test").glob("*.gt.json"))
+    assert sidecars
+    for sidecar in sidecars:
+        gt = load_research_ground_truth(sidecar)
+        assert gt is not None and gt.source == "research" and gt.boxes
+
+
+def test_fetch_fscd_lvis_unverified_structure_degrades_gracefully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real FSCD_LVIS.zip layout is UNVERIFIED; if the marker is absent the fetch returns None
+    # (never crashes the sweep) and writes no provenance -- exactly like a missing manual archive.
+    zip_path = tmp_path / "src" / "FSCD_LVIS.zip"
+    zip_path.parent.mkdir(parents=True)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("some_other_layout/readme.txt", "unknown internal structure")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_hub_download(zip_path))
+
+    spec = datasets.DATASET_REGISTRY["fscd_lvis"]
+    work = tmp_path / "work"
+    assert datasets.fetch(spec, root=work) is None
+    assert not (datasets.datasets_dir(work) / "provenance.json").is_file()
+
+
+def test_fetch_huggingface_download_failure_is_graceful(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A rate-limited / failed download degrades to None with an actionable log, no provenance
+    # (T-11-05). Backoff sleeps are stubbed so the bounded retry does not slow the suite.
+    def _boom(*_args, **_kwargs):  # noqa: ANN002,ANN003,ANN202
+        raise RuntimeError("429 Client Error: Too Many Requests")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _boom)
+    monkeypatch.setattr(datasets.time, "sleep", lambda _s: None)
+
+    spec = datasets.DATASET_REGISTRY["fscd147"]
+    work = tmp_path / "work"
+    assert datasets.fetch(spec, root=work) is None
+    assert not (datasets.datasets_dir(work) / "provenance.json").is_file()
+
+
+def test_hf_retry_backs_off_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr(datasets.time, "sleep", lambda seconds: slept.append(seconds))
+    calls = {"n": 0}
+
+    def _call() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("transient")
+        return "ok"
+
+    assert datasets._hf_retry(_call) == "ok"
+    assert calls["n"] == 3
+    assert len(slept) == 2  # two backoffs before the third, successful attempt
+
+
+def test_hf_retry_non_retriable_raises_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _sleep(_seconds: float) -> None:
+        raise AssertionError("non-retriable errors must not back off")
+
+    monkeypatch.setattr(datasets.time, "sleep", _sleep)
+
+    def _call() -> str:
+        raise ValueError("permanent")
+
+    with pytest.raises(ValueError, match="permanent"):
+        datasets._hf_retry(_call)
+
+
+def test_revision_from_cache_path() -> None:
+    cache = Path("/c/models--x/snapshots/abc123/f.zip")
+    assert datasets._revision_from_cache_path(cache) == "abc123"
+    assert datasets._revision_from_cache_path(Path("/c/local_dir/f.zip")) is None

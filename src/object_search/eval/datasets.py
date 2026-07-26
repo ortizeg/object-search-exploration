@@ -16,12 +16,16 @@ Two threats shape this module (see the plan's threat register):
   archive is licence-gated and human-supplied, so it is unpinned (``None``): its bytes are
   *recorded* in provenance rather than gated, exactly as the unpinned FastSAM export is.
 
-Every dataset here is ``requires_manual``: each sits behind a terms-of-use gate with no
-unauthenticated direct-download URL, so ``fetch`` never reaches the network for any of them. A
-human accepts the licence and drops the archive (or an already-extracted tree) at
-``datasets/_incoming/<subdir>/``; when it is absent ``fetch`` logs that instruction and returns
-``None`` **without crashing the sweep** (T-11-05, mirroring ``models._export``), so one missing
-dataset degrades only itself and the rest of a multi-dataset sweep proceeds.
+Datasets come in two kinds. **Manual** datasets (CARPK/PUCPR+) sit behind a terms-of-use gate with
+no unauthenticated direct-download URL, so ``fetch`` never reaches the network: a human accepts the
+licence and drops the archive (or an already-extracted tree) at ``datasets/_incoming/<subdir>/``.
+**HuggingFace** datasets (RPINE/FSCD-147/FSCD-LVIS) live on an ungated HF mirror; ``fetch``
+downloads the real HF layout anonymously (honouring ``HF_TOKEN`` when set -- anonymous downloads are
+IP-rate-limited), then **normalizes-in-fetch**: it reshapes that layout into the exact tree each
+EXISTING converter expects and runs the converter unchanged (the ``normalize_*`` functions). Either
+way, when the data is absent (missing drop, rate-limited download) ``fetch`` logs an actionable
+message and returns ``None`` **without crashing the sweep** (T-11-05, mirroring ``models._export``),
+so one missing dataset degrades only itself and the rest of a multi-dataset sweep proceeds.
 
 The raw layouts differ per dataset (``Annotations/`` + ``Images/`` for CARPK/PUCPR+;
 ``annotations.json`` + ``images/`` + ``split.json`` for FSCD-147/FSCD-LVIS; ``annotations/`` +
@@ -36,13 +40,17 @@ images each converter actually consumed.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import time
 import zipfile
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from loguru import logger
+from PIL import Image
 from pydantic import BaseModel, ConfigDict
 
 from object_search import provenance
@@ -53,9 +61,10 @@ from object_search.eval.converters import (
     convert_rpine,
 )
 
-# Only manual (licence-gated) sources exist this phase. A future direct-download dataset extends
-# this Literal in its own plan; keeping it to what is exercised avoids a dead fetch branch.
-DatasetSource = Literal["manual-download"]
+# Two source kinds this phase: ``manual-download`` (licence-gated, human drops the archive at
+# ``_incoming/``) and ``huggingface`` (an ungated HF repo pulled anonymously, then reshaped into the
+# layout each existing converter already expects -- see the ``normalize_*`` functions below).
+DatasetSource = Literal["manual-download", "huggingface"]
 
 # Converter dispatch by dataset key -- the one place the dataset->converter mapping lives. Each
 # converter has the same public shape ``(raw_root, out_root) -> list[Path]`` (FSCD-LVIS's protocol
@@ -105,6 +114,12 @@ class DatasetSpec(BaseModel):
     # Pinned SHA-256 of the raw archive when one is known; ``None`` for licence-gated,
     # human-supplied archives whose bytes are recorded (not gated) in provenance.
     archive_sha256: str | None
+    # HuggingFace source coordinates, set only when ``source == "huggingface"`` (``None`` for the
+    # manual datasets so ``extra="forbid"`` stays valid on every spec). ``hf_repo_id`` is the HF
+    # repo (a *dataset* repo); ``hf_files`` names the specific files to pull (the one zip) or is
+    # ``None`` to snapshot the whole repo.
+    hf_repo_id: str | None
+    hf_files: tuple[str, ...] | None
     added_in_phase: int
 
 
@@ -128,6 +143,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         raw_marker="Annotations",
         images_subdir="Images",
         archive_sha256=None,
+        hf_repo_id=None,
+        hf_files=None,
         added_in_phase=11,
     ),
     # PUCPR+ -- CARPK's sibling (same author release, same native format): ~16k cars, fixed slanted
@@ -148,6 +165,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         raw_marker="Annotations",
         images_subdir="Images",
         archive_sha256=None,
+        hf_repo_id=None,
+        hf_files=None,
         added_in_phase=11,
     ),
     # FSCD-147 -- box-annotated FSC-147 (val/test human boxes, train pseudo). Native train/val/test
@@ -155,60 +174,71 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
     # Category diversity + leaderboard comparability (D-01). Licence-gated (VinAI/Counting-DETR).
     "fscd147": DatasetSpec(
         key="fscd147",
-        source="manual-download",
-        source_url="https://research.vinai.io/few-shot-object-counting-and-detection/",
+        source="huggingface",
+        source_url="https://huggingface.co/datasets/ChipmunkG4/FSCD-147_FSCD-LVIS_temp",
         license="FSC-147 / FSCD-147 research licence (VinAI / Counting-DETR terms)",
         license_note=(
             "FSC-147 images + FSCD-147 boxes are distributed under the VinAI / Counting-DETR "
-            "(ECCV'22, https://github.com/VinAIResearch/Counting-DETR) research terms; a human "
-            "accepts them and supplies the archive. De-duplicated on load per arXiv:2409.15953."
+            "(ECCV'22, https://github.com/VinAIResearch/Counting-DETR) research terms. The "
+            "ungated HF mirror ChipmunkG4/FSCD-147_FSCD-LVIS_temp is pulled anonymously, reshaped "
+            "into the converter layout, and de-duplicated on load per arXiv:2409.15953."
         ),
-        requires_manual=True,
+        requires_manual=False,
         incoming_subdir="fscd147",
         default_split="test",
         raw_marker="annotations.json",
         images_subdir="images",
         archive_sha256=None,
+        hf_repo_id="ChipmunkG4/FSCD-147_FSCD-LVIS_temp",
+        hf_files=("FSCD_147.zip",),
         added_in_phase=11,
     ),
     # FSCD-LVIS (unseen split) -- multi-class crowded scenes, 377 LVIS classes; the only
     # distractor-rejection stress (D-01). No official val -> seeded carve from train (D-03).
     "fscd_lvis": DatasetSpec(
         key="fscd_lvis",
-        source="manual-download",
-        source_url="https://github.com/VinAIResearch/Counting-DETR",
+        source="huggingface",
+        source_url="https://huggingface.co/datasets/ChipmunkG4/FSCD-147_FSCD-LVIS_temp",
         license="FSCD-LVIS research licence (VinAI / Counting-DETR terms)",
         license_note=(
-            "FSCD-LVIS is distributed under the VinAI / Counting-DETR research terms; a human "
-            "accepts them and supplies the archive. Use the UNSEEN protocol (no official val) for "
-            "the headline number; a seeded val is carved from train (D-01/D-03)."
+            "FSCD-LVIS is distributed under the VinAI / Counting-DETR research terms. The ungated "
+            "HF mirror ChipmunkG4/FSCD-147_FSCD-LVIS_temp ships FSCD_LVIS.zip (6.3GB). UNVERIFIED: "
+            "the zip's internal layout has not been confirmed (anonymous download is IP-blocked at "
+            "that size); the normalizer wires it BY ANALOGY to FSCD-147 and degrades gracefully "
+            "(logs + returns None) if the zip is absent or its structure differs -- see "
+            "`normalize_fscd_lvis`. Use the UNSEEN protocol; a seeded val is carved (D-01/D-03)."
         ),
-        requires_manual=True,
+        requires_manual=False,
         incoming_subdir="fscd_lvis",
         default_split="test",
         raw_marker="annotations.json",
         images_subdir="images",
         archive_sha256=None,
+        hf_repo_id="ChipmunkG4/FSCD-147_FSCD-LVIS_temp",
+        hf_files=("FSCD_LVIS.zip",),
         added_in_phase=11,
     ),
     # RPINE -- the closest match to this project's task: every repetition in a single image is
     # box-annotated, box exemplars (D-01). No official val -> seeded carve from train (D-03).
     "rpine": DatasetSpec(
         key="rpine",
-        source="manual-download",
-        source_url="https://chipmunk-g4.github.io/TMR/",
+        source="huggingface",
+        source_url="https://huggingface.co/datasets/ChipmunkG4/RPINE",
         license="RPINE research licence (TMR project terms)",
         license_note=(
             "RPINE ('Repeated Patterns IN Everywhere', https://arxiv.org/html/2508.17636) is "
-            "distributed under the TMR project terms; a human accepts them and supplies the "
-            "archive. No official val -> a seeded val is carved from train (D-03)."
+            "distributed under the TMR project terms. The ungated HF repo ChipmunkG4/RPINE is "
+            "pulled anonymously (whole repo); its HF train -> our train and HF val (the 435-image "
+            "eval set) -> our test (see `normalize_rpine`)."
         ),
-        requires_manual=True,
+        requires_manual=False,
         incoming_subdir="rpine",
         default_split="test",
         raw_marker="annotations",
         images_subdir="images",
         archive_sha256=None,
+        hf_repo_id="ChipmunkG4/RPINE",
+        hf_files=None,
         added_in_phase=11,
     ),
 }
@@ -276,13 +306,442 @@ def _resolve_raw_root(
     return None, None
 
 
-def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -> Path | None:
-    """Convert one research dataset from its ``_incoming`` drop into ``datasets/<key>/<split>/``.
+# =============================================================================================
+# HuggingFace path: download the real HF layout, reshape it into the layout each EXISTING
+# converter already expects ("normalize-in-fetch"), then run that converter UNCHANGED. The
+# converters' box-parsing logic is never touched here -- a normalizer only moves/renames files and
+# rebuilds the small index files (``annotations.json`` / ``split.json``) the converter reads.
+# =============================================================================================
 
-    For a ``requires_manual`` dataset this never touches the network: it reads the human-supplied
-    archive (or extracted tree) from ``datasets/_incoming/<subdir>/``. When nothing is there it logs
-    the exact drop path and returns ``None`` rather than raising, so a missing licence-gated dataset
-    degrades that dataset to "skipped" instead of aborting a multi-dataset sweep (T-11-05).
+_HF_RETRY_ATTEMPTS = 3
+_HF_RETRY_BASE_SECONDS = 2.0
+
+# HF split name -> our split name. RPINE's HF ``val`` (the 435-image eval set) is our frozen test
+# surface; its HF ``train`` is our train. FSCD-147 keeps ``val``/``test`` as-is.
+_RPINE_SPLIT_MAP: Mapping[str, str] = {"train": "train", "val": "test"}
+
+
+def _rpine_label_is_convertible(label_path: Path) -> bool:
+    """Whether an RPINE label file holds only boxes ``convert_rpine`` will accept.
+
+    The HF RPINE labels contain a small number of malformed/degenerate annotations (e.g. a
+    zero-width box). ``convert_rpine`` is strict and raises on the first one, which would abort the
+    whole dataset. The normalizer instead SKIPS such an image (honest coverage -- absence, never a
+    fabricated box), mirroring how the FSCD converters drop images they cannot represent. This only
+    *screens* whole label files; it never edits a box or re-parses the converter's own logic.
+    """
+    for line in label_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if len(parts) < 4:
+            return False
+        try:
+            x1, y1, x2, y2 = (int(parts[i]) for i in range(4))
+        except ValueError:
+            return False
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            return False
+    return True
+
+
+class NormalizedDataset(NamedTuple):
+    """What a ``normalize_*`` function produced: per-split output dirs, all sidecars, and the source
+    image behind each converted sidecar (so provenance hashes exactly the bytes each converter
+    consumed, across however many split dirs were written)."""
+
+    splits: dict[str, Path]
+    sidecars: list[Path]
+    image_sources: dict[str, Path]
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hard-link ``src`` to ``dst`` (cheap, no byte duplication), falling back to a copy across
+    filesystems or when a link already exists."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)
+
+
+def _find_path(root: Path, name: str) -> Path | None:
+    """First path named ``name`` at/under ``root``, ignoring hidden dirs like ``.cache``."""
+    if (root / name).exists():
+        return root / name
+    return next(
+        (
+            p
+            for p in sorted(root.rglob(name))
+            if not any(part.startswith(".") for part in p.relative_to(root).parts)
+        ),
+        None,
+    )
+
+
+def _image_sources_from_sidecars(sidecars: list[Path], images_dir: Path) -> dict[str, str]:
+    """Map each produced sidecar's image id to its normalized source image (png or jpg)."""
+    sources: dict[str, str] = {}
+    for sidecar in sidecars:
+        image_id = sidecar.name[: -len(".gt.json")]
+        for ext in (".png", ".jpg", ".jpeg"):
+            candidate = images_dir / f"{image_id}{ext}"
+            if candidate.is_file():
+                sources[image_id] = str(candidate)
+                break
+    return sources
+
+
+def normalize_rpine(hf_dir: Path, dataset_dir: Path) -> NormalizedDataset:
+    """Reshape the HF ``ChipmunkG4/RPINE`` layout into ``convert_rpine``'s expected raw tree.
+
+    HF layout: ``<split>/images/<id>.jpg`` + ``<split>/labels/<id>.txt`` (GT: one ``x1 y1 x2 y2``
+    pixel box per line, which ALREADY matches ``convert_rpine``'s ``annotations/<id>.txt``) +
+    ``<split>/exemplars.json``. HF ``train`` -> our ``train``; HF ``val`` -> our ``test``
+    (:data:`_RPINE_SPLIT_MAP`). Per split it builds ``annotations/`` (the labels) + ``images/`` (the
+    jpgs) and runs ``convert_rpine`` UNCHANGED into ``datasets/rpine/<our_split>/``.
+
+    TODO: RPINE ships real query exemplars in ``exemplars.json``; ``convert_rpine`` currently
+    SAMPLES exemplars from the GT boxes (seeded). Wiring the real ones through is a follow-up --
+    kept as GT-sampling for now so the converter stays unchanged.
+    """
+    # Locate the split root: the dir directly holding ``train/`` and/or ``val/`` split subtrees.
+    # Check ``hf_dir`` itself first, then its non-hidden children (a single-wrapping-dir repo),
+    # ignoring HF's ``.cache`` scaffolding.
+    candidates = [
+        hf_dir,
+        *(p for p in sorted(hf_dir.iterdir()) if p.is_dir() and not p.name.startswith(".")),
+    ]
+    root = next(
+        (
+            candidate
+            for candidate in candidates
+            if any((candidate / hf_split / "labels").is_dir() for hf_split in _RPINE_SPLIT_MAP)
+        ),
+        hf_dir,
+    )
+    splits: dict[str, Path] = {}
+    sidecars: list[Path] = []
+    image_sources: dict[str, Path] = {}
+    for hf_split, our_split in _RPINE_SPLIT_MAP.items():
+        labels_dir = root / hf_split / "labels"
+        images_dir = root / hf_split / "images"
+        if not labels_dir.is_dir():
+            logger.info("RPINE: HF split {!r} absent under {}, skipping", hf_split, root)
+            continue
+        raw = dataset_dir / "_raw" / our_split
+        (raw / "annotations").mkdir(parents=True, exist_ok=True)
+        (raw / "images").mkdir(parents=True, exist_ok=True)
+        skipped = 0
+        for label in sorted(labels_dir.glob("*.txt")):
+            if not _rpine_label_is_convertible(label):
+                logger.warning(
+                    "RPINE: {} has a malformed/degenerate box, skipping image", label.stem
+                )
+                skipped += 1
+                continue
+            _link_or_copy(label, raw / "annotations" / label.name)
+            for ext in (".jpg", ".jpeg", ".png"):
+                image = images_dir / f"{label.stem}{ext}"
+                if image.is_file():
+                    _link_or_copy(image, raw / "images" / image.name)
+                    break
+        if skipped:
+            logger.info(
+                "RPINE: skipped {} image(s) with malformed labels in HF {!r}", skipped, hf_split
+            )
+        out = dataset_dir / our_split
+        written = convert_rpine(raw, out)
+        splits[our_split] = out
+        sidecars.extend(written)
+        for image_id, src in _image_sources_from_sidecars(written, raw / "images").items():
+            image_sources[image_id] = Path(src)
+    return NormalizedDataset(splits=splits, sidecars=sorted(sidecars), image_sources=image_sources)
+
+
+# FSCD-147: the standard 3-shot protocol uses three exemplar boxes; a handful of images in the HF
+# annotation file carry 4-5. The unchanged ``convert_fscd147`` requires exactly three, so the
+# normalizer caps to the canonical first three (a NORMALIZER choice; the converter is untouched).
+_FSCD147_EXEMPLARS = 3
+
+
+def _build_fscd147_annotations(
+    ann_dir: Path,
+) -> tuple[dict[str, dict[str, object]], dict[str, list[str]]]:
+    """Build ``convert_fscd147``'s merged ``annotations.json`` + ``split.json`` from the FSC-147
+    native files (two COCO instance files + the per-image exemplar/point file + the split file).
+
+    COCO ``bbox`` is XYWH; it is converted to the ``[x1, y1, x2, y2]`` (x2/y2 exclusive) the
+    converter's ``_xyxy_to_bbox`` expects -- the ONE numeric reshape, and it is a coordinate
+    translation, not a re-parse of the converter's own logic.
+    """
+    a384 = json.loads((ann_dir / "annotation_FSC147_384.json").read_text(encoding="utf-8"))
+    merged: dict[str, dict[str, object]] = {}
+    for coco_file in ("instances_val.json", "instances_test.json"):
+        coco = json.loads((ann_dir / coco_file).read_text(encoding="utf-8"))
+        id_to_stem = {img["id"]: Path(img["file_name"]).stem for img in coco["images"]}
+        boxes_by_stem: dict[str, list[list[int]]] = {}
+        for ann in coco["annotations"]:
+            stem = id_to_stem[ann["image_id"]]
+            x, y, w, h = (int(v) for v in ann["bbox"])
+            # COCO permits out-of-image (negative) box corners; the repo's BBox requires x,y >= 0,
+            # so clamp the lower corner to the image origin here (a coordinate reshape at the source
+            # boundary, not a change to the converter). x2/y2 keep the box extent.
+            x1, y1, x2, y2 = max(0, x), max(0, y), x + w, y + h
+            if x2 - x1 < 1 or y2 - y1 < 1:
+                # A box that is degenerate even after clamping is annotation noise; drop it (honest
+                # coverage) rather than let the strict converter abort the whole split.
+                continue
+            boxes_by_stem.setdefault(stem, []).append([x1, y1, x2, y2])
+        for stem, boxes in boxes_by_stem.items():
+            exemplar_entry = a384.get(f"{stem}.jpg")
+            if exemplar_entry is None:
+                continue
+            merged[stem] = {
+                "boxes": boxes,
+                # Cap 4-5-exemplar images to the canonical three (see _FSCD147_EXEMPLARS).
+                "box_examples_coordinates": exemplar_entry["box_examples_coordinates"][
+                    :_FSCD147_EXEMPLARS
+                ],
+                "points": exemplar_entry.get("points", []),
+            }
+    tt = json.loads((ann_dir / "Train_Test_Val_FSC_147.json").read_text(encoding="utf-8"))
+    split = {name: [Path(f).stem for f in tt.get(name, [])] for name in ("train", "val", "test")}
+    return merged, split
+
+
+def normalize_fscd147(hf_dir: Path, dataset_dir: Path) -> NormalizedDataset:
+    """Reshape the unzipped FSCD-147 HF layout into ``convert_fscd147``'s expected raw tree.
+
+    HF layout (after unzip): ``FSC147/images_384_VarV2/<id>.jpg`` +
+    ``FSC147/annotations/{instances_val,instances_test,annotation_FSC147_384,Train_Test_Val_FSC_147}
+    .json``. The normalizer builds the merged ``annotations.json`` + ``split.json`` the converter
+    reads (:func:`_build_fscd147_annotations`), re-encodes the val/test jpgs to the ``<id>.png`` the
+    converter copies, and runs ``convert_fscd147`` UNCHANGED once per scored split so
+    ``datasets/fscd147/val/`` and ``datasets/fscd147/test/`` each hold their own sidecars.
+
+    Only val/test are converted (their boxes are human; train boxes are pseudo, skipped by the
+    converter). The converter's own de-dup of the 11 train<->test leaks + pixel-dups is unaffected;
+    val/test have zero id overlap, so the leaks (train-side) never reach these two dirs.
+    """
+    instances = _find_path(hf_dir, "instances_val.json")
+    images_src = _find_path(hf_dir, "images_384_VarV2")
+    if instances is None or images_src is None:
+        logger.warning(
+            "fscd147: could not locate FSC-147 annotations/images under {} (looked for "
+            "instances_val.json + images_384_VarV2); the HF zip layout may have changed.",
+            hf_dir,
+        )
+        return NormalizedDataset(splits={}, sidecars=[], image_sources={})
+    ann_dir = instances.parent
+    merged, split = _build_fscd147_annotations(ann_dir)
+
+    raw = dataset_dir / "_raw"
+    raw_images = raw / "images"
+    raw_images.mkdir(parents=True, exist_ok=True)
+    (raw / "annotations.json").write_text(json.dumps(merged), encoding="utf-8")
+
+    # Re-encode each scored jpg to the <id>.png the converter reads (real PNG, dims preserved).
+    scored = sorted(set(split["val"]) | set(split["test"]))
+    for stem in scored:
+        if stem not in merged:
+            continue
+        source_jpg = images_src / f"{stem}.jpg"
+        target_png = raw_images / f"{stem}.png"
+        if source_jpg.is_file() and not target_png.is_file():
+            with Image.open(source_jpg) as image:
+                image.convert("RGB").save(target_png)
+
+    splits: dict[str, Path] = {}
+    sidecars: list[Path] = []
+    image_sources: dict[str, Path] = {}
+    for our_split in ("val", "test"):
+        # One split.json per call so the converter emits that split's ids into its OWN dir.
+        per_split = {"train": [], "val": [], "test": [], our_split: split[our_split]}
+        (raw / "split.json").write_text(json.dumps(per_split), encoding="utf-8")
+        out = dataset_dir / our_split
+        written = convert_fscd147(raw, out)
+        splits[our_split] = out
+        sidecars.extend(written)
+        for image_id, src in _image_sources_from_sidecars(written, raw_images).items():
+            image_sources[image_id] = Path(src)
+    return NormalizedDataset(splits=splits, sidecars=sorted(sidecars), image_sources=image_sources)
+
+
+def normalize_fscd_lvis(hf_dir: Path, dataset_dir: Path) -> NormalizedDataset:
+    """Reshape the unzipped FSCD-LVIS HF layout into ``convert_fscd_lvis``'s expected raw tree.
+
+    UNVERIFIED: the FSCD_LVIS.zip (6.3GB) has not been downloaded (anonymous access is IP-blocked at
+    that size), so its exact internal layout is unconfirmed. By ANALOGY to FSCD-147, this looks for
+    the converter's own marker (``annotations.json`` with per-image ``annotations[]`` +
+    ``exemplar_category`` + ``box_examples_coordinates``) plus an ``images/`` dir anywhere in the
+    extracted tree; if found it runs ``convert_fscd_lvis`` UNCHANGED into
+    ``datasets/fscd_lvis/<default_split>/``. If the marker is absent (the real zip differs), it logs
+    that a real normalizer + HF token are needed and returns an empty result so ``fetch`` degrades
+    gracefully -- never crashing the sweep.
+    """
+    marker = _find_path(hf_dir, "annotations.json")
+    if marker is None:
+        logger.warning(
+            "fscd_lvis: no annotations.json under {} -- the FSCD_LVIS.zip internal layout is "
+            "UNVERIFIED and could not be reshaped. A real download (HF_TOKEN) is needed to confirm "
+            "its structure and finish `normalize_fscd_lvis`.",
+            hf_dir,
+        )
+        return NormalizedDataset(splits={}, sidecars=[], image_sources={})
+    raw = marker.parent
+    out = dataset_dir / DATASET_REGISTRY["fscd_lvis"].default_split
+    written = convert_fscd_lvis(raw, out)
+    image_sources = {
+        image_id: Path(src)
+        for image_id, src in _image_sources_from_sidecars(written, raw / "images").items()
+    }
+    return NormalizedDataset(
+        splits={DATASET_REGISTRY["fscd_lvis"].default_split: out},
+        sidecars=sorted(written),
+        image_sources=image_sources,
+    )
+
+
+_NORMALIZERS: Mapping[str, Callable[[Path, Path], NormalizedDataset]] = {
+    "rpine": normalize_rpine,
+    "fscd147": normalize_fscd147,
+    "fscd_lvis": normalize_fscd_lvis,
+}
+
+
+def _revision_from_cache_path(path: Path) -> str | None:
+    """Extract the resolved commit sha from an HF cache path (``.../snapshots/<sha>/...``)."""
+    parts = path.parts
+    if "snapshots" in parts:
+        index = parts.index("snapshots")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return None
+
+
+def _hf_retry(call: Callable[[], str]) -> str:
+    """Call ``call`` with a small bounded exponential backoff on rate-limit (429) / connection
+    errors; other errors propagate immediately."""
+    last: Exception | None = None
+    for attempt in range(_HF_RETRY_ATTEMPTS):
+        try:
+            return call()
+        except Exception as exc:
+            last = exc
+            message = str(exc).lower()
+            retriable = (
+                isinstance(exc, ConnectionError)
+                or "429" in message
+                or "rate limit" in message
+                or "too many requests" in message
+            )
+            if not retriable or attempt == _HF_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_HF_RETRY_BASE_SECONDS * (2**attempt))
+    if last is not None:  # pragma: no cover -- loop returns or raises before here
+        raise last
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _hf_download(spec: DatasetSpec, hf_dir: Path) -> tuple[Path | None, str | None]:
+    """Download ``spec``'s HF repo (or specific files) into ``hf_dir``; extract any zip.
+
+    Anonymous by default (no credentials created); honours ``HF_TOKEN`` from the env if present.
+    Returns ``(hf_dir, revision)`` on success or ``(None, None)`` on any download failure, after
+    logging an actionable message naming the repo and that an ``HF_TOKEN`` may be required
+    (anonymous downloads are IP-rate-limited).
+    """
+    os.environ["HF_HUB_DISABLE_XET"] = "1"  # set BEFORE importing huggingface_hub
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    token = os.environ.get("HF_TOKEN")
+    repo_id = spec.hf_repo_id
+    if repo_id is None:  # a "huggingface" spec always sets it; guard narrows the type for mypy
+        return None, None
+    hf_dir.mkdir(parents=True, exist_ok=True)
+    revision = "main"
+    try:
+        if spec.hf_files:
+            for filename in spec.hf_files:
+
+                def _download_one(fname: str = filename) -> str:
+                    return hf_hub_download(
+                        repo_id=repo_id, filename=fname, repo_type="dataset", token=token
+                    )
+
+                downloaded = _hf_retry(_download_one)
+                revision = _revision_from_cache_path(Path(downloaded)) or revision
+                if filename.lower().endswith(".zip"):
+                    _safe_extract_zip(Path(downloaded), hf_dir)
+                else:
+                    _link_or_copy(Path(downloaded), hf_dir / Path(filename).name)
+        else:
+            local = _hf_retry(
+                lambda: snapshot_download(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    local_dir=str(hf_dir),
+                    max_workers=2,
+                    token=token,
+                )
+            )
+            revision = _revision_from_cache_path(Path(local)) or revision
+    except Exception as exc:
+        logger.warning(
+            "{}: HuggingFace download from {!r} failed ({}). Anonymous downloads are "
+            "IP-rate-limited; set HF_TOKEN in the environment and re-run fetch-datasets.",
+            spec.key,
+            spec.hf_repo_id,
+            exc,
+        )
+        return None, None
+    return hf_dir, revision
+
+
+def _fetch_huggingface(spec: DatasetSpec, out: Path, *, root: Path | None = None) -> Path | None:
+    """The ``source == "huggingface"`` branch of :func:`fetch`: download -> normalize -> convert."""
+    dataset_dir = datasets_dir(root) / spec.key
+    hf_dir, revision = _hf_download(spec, dataset_dir / "_hf")
+    if hf_dir is None:
+        return None
+    result = _NORMALIZERS[spec.key](hf_dir, dataset_dir)
+    if not result.sidecars:
+        logger.warning("{}: normalization produced no sidecars (see warnings above)", spec.key)
+        return None
+    write_provenance_manifest(
+        spec,
+        dataset_dir,
+        result.sidecars,
+        root=root,
+        image_sources=result.image_sources,
+        hf_revision=revision,
+    )
+    logger.info(
+        "{}: converted {} image(s) across split(s) {} from HF {}@{}",
+        spec.key,
+        len(result.sidecars),
+        sorted(result.splits),
+        spec.hf_repo_id,
+        revision,
+    )
+    if out.is_dir() and any(out.glob("*.gt.json")):
+        return out
+    return next(iter(result.splits.values()))
+
+
+def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -> Path | None:
+    """Convert one research dataset into ``datasets/<key>/<split>/``.
+
+    Two source kinds. A ``manual-download`` dataset never touches the network: it reads the
+    human-supplied archive (or extracted tree) from ``datasets/_incoming/<subdir>/``. A
+    ``huggingface`` downloads the real HF layout anonymously, reshapes it into the layout the
+    existing converter expects, then runs that converter unchanged (:func:`_fetch_huggingface`).
+    Either way, when the data is absent ``fetch`` logs an actionable message and returns ``None``
+    rather than raising, so one missing dataset degrades to "skipped" instead of aborting a
+    multi-dataset sweep (T-11-05).
 
     Args:
         spec: The dataset to fetch.
@@ -300,6 +759,9 @@ def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -
     if out.is_dir() and any(out.glob("*.gt.json")) and not force:
         logger.info("{}: already converted at {}, skipping", spec.key, out)
         return out
+
+    if spec.source == "huggingface":
+        return _fetch_huggingface(spec, out, root=root)
 
     incoming = incoming_dir(root) / spec.incoming_subdir
     raw_root, archive = _resolve_raw_root(incoming, dataset_dir, spec.raw_marker)
@@ -344,7 +806,39 @@ def _provenance_entries(
     images_dir = raw_root / spec.images_subdir
     for sidecar in sidecars:
         image_id = sidecar.name[: -len(".gt.json")]
-        source_image = images_dir / f"{image_id}.png"
+        # Native CARPK ships PNG; the HF mirrors ship JPG. Hash whichever the converter consumed.
+        source_image = next(
+            (
+                candidate
+                for ext in (".png", ".jpg", ".jpeg")
+                if (candidate := images_dir / f"{image_id}{ext}").is_file()
+            ),
+            None,
+        )
+        if source_image is None:
+            continue
+        entries.append(
+            {
+                "image_id": image_id,
+                "sha256": provenance.file_sha256(source_image),
+                "source_url": spec.source_url,
+                "license": spec.license,
+            }
+        )
+    return entries
+
+
+def _hf_provenance_entries(
+    spec: DatasetSpec, image_sources: Mapping[str, Path]
+) -> list[dict[str, str]]:
+    """Provenance entries for the HF path, hashing the normalized image behind each sidecar.
+
+    The HF converters write across several split dirs from several normalized image dirs, so the
+    flat ``image_id -> normalized image`` map the normalizer returned drives this rather than
+    the single-``images_subdir`` walk :func:`_provenance_entries` uses for the manual path.
+    """
+    entries: list[dict[str, str]] = []
+    for image_id, source_image in sorted(image_sources.items()):
         if not source_image.is_file():
             continue
         entries.append(
@@ -359,13 +853,23 @@ def _provenance_entries(
 
 
 def write_provenance_manifest(
-    spec: DatasetSpec, raw_root: Path, sidecars: list[Path], root: Path | None = None
+    spec: DatasetSpec,
+    raw_root: Path,
+    sidecars: list[Path],
+    root: Path | None = None,
+    *,
+    image_sources: Mapping[str, Path] | None = None,
+    hf_revision: str | None = None,
 ) -> Path:
     """Record (or refresh) ``datasets/provenance.json`` for ``spec`` -- sha256/source/licence.
 
     Merges into any existing manifest so multiple datasets accumulate; the entries for ``spec.key``
     are rewritten each fetch so a reconvert cannot leave stale hashes. Keys are sorted on write so
     the file is stable and diffable (the config-hash key-ordering discipline, D-11).
+
+    For the HuggingFace path, pass ``image_sources`` (the normalizer's ``image_id -> normalized
+    image`` map) and ``hf_revision``; the block then also records the HF repo id and the resolved
+    commit revision alongside the per-file hashes.
     """
     manifest_path = datasets_dir(root) / _PROVENANCE_FILENAME
     manifest: dict[str, object] = {"datasets": {}}
@@ -376,12 +880,21 @@ def write_provenance_manifest(
 
     datasets_block = manifest["datasets"]
     assert isinstance(datasets_block, dict)  # noqa: S101  -- shape guaranteed above
-    datasets_block[spec.key] = {
+    block: dict[str, object] = {
         "source_url": spec.source_url,
         "license": spec.license,
         "fetched_at": datetime.now(UTC).isoformat(),
-        "files": _provenance_entries(spec, raw_root, sidecars),
+        "files": (
+            _hf_provenance_entries(spec, image_sources)
+            if image_sources is not None
+            else _provenance_entries(spec, raw_root, sidecars)
+        ),
     }
+    if spec.hf_repo_id is not None:
+        block["hf_repo"] = spec.hf_repo_id
+    if hf_revision is not None:
+        block["hf_revision"] = hf_revision
+    datasets_block[spec.key] = block
 
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
