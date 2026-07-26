@@ -1,0 +1,20 @@
+{
+  "dataset": "fscd_lvis",
+  "provenance_ref": "datasets/provenance.json",
+  "seed": 0,
+  "test": [
+    "fscd-lvis-fixture-test-1",
+    "fscd-lvis-fixture-test-2"
+  ],
+  "train": [
+    "fscd-lvis-fixture-train-1",
+    "fscd-lvis-fixture-train-2",
+    "fscd-lvis-fixture-train-3",
+    "fscd-lvis-fixture-train-5",
+    "fscd-lvis-fixture-train-6"
+  ],
+  "val": [
+    "fscd-lvis-fixture-train-4"
+  ],
+  "val_strategy": "seeded-carve"
+}

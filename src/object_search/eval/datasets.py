@@ -35,16 +35,27 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from object_search import provenance
-from object_search.eval.converters import convert_carpk
+from object_search.eval.converters import (
+    convert_carpk,
+    convert_fscd147,
+    convert_fscd_lvis,
+    convert_rpine,
+)
 
 # Only manual (licence-gated) sources exist this phase. A future direct-download dataset extends
 # this Literal in its own plan; keeping it to what is exercised avoids a dead fetch branch.
 DatasetSource = Literal["manual-download"]
 
-# Converter dispatch by dataset key. One entry now (CARPK); no base class or registry decorator
-# until a third converter demands one (Rule of Three).
+# Converter dispatch by dataset key -- the one place the dataset->converter mapping lives. Each
+# converter has the same public shape ``(raw_root, out_root) -> list[Path]`` (FSCD-LVIS's protocol
+# and RPINE's seed take reproducible defaults), so no base class or decorator is needed. PUCPR+
+# ships in CARPK's native format, so it reuses the CARPK converter.
 _CONVERTERS: Mapping[str, Callable[[Path, Path], list[Path]]] = {
     "carpk": convert_carpk,
+    "pucpr_plus": convert_carpk,
+    "fscd147": convert_fscd147,
+    "fscd_lvis": convert_fscd_lvis,
+    "rpine": convert_rpine,
 }
 
 _PROVENANCE_FILENAME = "provenance.json"
@@ -91,6 +102,79 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         ),
         requires_manual=True,
         incoming_subdir="carpk",
+        default_split="test",
+        archive_sha256=None,
+        added_in_phase=11,
+    ),
+    # PUCPR+ -- CARPK's sibling (same author release, same native format): ~16k cars, fixed slanted
+    # building-camera view. Test-only cross-domain probe (D-04). Licence-gated with CARPK.
+    "pucpr_plus": DatasetSpec(
+        key="pucpr_plus",
+        source="manual-download",
+        source_url="https://lafi.github.io/LPN/",
+        license="CARPK/PUCPR+ terms-of-use (non-commercial research)",
+        license_note=(
+            "PUCPR+ ships with CARPK behind the same author terms-of-use gate (request form); no "
+            "unauthenticated direct-download URL and the data must not be re-hosted. Recorded and "
+            "gitignored; a human accepts the licence and supplies the archive."
+        ),
+        requires_manual=True,
+        incoming_subdir="pucpr_plus",
+        default_split="test",
+        archive_sha256=None,
+        added_in_phase=11,
+    ),
+    # FSCD-147 -- box-annotated FSC-147 (val/test human boxes, train pseudo). Native train/val/test
+    # triple; de-duplicated on load (159 dup images / 11 train<->test leaks, arXiv:2409.15953).
+    # Category diversity + leaderboard comparability (D-01). Licence-gated (VinAI/Counting-DETR).
+    "fscd147": DatasetSpec(
+        key="fscd147",
+        source="manual-download",
+        source_url="https://research.vinai.io/few-shot-object-counting-and-detection/",
+        license="FSC-147 / FSCD-147 research licence (VinAI / Counting-DETR terms)",
+        license_note=(
+            "FSC-147 images + FSCD-147 boxes are distributed under the VinAI / Counting-DETR "
+            "(ECCV'22, https://github.com/VinAIResearch/Counting-DETR) research terms; a human "
+            "accepts them and supplies the archive. De-duplicated on load per arXiv:2409.15953."
+        ),
+        requires_manual=True,
+        incoming_subdir="fscd147",
+        default_split="test",
+        archive_sha256=None,
+        added_in_phase=11,
+    ),
+    # FSCD-LVIS (unseen split) -- multi-class crowded scenes, 377 LVIS classes; the only
+    # distractor-rejection stress (D-01). No official val -> seeded carve from train (D-03).
+    "fscd_lvis": DatasetSpec(
+        key="fscd_lvis",
+        source="manual-download",
+        source_url="https://github.com/VinAIResearch/Counting-DETR",
+        license="FSCD-LVIS research licence (VinAI / Counting-DETR terms)",
+        license_note=(
+            "FSCD-LVIS is distributed under the VinAI / Counting-DETR research terms; a human "
+            "accepts them and supplies the archive. Use the UNSEEN protocol (no official val) for "
+            "the headline number; a seeded val is carved from train (D-01/D-03)."
+        ),
+        requires_manual=True,
+        incoming_subdir="fscd_lvis",
+        default_split="test",
+        archive_sha256=None,
+        added_in_phase=11,
+    ),
+    # RPINE -- the closest match to this project's task: every repetition in a single image is
+    # box-annotated, box exemplars (D-01). No official val -> seeded carve from train (D-03).
+    "rpine": DatasetSpec(
+        key="rpine",
+        source="manual-download",
+        source_url="https://chipmunk-g4.github.io/TMR/",
+        license="RPINE research licence (TMR project terms)",
+        license_note=(
+            "RPINE ('Repeated Patterns IN Everywhere', https://arxiv.org/html/2508.17636) is "
+            "distributed under the TMR project terms; a human accepts them and supplies the "
+            "archive. No official val -> a seeded val is carved from train (D-03)."
+        ),
+        requires_manual=True,
+        incoming_subdir="rpine",
         default_split="test",
         archive_sha256=None,
         added_in_phase=11,

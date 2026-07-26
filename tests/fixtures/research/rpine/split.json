@@ -1,0 +1,14 @@
+{
+  "train": [
+    "rpine-fixture-train-1",
+    "rpine-fixture-train-2",
+    "rpine-fixture-train-3",
+    "rpine-fixture-train-4",
+    "rpine-fixture-train-5",
+    "rpine-fixture-train-6"
+  ],
+  "test": [
+    "rpine-fixture-test-1",
+    "rpine-fixture-test-2"
+  ]
+}
