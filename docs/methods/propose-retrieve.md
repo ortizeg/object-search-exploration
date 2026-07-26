@@ -72,10 +72,24 @@ slots in unchanged when corpus-scale search arrives (backlog).
 
 A fixed `retrieval_threshold` passes straight through; otherwise `common.calibration.calibrate`
 fits a two-mode `gmm` and cuts between the "matches" mode (the exemplar's own region and its
-duplicates near `1.0`) and the background mode. **Absolute cosine thresholds do not transfer across
-images** for deep features, which is exactly what the calibration layer is for. On a homogeneous
-proposal set the `gmm` degeneracy guard falls back to `ratio`, reporting the fallback in its
-`reason`. The calibrator returns its **reasoning**, which becomes an inspectable diagnostics note.
+duplicates near `1.0`) and the background mode. The per-image `gmm` cut is then **clamped to an
+absolute `similarity_floor`** — it may rise above the floor but never sink below it. The floor is a
+cosine to the exemplar (whose self-cosine is `1.0`), applied identically on every image, so it is a
+distribution-independent *anchor*, not a label-fit cut, and AP stays threshold-free.
+
+The floor fixes two failure modes of a bare two-mode fit:
+
+- **A low `gmm` cut admitting background.** On cluttered scenes the `gmm` sometimes cuts down in the
+  background shoulder; the floor holds the line and is the dominant precision win.
+- **The degenerate single-mode catastrophe.** A uniform lattice of *identical* instances scores
+  `~1.0` with no second mode; the `gmm` degeneracy guard falls back to `ratio`, which lands the cut
+  *at* the max score, and the strict `> threshold` then rejects **every true match** (recall 0 — the
+  worst possible failure for a repeated-instance finder). With the floor, the degenerate case is
+  decided by the floor alone: the near-`1.0` regions are all accepted, while an image with no other
+  instances scores below the floor and is correctly rejected.
+
+The calibrator returns its **reasoning**, and the applied floor is added to it, so both are
+inspectable diagnostics notes.
 
 ### 6. Split into matches and candidates, then post-retrieval NMS
 
@@ -130,9 +144,10 @@ yields a token.
   pooling weights every token equally regardless of magnitude — a different, wrong quantity (the
   same DINOv2 high-norm-artifact trap Method 3 documents).
 - **Cosine NN is a plain NumPy matmul — no FAISS** (step 4).
-- **Calibrate the threshold** (`gmm` default, or fixed `retrieval_threshold`); absolute cosine cuts
-  do not transfer across images — step 5.
-- **Post-retrieval NMS at `nms_iou`** collapses SAM over-segmentation; the proposal count is in
+- **Calibrate the threshold** (`gmm` default, or fixed `retrieval_threshold`) **clamped to an
+  absolute `similarity_floor`**; the floor holds precision on cluttered scenes and rescues the
+  degenerate uniform-lattice case (recall 0 without it) — step 5.
+- **Post-retrieval NMS at `nms_iou` (0.3)** collapses SAM over-segmentation; the proposal count is in
   diagnostics — step 6.
 - **Retain sub-threshold candidates** (EVAL-08); return every accepted region after NMS (METHOD-12)
   — step 6.
@@ -146,8 +161,9 @@ it cannot drift from the code.
 | --- | --- | --- |
 | `proposal_backend` | `"fastsam"` | Which class-agnostic proposal backend to use. Only `fastsam` is implemented in Milestone 1; MobileSAM is a documented deviation (its ONNX decoder takes one prompt per call, so everything-mode is ~1024 calls plus a ported mask generator). |
 | `proposal_conf` | `0.4` | FastSAM objectness threshold: keep proposals whose class-0 confidence exceeds this. FastSAM's default is 0.4. Lower surfaces more (and smaller) regions. |
-| `retrieval_threshold` | `null` | Fixed accept threshold on the cosine similarity between a proposal embedding and the exemplar embedding. `null` ⇒ calibrate with a two-mode gmm (absolute cosine cuts do not transfer across images for deep features). |
-| `nms_iou` | `0.5` | Post-retrieval NMS IoU. A later accepted box overlapping a kept one by MORE than this is suppressed — this is what collapses FastSAM over-segmentation (one object split into several proposals) into a single detection. |
+| `retrieval_threshold` | `null` | Fixed accept threshold on the cosine similarity between a proposal embedding and the exemplar embedding. `null` ⇒ calibrate with a two-mode gmm clamped to `similarity_floor`. |
+| `nms_iou` | `0.3` | Post-retrieval NMS IoU. A later accepted box overlapping a kept one by MORE than this is suppressed — this collapses FastSAM over-segmentation (one object split into several partially-overlapping proposals) into a single detection. Tighter than a classical 0.5 because "everything mode" emits many shifted/partial proposals of the same object. |
+| `similarity_floor` | `0.7` | Absolute cosine floor on the calibrated accept threshold (ignored when a fixed `retrieval_threshold` is given). The gmm cut may rise above this but never below it: the floor stops a low gmm cut from admitting background, and rescues the degenerate single-mode case (a uniform lattice of identical instances, where the bare gmm/ratio fallback rejects every true match). Anchored on the exemplar self-cosine (=1.0). |
 | `max_candidates` | `50` | How many top-scoring proposals (with raw scores) to keep as sub-threshold candidates for an offline PR sweep (EVAL-08), regardless of the threshold. |
 | `seed` | `0` | `random_state` for the gmm calibrator (its only genuinely stochastic step). |
 
@@ -181,8 +197,9 @@ first-party export scripts and a better-provenanced MIT artifact both exist.)
   expected failure mode and the tuning signal — **the chipset (exact ground truth) is where you tune
   it.**
 - **The raw box crop includes background.** A tight box around a non-convex object still embeds some
-  surrounding pixels; the FastSAM mask is available (`return_masks`) to mask that background out — a
-  cheap, likely-real win deferred to the backlog.
+  surrounding pixels; the FastSAM mask is available (`return_masks`) to mask that background out.
+  **Measured (2026-07-25):** pixel-masking hurt (artificial fill edges crashed synthetic recall),
+  token-masking gave only +0.006 macro-F1 at ~2× latency — deferred, see the backlog.
 - **Latency is dominated by the proposal stage.** This is a *finding*, not a defect — see the EVAL-11
   latency split; it is why the breakdown attributes proposal and embedding time separately.
 - **AGPL / non-commercial licence constraints.** The FastSAM weights carry AGPL-3.0 (above); this
@@ -198,9 +215,14 @@ Deferred deliberately (mirrored verbatim from the module docstring and
 - **FAISS index for corpus-scale retrieval** — unnecessary for a few hundred proposals in one image;
   the `(N, D)` embedding matrix is shaped so it slots in when corpus search arrives.
 - **Background-masked region embedding** — embed the FastSAM mask interior rather than the raw box
-  crop; the mask is already produced, so this is cheap and likely a real accuracy win.
+  crop. **Measured (2026-07-25), deferred.** Pixel-masking (ImageNet-mean fill) HURT — synthetic
+  recall 0.94 → 0.65 from artificial fill edges. Token-masking (pool only tokens whose patch centre
+  is inside the mask) gave +0.006 macro-F1 at ~2× latency and erodes the mask-free `embed_regions`
+  seam. Revisit if cluttered precision becomes the priority.
 - **Proposal filtering by an exemplar size/aspect prior** — drop proposals whose shape cannot match
-  the exemplar before embedding, cutting both cost and false positives.
+  the exemplar before embedding. **Measured (2026-07-25), rejected** — an area-ratio gate crashed
+  textured recall (varied 0.93 → 0.59) because true instances legitimately span a range of scales;
+  a size prior fights the scale-invariance this method exists to provide.
 - **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
 - **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
@@ -216,7 +238,7 @@ shows the query and the matches overlay; the proposal set is the diagnostics ove
 | --- | --- |
 | `cluttered-distractors` — tight boxes amid clutter | ![cluttered-distractors](../samples/propose-retrieve/cluttered-distractors.png) |
 | `lattice-plain` — repeated instances on a plain lattice | ![lattice-plain](../samples/propose-retrieve/lattice-plain.png) |
-| `lattice-touching` — touching instances (where NMS earns its keep) | ![lattice-touching](../samples/propose-retrieve/lattice-touching.png) |
+| `lattice-touching` — a uniform lattice of identical instances (where the `similarity_floor` earns its keep: the bare gmm rejected all of them) | ![lattice-touching](../samples/propose-retrieve/lattice-touching.png) |
 | `scatter-scaled` — scale + pose variation | ![scatter-scaled](../samples/propose-retrieve/scatter-scaled.png) |
 
 ## Pseudocode
@@ -241,7 +263,8 @@ below mirror the `# 1.` … `# 7.` comments in `search()` (METHOD-11); read
 
 5. calibrate the threshold:
        fixed retrieval_threshold passes straight through, OR
-       two-mode gmm cuts between the "matches" mode (~1.0) and background (ratio fallback if degenerate)
+       two-mode gmm cut, CLAMPED to similarity_floor: threshold = floor if degenerate else max(gmm, floor)
+       (the floor holds precision on clutter AND rescues the degenerate uniform-lattice case)
 
 6. proposals with score >= threshold -> accepted; keep top max_candidates as Candidates (EVAL-08)
    POST-RETRIEVAL NMS at nms_iou over the accepted set  # collapses SAM over-segmentation
