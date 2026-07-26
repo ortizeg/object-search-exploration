@@ -11,8 +11,18 @@ steps below match the `# 1.` … `# 9.` comments in `search()` one-for-one (METH
 
 NCC wins when the repeated instances are **near-identical and near the exemplar's scale**: a
 tray of the same part, tiles, repeated UI glyphs. There it is genuinely hard to beat and
-costs milliseconds with no model. It loses when instances differ in lighting, pose, or scale
-beyond the configured pyramid — that is where `dino-dense` should win.
+costs milliseconds with no model. The default **rotated-template bank** (`±35°`) plus the
+**`repeat-aware`** accept rule (below) also let it recover a meaningful share of rotated and
+rescaled repeats — VARIED F1 `0.24 → 0.46`, CLUTTERED `0.31 → 0.77` — **without** giving up its
+fixed-scale strength (EASY/TEXTURED stay at F1 `1.00`). It still loses on the harder pose/scale
+instances whose raw-intensity correlation falls too low, and on lighting change — that is where
+`dino-dense` and `sparse-geo` win. See [`../reports/ncc-improvement.md`](../reports/ncc-improvement.md)
+for the measured iteration log.
+
+The cost of the bank is latency: the rotation × scale correlations are a large constant factor,
+so on the 6000×4000 chipset a query runs in seconds rather than milliseconds. That trade is
+reported honestly in the latency-by-canvas chart; FFT-based correlation (ROBUSTNESS BACKLOG) is
+the mitigation if it ever needs to be interactive at that resolution.
 
 ## Algorithm
 
@@ -34,12 +44,15 @@ independently drops the exemplar's own self-match from `1.0000` to `0.3071`, and
 already-resized scene keeps the self-match at `1.0000` (PITFALLS §1.3). Levels whose scaled
 template would be `< 8 px` on a side, or larger than the level image, are skipped.
 
-### 3. Optionally build the rotated-template bank
+### 3. Build the rotated-template bank
 
-Default `angles_deg=(0.0,)` — rotation is **off**, because a bank is a large constant-factor
-cost (levels × angles correlations) for a case that rarely needs it. When enabled, a rotated
-crop leaves fabricated constant corners (up to **half** the template at 45°) that correlate
-with any uniform region. The chosen fix is a **warped mask** passed to `matchTemplate`, eroded
+Default `angles_deg = (-35, -23.3, -11.7, 0, 11.7, 23.3, 35)` — a **7-step bank over ±35°**
+(~11.7° spacing). Raw-intensity correlation loses a rotated instance within ~10–15°, so a bank
+this dense is what lets NCC recover rotated repeats; **7 angles measured best** (9 over-samples —
+extra false peaks, no recall gain; 5 leaves gaps). It is a large constant-factor cost
+(levels × angles correlations); a caller who knows the scene is axis-aligned can set `(0.0,)`.
+A rotated crop leaves fabricated constant corners (up to **half** the template at 45°) that
+correlate with any uniform region. The fix is a **warped mask** passed to `matchTemplate`, eroded
 by one pixel to kill the interpolated fringe — chosen over inscribing an axis-aligned rectangle
 because that would throw away real template pixels near the corners (PITFALLS §1.6).
 
@@ -70,19 +83,40 @@ template size — **no centre offset, no ±1**. At level scale `s` the original-
 
 ### 7. Calibrate the threshold
 
-`common.calibration.calibrate` with the configured strategy. Default `self-similarity` cuts at
-`self_score × retain_frac`, relative to the exemplar's own ~1.0 self-match — absolute
-thresholds do not transfer across images. When `threshold` is set, the `"fixed"` strategy is
-used. The calibrator returns its **reasoning**, which becomes an inspectable diagnostics note.
+Default **`repeat-aware`** (an NCC-local rule; the shared `common.calibration` strategies stay
+selectable). It reads the score distribution rather than assuming one cut fits every scene,
+because with the rotation bank on, a scene of near-identical axis-aligned repeats (the chipset)
+throws **moderate false peaks at raw ~0.5–0.76** — *higher* than genuine transformed instances
+score in the varied/cluttered scenes — so no single low fixed cut can separate the two across
+regimes. The rule:
+
+- Count the **distinct** locations scoring `≥ self_score × 0.9` (the near-self records, NMS-
+  deduplicated — the pyramid × rotation bank detects the exemplar's own region many times, so a
+  raw count would call every image a repeat).
+- **≥ 2** such locations ⇒ the object repeats near-identically ⇒ cut just below the cluster at
+  `self_score × 0.85`, which rejects the rotated-template false peaks.
+- Otherwise only the exemplar's own region sits up there ⇒ the instances are transformed and
+  score lower ⇒ drop to the permissive `self_score × retain_frac` (0.45) tail.
+
+The cut is tuned to the **shape** of the score distribution, **never** to the ground-truth boxes,
+and the same rule runs on every dataset (the cross-dataset fairness rule). `self-similarity`
+(plain `self × retain_frac`), `ratio`, and `gmm` remain as controls; `"fixed"` is used when
+`threshold` is set. Every branch returns its **reasoning** as an inspectable diagnostics note.
 
 ### 8. Split into matches and sub-threshold candidates
 
-The top `max_candidates` peaks (ranked by the cross-level z-score) are kept as `Candidate`s
-**with raw scores** regardless of the threshold — that is what makes an offline threshold sweep
-possible later (EVAL-08). Peaks whose raw score clears the threshold become `Match`es; a final
-cross-level greedy IoU NMS (prioritised by the z-score) removes duplicates. **METHOD-12: every
-accepted peak survives — there is no single-best / argmax-only short-circuit.** The peak that
-overlaps the exemplar box is labelled `is_exemplar=True` rather than dropped or double-counted.
+Peaks whose raw score clears the threshold are cross-level greedy IoU NMS'd (prioritised by the
+z-score) into the `Match`es. **METHOD-12: every accepted peak survives — there is no single-best /
+argmax-only short-circuit.** The peak overlapping the exemplar box is labelled `is_exemplar=True`
+rather than dropped or double-counted.
+
+The `Candidate` log (EVAL-08) is the sub-threshold peaks kept **with raw scores** so an offline
+threshold sweep can recover the full P/R curve — but it is **deduplicated** first: the sub-
+threshold peaks are cross-level NMS'd and any overlapping an accepted match are dropped, so
+`matches + candidates` form one clean ranked detection set. Without this dedup a single instance,
+detected at many `(scale, angle)` pairs, would enter the log dozens of times and each duplicate
+would score as a false positive in the AP sweep — which is why the old log understated AP
+(TEXTURED AP `0.56 → 1.00`, CLUTTERED `0.25 → 0.82` after the fix).
 
 ### 9. Assemble diagnostics and the result
 
@@ -123,15 +157,15 @@ cannot drift from the code.
 | field | default | effect |
 | --- | --- | --- |
 | `scales` | `[0.75, 0.875, 1.0, 1.15, 1.3]` | Pyramid scale factors. The scene is resized by each factor and the template cropped from that resized scene, which keeps the self-match at 1.0. |
-| `angles_deg` | `[0.0]` | Rotation bank in degrees. Default `(0.0,)` — rotation is off because it is a large constant-factor cost (levels × angles correlations) rarely needed here. |
+| `angles_deg` | `[-35, -23.3, -11.7, 0, 11.7, 23.3, 35]` | Rotation bank in degrees — a 7-step bank over ±35° (~11.7° spacing) that recovers rotated repeats. 7 measured best (9 over-samples, 5 leaves gaps). A large constant-factor cost; set `(0.0,)` for a known axis-aligned scene. |
 | `threshold` | `null` | Fixed accept threshold on the raw NCC score. `null` ⇒ use the calibrator. |
-| `calibration` | `"self-similarity"` | How the accept threshold is chosen when `threshold` is `null`. self-similarity cuts relative to the exemplar's own ~1.0 self-match; recommended for NCC because absolute thresholds do not transfer across images. |
+| `calibration` | `"repeat-aware"` | How the accept threshold is chosen when `threshold` is `null`. repeat-aware reads the score distribution — strict cut (`self × 0.85`) when ≥2 distinct locations sit near the self-match (near-identical repeats; rejects rotation false peaks), else the permissive `self × retain_frac` tail (transformed instances). self-similarity / ratio / gmm are the controls. |
 | `peaks` | `"local-max"` | Peak-extraction strategy. local-max (default) separates touching instances that plain nms merges; nms is the control; watershed uses a distance transform. |
-| `nms_iou` | `0.3` | IoU above which two accepted boxes are suppressed to one (cross-level NMS). |
+| `nms_iou` | `0.3` | IoU above which two accepted boxes are suppressed to one (cross-level NMS); also deduplicates the candidate log. |
 | `suppression_radius_frac` | `0.5` | local-max footprint as a fraction of the template size (size-aware). |
-| `max_candidates` | `50` | How many top peaks (with raw scores) to keep for the EVAL-08 candidate log. |
+| `max_candidates` | `50` | How many top (deduplicated) sub-threshold peaks to keep for the EVAL-08 candidate log. |
 | `seed` | `0` | `random_state` for the gmm calibrator (its only genuinely stochastic step). |
-| `retain_frac` | `0.7` | self-similarity accepts scores above `self_score × retain_frac`. |
+| `retain_frac` | `0.45` | The permissive self-relative accept fraction: keep matches above `self_score × retain_frac`. Used directly by self-similarity and as the transformed-instance floor by repeat-aware. 0.45 sits on the broad F1 plateau and is not fit to the labels. |
 
 ## Known failure modes
 
@@ -140,8 +174,11 @@ cannot drift from the code.
   abstains with `outcome=EMPTY`. The committed `lattice-touching` sample shows this: its
   instances are solid same-colour rectangles with no internal texture, so NCC honestly returns
   nothing rather than a false-positive wall.
-- **Rotation / scale beyond the configured banks.** Instances rotated past `angles_deg` or
-  scaled past `scales` are missed; that is where `dino-dense` should win.
+- **Rotation / scale beyond the configured banks.** The default bank covers ±35° and scales
+  0.75–1.3; instances past that are missed, and even inside the bank a rotated-and-rescaled
+  instance whose resampled correlation falls below `self × retain_frac` is missed. Recall in the
+  scale/pose regimes is genuinely partial (VARIED ~0.36) — an inherent ceiling of raw-intensity
+  correlation, which is exactly where `dino-dense` and `sparse-geo` win.
 - **Lighting / pose change.** NCC correlates raw intensities, so an instance under different
   lighting scores low even when a human sees the same object.
 - **Cross-level noise-floor bias.** Mitigated by the per-level z-score (step 5); called out so
@@ -189,7 +226,7 @@ comments in `search()` (METHOD-11); read `src/object_search/search/ncc.py` for t
        template_s <- crop template FROM scene_s   # ... then crop the template from it
        skip level if template_s side < 8 px or larger than scene_s
 
-3. optionally build a rotated-template bank   # default angles_deg=[0] => rotation OFF
+3. build a rotated-template bank              # default: 7 angles over +/-35 deg
    (each rotated crop carries a warped mask, eroded 1 px, passed to matchTemplate)
 
 4. for each level:
@@ -202,13 +239,17 @@ comments in `search()` (METHOD-11); read `src/object_search/search/ncc.py` for t
 6. for each peak (row, col) at level scale s:  # response is (H-h+1, W-w+1), top-left anchored
        box <- BBox(x=round(col/s), y=round(row/s), w=round(tw/s), h=round(th/s))  # no centre offset
 
-7. calibrate the accept threshold             # self-similarity: cut at self_score * retain_frac
-   (or "fixed" when config.threshold is set)
+7. calibrate the accept threshold             # repeat-aware (default):
+   n_near <- # distinct locations with raw >= self * 0.9   (near-self records, NMS-deduped)
+   threshold <- self * 0.85 if n_near >= 2   # near-identical repeats -> strict (reject rot FPs)
+                else self * retain_frac       # transformed instances -> permissive tail
+   (or self-similarity / ratio / gmm; "fixed" when config.threshold is set)
 
-8. keep top max_candidates peaks as Candidates WITH raw scores (for the EVAL-08 sweep)
-   peaks whose raw score >= threshold -> Matches
+8. peaks whose raw score >= threshold -> Matches
    cross-level greedy IoU NMS (nms_iou), prioritised by the z-score  # METHOD-12: no argmax short-circuit
    label the peak overlapping the exemplar box is_exemplar=True
+   Candidate log (EVAL-08) = sub-threshold peaks, NMS-DEDUPED and non-overlapping the matches,
+   kept WITH raw scores  # so matches + candidates is one clean set (no duplicate-inflated AP)
 
 9. assemble Diagnostics (level-1.0 heatmap + metrics) and LatencyBreakdown; return SearchResult
 ```

@@ -16,7 +16,12 @@ import pytest
 
 from object_search.schemas import BBox, ExemplarBox, SearchOutcome
 from object_search.search import get_method, has_method
-from object_search.search.ncc import NCCConfig, search
+from object_search.search.ncc import (
+    _REPEAT_STRICT_FRAC,
+    NCCConfig,
+    _repeat_aware_threshold,
+    search,
+)
 from object_search.synthetic.generator import DEMO_SPECS, synthesize
 
 _NCC_SOURCE = Path(__file__).resolve().parents[1] / "src" / "object_search" / "search" / "ncc.py"
@@ -219,6 +224,55 @@ def test_rotation_bank_runs_with_masked_correlation() -> None:
 
     assert result.outcome is SearchOutcome.OK
     assert len(result.matches) >= 1
+
+
+# --------------------------------------------------------------- rotation + repeat-aware defaults
+
+
+def test_default_config_enables_rotation_bank_and_repeat_aware() -> None:
+    """The shipped default recovers rotated repeats: a multi-angle bank + repeat-aware cut."""
+    config = NCCConfig()
+    # A rotation bank (more than the single 0 deg angle) is on by default now.
+    assert config.angles_deg.count(0.0) == 1
+    assert len(config.angles_deg) >= 5, "rotation bank should span several angles by default"
+    assert max(abs(a) for a in config.angles_deg) >= 30.0
+    assert config.calibration == "repeat-aware"
+
+
+def test_repeat_aware_is_strict_on_near_identical_repeats() -> None:
+    """Two+ distinct near-self locations => cut just below the self cluster (reject rot FPs)."""
+    calib = _repeat_aware_threshold(5, self_score=1.0, retain_frac=0.45)
+    assert calib.strategy == "repeat-aware"
+    assert calib.threshold == pytest.approx(_REPEAT_STRICT_FRAC)  # self * strict, self==1.0
+    assert "near-identical" in calib.reason
+
+
+def test_repeat_aware_is_permissive_when_instances_are_transformed() -> None:
+    """Only the exemplar itself sits near self => permissive self*retain_frac tail for copies."""
+    calib = _repeat_aware_threshold(1, self_score=1.0, retain_frac=0.45)
+    assert calib.threshold == pytest.approx(0.45)
+    assert "transformed" in calib.reason
+    # The strict cut is always higher than the permissive one, so a repeat set is never *more*
+    # permissive than a transformed set (the whole point of the switch).
+    assert _repeat_aware_threshold(3, 1.0, retain_frac=0.45).threshold > calib.threshold
+
+
+def test_candidate_log_is_deduplicated_across_the_bank() -> None:
+    """The pyramid x rotation bank must not enter one instance into the candidate log many times."""
+    scene, boxes = _lattice()
+    exemplar = ExemplarBox(box=boxes[0])
+
+    result = search(scene, exemplar, NCCConfig())
+
+    iou = NCCConfig().nms_iou
+    # No two candidates are duplicates of one location ...
+    for i in range(len(result.candidates)):
+        for j in range(i + 1, len(result.candidates)):
+            assert result.candidates[i].box.iou(result.candidates[j].box) < iou
+    # ... and no candidate duplicates an accepted match (so matches + candidates is one clean set).
+    for cand in result.candidates:
+        for match in result.matches:
+            assert cand.box.iou(match.box) < iou
 
 
 def test_diagnostics_carry_heatmap_and_metrics() -> None:
