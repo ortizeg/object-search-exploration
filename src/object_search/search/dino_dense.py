@@ -93,6 +93,10 @@ Deferred deliberately (mirrored in ``docs/methods/dino-dense.md`` and
 
 - **Sliding-window backbone inference** for very large scenes, so localisation no longer
   degrades at the resolution cap.
+- **Adaptive input resolution** -- size the scene so the exemplar spans >= N stride-14 tokens
+  (clamped to a hard max) instead of a fixed ``scene_max_side``. Measured ~6x chipset recall
+  (0.077 -> 0.554 on a small-chip subset); deferred because it costs latency, does not fix the
+  flat-chip precision, and chipset is NCC's regime (see docs/reports/dino-dense-improvement.md).
 - **Learned feature upsampling (FeatUp)** to recover sub-patch localisation from the stride-14
   grid without a full high-res forward pass.
 - **SAM-based box refinement** -- snap each coarse component box to the nearest segment mask.
