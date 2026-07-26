@@ -63,6 +63,30 @@ docstring (mirrored verbatim so the two cannot drift).
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
 - **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
 
+## `owlv2-oneshot` (Method 4 — OWLv2 image-conditioned one-shot detection)
+
+Captured here and in the `owlv2_oneshot.py` docstring (mirrored verbatim so the two cannot drift).
+This realizes the previously-deferred source-research Method 4 (exemplar-conditioned detectors) with
+a permissive, ONNX-exportable model after T-Rex2 / Rex-Omni were rejected on licensing.
+
+- **Tiled / multi-scale inference** to lift small-object recall on large canvases past the fixed
+  960 input. **This is the primary remaining weakness**: the EASY (chipset) regime downscales chips
+  in a 6000×4000 scene below OWLv2's effective resolution, so precision stays ~0.08 there while the
+  textured regimes reach F1 0.78–0.83.
+- **Export OWLv2's learned `logit_scale` / `logit_shift`** and apply them before thresholding, so
+  scene scores are the model's calibrated logits rather than raw (compressed) cosine — may make the
+  distribution genuinely bimodal and remove the need for self-similarity anchoring.
+- **Text-prompt fusion** — OWLv2 also takes text queries; combining the drawn exemplar with an
+  optional label would use both modalities (the exploration's Milestone 2 seam).
+- **Query embedding from multiple exemplars** — average several drawn boxes for a more robust query.
+- **owlv2-large** for accuracy at higher latency, gated behind the same export path.
+- **Runtime-verify the OWLv2 contract in `.planning/research/MODELS.md`** (the sha256 is now pinned
+  from the first verified export).
+
+> Implemented in the improvement pass (`docs/reports/owlv2-improvement.md`): the HF
+> `embed_image_query` distinctiveness selection (was a correctness bug), the whole-frame-box filter,
+> and self-similarity calibration.
+
 ## `marker-conditioned` (Exploration 2 — marker → pointed-at object, Milestone 2)
 
 None of the following is built in Milestone 2; all are captured here and in the
@@ -115,13 +139,16 @@ whichever method opts in. Deferred from Milestone 1 to keep each method readable
 
 ### Deferred whole methods (IDEA.md §12)
 
-**Method 4 — exemplar-conditioned detectors and counters.** Open-vocabulary / exemplar
-detectors (T-Rex2, CountGD) and few-shot counters (FamNet, BMNet+, SAFECount, CounTR, LOCA,
-CACViT). T-Rex2 is arguably the closest off-the-shelf fit to the "draw one box, get the rest"
-workflow. **Deferred because** the weights are heavy and licence-encumbered, ONNX export is not a
-solved path, and several are API-gated — all three conflict with the local-first, ONNX-first,
-no-cloud constraints. This corner of the field moves fast; re-check what has landed and what has a
-clean ONNX export before committing to any one.
+**Method 4 — exemplar-conditioned detectors and counters.** _Partially realized_ by
+`owlv2-oneshot` (see its section above): OWLv2 is the permissive (Apache-2.0), ONNX-exportable
+exemplar detector that fills this bucket. The originally-named candidates remain **deferred/rejected
+on the same grounds that motivated OWLv2**: **T-Rex2** is API-only (no downloadable weights) and
+IDEA License 1.0 non-commercial; **Rex-Omni** is a 3B PyTorch MLLM (no ONNX path) under IDEA +
+Qwen research licences; both conflict with the local-first, ONNX-first, no-cloud, permissive-licence
+constraints (full comparison in `docs/library-reviews/owlv2.md`). Still open in this bucket:
+few-shot **counters** (FamNet, BMNet+, SAFECount, CounTR, LOCA, CACViT) and **CountGD**. This corner
+of the field moves fast; re-check what has landed and what has a clean ONNX export before adding
+another.
 
 **Method 6 — one-shot personalized segmentation.** PerSAM / PerSAM-F, Matcher, SegGPT / Painter,
 SAM 2 memory-bank propagation. **Deferred because** Milestone 1's output contract is boxes, not

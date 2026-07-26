@@ -75,6 +75,11 @@ ultralytics = "*"
 pytorch = "*"
 torchvision = "*"
 onnx = "*"
+# OWLv2 export (Method 4) needs transformers. Apache-2.0, so no copyleft constraint -- it is
+# export-time only purely because it pulls torch, which the runtime env deliberately excludes.
+transformers = ">=4.40"
+# torch.onnx.export's exporter imports onnxscript at call time (even the legacy path in torch 2.9+).
+onnxscript = "*"
 
 [environments]
 default = { features = ["dev"], solve-group = "default" }
@@ -85,6 +90,7 @@ export = { features = ["export"] }
 # task surface: `pixi run export-fastsam` in the runtime env has no such task.
 [feature.export.tasks]
 export-fastsam = { cmd = "python scripts/export_fastsam.py" }
+export-owlv2 = { cmd = "python scripts/export_owlv2.py" }
 
 # --------------------------------------------------------------------------------- tasks
 # These names are the contract CI invokes. Do not rename them.
