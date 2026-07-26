@@ -34,18 +34,28 @@ docstring (mirrored verbatim so the two cannot drift).
 - **LoFTR / RoMa dense matching** with correspondence-field clustering for low-texture objects
   (a research spike — the ONNX export is awkward).
 
-## `dino-dense` (Method 3 — DINOv2 dense-token prototype matching)
+## `dino-dense` (Method 3 — DINOv2 dense-token best-part matching)
 
-None of the following is built in Phase 6; all are captured here and in the `dino_dense.py`
-docstring.
+Captured here and in the `dino_dense.py` docstring. The mean-pooled-prototype and thresholding
+weaknesses that shipped a single full-frame box were fixed in 2026-07 (`max-token` scoring +
+`contrast` calibration + threshold-level extraction — see
+[`reports/dino-dense-improvement.md`](reports/dino-dense-improvement.md)); what remains deferred:
 
 - **Sliding-window backbone inference** for very large scenes, so localisation no longer
   degrades at the resolution cap.
+- **Adaptive input resolution** — size the scene so the exemplar spans ≥ N stride-14 tokens
+  (clamped to a hard maximum), instead of a fixed `scene_max_side`. Measured to ~6× chipset recall
+  (0.077 → 0.554 on a small-chip subset) because the cap otherwise squeezes small chips to 3–5
+  tokens. Deferred: it fixes recall but not the flat-chip precision, costs inference latency, and
+  chipset is NCC's regime. A general small-object win when the priority calls for it.
 - **Learned feature upsampling (FeatUp)** to recover sub-patch localisation from the stride-14
   grid without a full high-res forward pass.
 - **SAM-based box refinement** — snap each coarse component box to the nearest segment mask.
-- **Many-to-many token similarity with spatial aggregation** instead of a single mean-pooled
-  prototype — measurably better for articulated objects like the basketball frames.
+- **Spatially-structured (not order-free) part matching.** `max-token` already does many-to-many
+  token similarity (DONE — it replaced the mean-pooled prototype and lifted textured F1 from ≈ 0.03
+  to ≈ 0.70), but it pools the top-k cosines with no geometric constraint on *where* the matching
+  parts sit. A spatial-consistency term would cut clutter false positives further — and is the most
+  promising lever for the flat-chip precision the resolution fix leaves untouched.
 - **DINOv3 backbone swap** once a clean ONNX export exists.
 
 ## `propose-retrieve` (Method 5 — class-agnostic proposals + DINOv2 region embeddings)
