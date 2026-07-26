@@ -85,7 +85,8 @@ def test_config_defaults_match_the_locked_decisions() -> None:
     assert cfg.proposal_backend == "fastsam"
     assert cfg.proposal_conf == 0.4
     assert cfg.retrieval_threshold is None
-    assert cfg.nms_iou == 0.5
+    assert cfg.nms_iou == 0.3
+    assert cfg.similarity_floor == 0.7
     assert cfg.max_candidates == 50
     assert cfg.seed == 0
 
@@ -95,7 +96,13 @@ def test_config_is_frozen_and_schema_drives_the_form() -> None:
     with pytest.raises(ValidationError):  # frozen -> mutation is an error
         cfg.nms_iou = 0.9  # type: ignore[misc]
     schema = ProposeRetrieveConfig.model_json_schema()
-    for field in ("proposal_backend", "proposal_conf", "retrieval_threshold", "nms_iou"):
+    for field in (
+        "proposal_backend",
+        "proposal_conf",
+        "retrieval_threshold",
+        "nms_iou",
+        "similarity_floor",
+    ):
         assert schema["properties"][field].get("description")
 
 
@@ -240,6 +247,45 @@ def test_search_rejects_a_foreign_config() -> None:
     scene = np.full((60, 60, 3), 50, dtype=np.uint8)
     with pytest.raises(TypeError, match="requires a ProposeRetrieveConfig"):
         search(scene, ExemplarBox(box=BBox(x=5, y=5, w=20, h=20)), NCCConfig())
+
+
+# --------------- model-free: the degenerate single-mode floor (the uniform-lattice regression)
+
+
+class _FixedProposalBackend:
+    """A stub proposal backend returning a fixed set of boxes -- no FastSAM weight needed."""
+
+    def __init__(self, boxes: list[BBox]) -> None:
+        self._boxes = boxes
+
+    def propose(self, image: npt.NDArray[np.uint8], config: object) -> list:
+        from object_search.inference import Proposal
+
+        return [Proposal(box=b, mask=None, objectness=0.9) for b in self._boxes]
+
+
+def test_uniform_lattice_is_not_rejected_by_the_similarity_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A uniform lattice of identical instances -- all cosines ~1.0, a single mode -- must NOT be
+    rejected. Regression guard for the calibration catastrophe: before the ``similarity_floor``,
+    the gmm degeneracy fallback cut *at* the max score and the strict ``> threshold`` rejected
+    every true match (recall 0), the worst failure for a repeated-instance finder.
+    """
+    # Four non-overlapping identical instances (so NMS keeps them all) plus the exemplar's own box.
+    boxes = [BBox(x=x, y=y, w=20, h=20) for y in (5, 55) for x in (5, 55)]
+    scene = np.full((120, 120, 3), 50, dtype=np.uint8)
+
+    # Stub the two singletons: identical embeddings for every crop => every cosine is exactly 1.0,
+    # so np.unique(scores).size < 2 and the gmm is degenerate -- the exact lattice-touching case.
+    monkeypatch.setattr(propose_retrieve, "_get_backend", lambda: _FixedProposalBackend(boxes))
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: _StubInferencer(fill=1.0))
+
+    result = search(scene, ExemplarBox(box=boxes[0]), ProposeRetrieveConfig())
+
+    assert result.outcome is SearchOutcome.OK
+    assert len(result.matches) == len(boxes)  # every identical instance is found, not zero
+    assert result.diagnostics.metrics["threshold"] == pytest.approx(0.7)  # the floor decided
 
 
 # ================================================== real-model behaviour (skipped in CI)

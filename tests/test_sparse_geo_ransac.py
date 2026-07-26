@@ -25,10 +25,12 @@ from object_search.schemas import BBox, ExemplarBox, SearchOutcome
 from object_search.search import get_method, has_method
 from object_search.search.sparse_geo import (
     SparseGeoConfig,
+    _Instance,
     _is_degenerate,
     _model_from_complex,
     _model_to_box,
     _ransac_similarity,
+    _suppress_overlapping_instances,
     search,
 )
 
@@ -115,6 +117,31 @@ def test_scale_plausibility_rejection() -> None:
 
     plausible = _model_from_complex(1.0 + 0j, complex(0.0, 0.0), reflect=False)  # scale 1
     assert _is_degenerate(plausible, min_scale=0.2, max_scale=5.0)[0] is False
+
+
+def test_nms_suppresses_a_duplicate_box_but_keeps_a_distinct_one() -> None:
+    """Two peaks mapping to nearly the same box are one detection; a far box is a separate one.
+
+    Hough de-duplicates in pose space, so a second peak with a slightly different fitted pose can
+    still land on the same scene box -- a 1 TP + 1 FP precision leak (EVAL-16) that only the final
+    IoU NMS removes. The stronger (more inliers) box survives; a spatially distinct instance is
+    untouched.
+    """
+    model = _model_from_complex(1.0 + 0j, complex(0.0, 0.0), reflect=False)
+    strong = _Instance(box=BBox(x=10, y=10, w=40, h=40), model=model, n_inliers=20, votes=20.0)
+    near_dup = _Instance(box=BBox(x=12, y=11, w=40, h=40), model=model, n_inliers=8, votes=8.0)
+    distinct = _Instance(box=BBox(x=200, y=200, w=40, h=40), model=model, n_inliers=12, votes=12.0)
+
+    kept = _suppress_overlapping_instances([strong, near_dup, distinct], iou_threshold=0.4)
+
+    kept_boxes = {inst.box.xyxy for inst in kept}
+    assert strong.box.xyxy in kept_boxes, "the stronger of the overlapping pair must survive"
+    assert near_dup.box.xyxy not in kept_boxes, "the weaker near-duplicate must be dropped"
+    assert distinct.box.xyxy in kept_boxes, "a spatially distinct instance must be untouched"
+
+    # nms_iou=1.0 is the escape hatch: nothing is ever suppressed (no box has IoU > 1.0).
+    unfiltered = _suppress_overlapping_instances([strong, near_dup, distinct], iou_threshold=1.0)
+    assert len(unfiltered) == 3
 
 
 def test_identity_model_maps_the_box_to_itself() -> None:

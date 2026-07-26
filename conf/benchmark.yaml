@@ -25,6 +25,7 @@ methods:
   - sparse-geo
   - dino-dense
   - propose-retrieve
+  - owlv2-oneshot
 
 # Scale/pose-varied synthetic scenes (the learned-favourable side of the crossover). The
 # chipset ids are added automatically inside resolve_run_set().
