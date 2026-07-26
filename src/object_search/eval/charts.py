@@ -59,7 +59,7 @@ _PNG_METADATA: dict[str, str | None] = {"Software": None}
 
 # Fixed method order so every chart's bars/lines are in the same, reproducible sequence rather
 # than JSON/dict insertion order (a real reproducibility threat, PITFALLS §6).
-_METHOD_ORDER: tuple[str, ...] = ("ncc", "sparse-geo", "dino-dense", "propose-retrieve")
+_METHOD_ORDER: tuple[str, ...] = ("ncc", "sparse-geo", "dino-dense", "propose-retrieve", "mosse")
 
 # The four pooled rates drawn in the headline chart, with human-readable labels.
 _RATE_LABELS: tuple[tuple[str, str], ...] = (

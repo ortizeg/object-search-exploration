@@ -27,14 +27,15 @@ RESULTS = json.loads((REPO_ROOT / "docs/benchmark/results.json").read_text())
 OUT = REPO_ROOT / "docs/reports/benchmark-report.html"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
-ORDER = ["ncc", "sparse-geo", "dino-dense", "propose-retrieve"]
+ORDER = ["ncc", "sparse-geo", "dino-dense", "propose-retrieve", "mosse"]
 COLOR = {
     "ncc": "#4C72B0",
     "sparse-geo": "#DD8452",
     "dino-dense": "#55A868",
     "propose-retrieve": "#C44E52",
+    "mosse": "#8172B3",
 }
-CIRCLED = "①②③④"
+CIRCLED = "①②③④⑤"
 LABEL = {m: f"{CIRCLED[i]} {m}" for i, m in enumerate(ORDER)}
 
 REGIMES = [
@@ -86,6 +87,17 @@ METHODS = [
         "boundaries; can over-segment dense grids.",
         "FastSAM, 2023",
         "https://arxiv.org/abs/2306.12156",
+    ),
+    (
+        "5",
+        "MOSSE",
+        "mosse",
+        "The FFT cousin of NCC. A small bank of MOSSE/ASEF correlation filters is synthesized from "
+        "the warped exemplar (the rotation bank folded into the closed-form solve) and matched by "
+        "<code>FFT</code> cross-correlation — a handful of transforms instead of NCC's spatial pass "
+        "per rotation. Near-NCC F1 on near-identical repeats at ~6× lower latency; weaker in clutter.",
+        "MOSSE, Bolme et al. CVPR 2010",
+        "https://www.cs.colostate.edu/~vision/publications/bolme_cvpr10.pdf",
     ),
 ]
 

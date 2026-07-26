@@ -93,6 +93,7 @@ class BenchmarkConfig(BaseModel):
 
     methods: tuple[str, ...] = (
         "ncc",
+        "mosse",
         "sparse-geo",
         "dino-dense",
         "propose-retrieve",
