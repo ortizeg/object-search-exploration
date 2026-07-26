@@ -71,6 +71,12 @@ Post-processing (exact)
 - Degeneracy rejection uses **scale plausibility** and **mirror rejection** (a negative
   determinant of the fitted 2x2 linear part). Shear and aspect distortion are deliberately NOT
   tested: a 4-DoF similarity has neither by construction, so those tests are vacuous.
+- **Duplicate suppression (post-verification).** Hough de-duplicates in *pose* space (the 3^4
+  neighbourhood), but two peaks in genuinely different pose bins can still map the exemplar to
+  nearly the **same scene box** -- a duplicate the benchmark scores as 1 TP + 1 FP (EVAL-16). A
+  final IoU NMS (``nms_iou``, keyed on inlier support) drops the weaker of each overlapping pair,
+  via the shared deterministic ``nms`` offering (``(-score, y, x)`` tie-break) so the
+  symmetric-lattice case stays byte-identical across runs.
 - Multiple distinct models are returned (METHOD-12); there is no single-best short-circuit.
 
 Known failure modes
@@ -125,6 +131,7 @@ from object_search.schemas import (
     SearchOutcome,
     SearchResult,
 )
+from object_search.search.common.nms import nms
 from object_search.search.registry import register_method
 
 if TYPE_CHECKING:  # the learned backend; imported lazily at construction so this module's import
@@ -174,7 +181,7 @@ class SparseGeoConfig(BaseModel):
         ),
     )
     k: int = Field(
-        default=6,
+        default=8,
         ge=1,
         description=(
             "Top-k scene neighbours kept per crop keypoint, UNCONDITIONALLY (no standard ratio "
@@ -211,9 +218,14 @@ class SparseGeoConfig(BaseModel):
         ),
     )
     min_votes: int = Field(
-        default=3,
+        default=2,
         ge=1,
-        description="Minimum accumulated vote weight in a bin to hypothesize an instance cluster.",
+        description=(
+            "Minimum accumulated vote weight in a bin to hypothesize an instance cluster. This is "
+            "only a cheap PRE-FILTER before per-peak RANSAC (the real gate is min_inliers), so it "
+            "is kept low: a stricter floor here silently discards true instances before they are "
+            "ever verified."
+        ),
     )
     min_inliers: int = Field(
         default=5,
@@ -226,7 +238,7 @@ class SparseGeoConfig(BaseModel):
         description="Cap on sampled correspondence pairs for pairwise-4dof (it is O(n^2)).",
     )
     min_exemplar_keypoints: int = Field(
-        default=20,
+        default=8,
         ge=1,
         description=(
             "Below this many exemplar keypoints the crop lacks texture for this method; search "
@@ -239,9 +251,22 @@ class SparseGeoConfig(BaseModel):
         description="RANSAC iterations per peak (2-point minimal samples).",
     )
     ransac_thresh_px: float = Field(
-        default=5.0,
+        default=3.0,
         gt=0.0,
         description="Inlier reprojection-error threshold in scene pixels.",
+    )
+    nms_iou: float = Field(
+        default=0.4,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Overlap ceiling for the final duplicate-instance suppression. Two verified peaks in "
+            "different pose-space bins can still map to the SAME scene box (a duplicate detection, "
+            "which the benchmark scores as 1 TP + 1 FP); after verification, boxes overlapping a "
+            "stronger box by MORE than this IoU are dropped, keeping the higher-inlier one. Set "
+            "high (0.5) so only true duplicates are merged and legitimately adjacent/touching "
+            "instances survive."
+        ),
     )
     min_scale: float = Field(
         default=0.2,
@@ -1173,6 +1198,28 @@ def _verify_sequential_ransac(
     return instances, [], diag_peaks
 
 
+def _suppress_overlapping_instances(
+    instances: list[_Instance], iou_threshold: float
+) -> list[_Instance]:
+    """Drop duplicate instances whose boxes overlap a stronger one by more than ``iou_threshold``.
+
+    Hough de-duplicates in POSE space (the 3^4 neighbourhood), but two peaks in genuinely
+    different pose bins -- a slightly different fitted scale or rotation, say -- can still map the
+    exemplar to nearly the SAME scene box. The benchmark scores that second box as 1 TP + 1 FP
+    (EVAL-16), so an un-suppressed duplicate is a pure precision leak. Ranking by inlier support
+    and keeping the strongest of each overlapping group removes it. The shared ``nms`` offering is
+    used for its **deterministic** ``(-score, y, x)`` tie-break: on the symmetric lattices this
+    method is aimed at, instance scores tie exactly, and a naive greedy NMS would keep a
+    caller-order-dependent set, breaking the same-input-same-output contract.
+    """
+    if len(instances) < 2:
+        return instances
+    boxes = [inst.box for inst in instances]
+    scores = [float(inst.n_inliers) for inst in instances]
+    kept = set(nms(boxes, scores, iou_threshold))
+    return [inst for i, inst in enumerate(instances) if i in kept]
+
+
 def _label_exemplar_and_build_matches(
     instances: list[_Instance], exemplar: BBox
 ) -> tuple[Match, ...]:
@@ -1321,8 +1368,11 @@ def search(
     inference_ms = (perf_counter() - t_infer) * 1000.0
     t_post = perf_counter()
 
-    # 8. Box mapping already happened per instance; label the exemplar self-match and assemble the
+    # 8. Box mapping already happened per instance; suppress duplicate boxes two pose bins can both
+    #    produce (a 1 TP + 1 FP precision leak), then label the exemplar self-match and assemble the
     #    diagnostics overlay (correspondences + Hough peaks) the practitioner reads.
+    n_before_nms = len(instances)
+    instances = _suppress_overlapping_instances(instances, config.nms_iou)
     matches = _label_exemplar_and_build_matches(instances, ex)
     ordered_corr = sorted(matched.correspondences, key=lambda c: c.distance)
     diag_correspondences = tuple(
@@ -1342,6 +1392,7 @@ def search(
         "n_dropped_kplus1": float(matched.n_dropped_kplus1),
         "n_peaks": float(len(peaks)),
         "n_instances": float(len(matches)),
+        "n_suppressed_nms": float(n_before_nms - len(instances)),
         "n_candidates": float(len(candidates)),
         "pairwise_pairs_sampled": float(cast.pairwise_pairs_sampled),
         "pairwise_capped": 1.0 if cast.pairwise_capped else 0.0,

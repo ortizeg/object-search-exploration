@@ -85,6 +85,12 @@ From `.planning/POLISH-BACKLOG.md`:
 Real numbers over the committed 12-image demo set (chipset repeats + scale/clutter synthetics,
 IoU 0.5). Full tables and charts: [`benchmark/results.md`](benchmark/results.md).
 
+> **Note (superseded snapshot).** The table below is an early 12-image run. The current
+> objective benchmark is the 60-image set in [`benchmark/results.md`](benchmark/results.md),
+> where `sparse-geo` was subsequently tuned (spatial NMS + default changes) to **F1 0.823 /
+> AP 0.751** — see the [sparse-geo tuning log](methods/sparse-geo-tuning.md). The crossover
+> finding for `sparse-geo` still holds; only its magnitude changed.
+
 | method | precision | recall | F1 | mean AP | p50 latency |
 | --- | --- | --- | --- | --- | --- |
 | `ncc` | 0.913 | 0.922 | 0.918 | 0.484 | 238 ms |
