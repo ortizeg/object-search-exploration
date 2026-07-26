@@ -16,10 +16,21 @@ Two threats shape this module (see the plan's threat register):
   archive is licence-gated and human-supplied, so it is unpinned (``None``): its bytes are
   *recorded* in provenance rather than gated, exactly as the unpinned FastSAM export is.
 
-CARPK is ``requires_manual``: the data sits behind a terms-of-use gate with no unauthenticated
-direct-download URL, so ``fetch`` never reaches the network. A human accepts the licence and drops
-the archive at ``datasets/_incoming/carpk/``; when it is absent ``fetch`` logs that instruction and
-returns ``None`` **without crashing the sweep** (T-11-05, mirroring ``models._export``).
+Every dataset here is ``requires_manual``: each sits behind a terms-of-use gate with no
+unauthenticated direct-download URL, so ``fetch`` never reaches the network for any of them. A
+human accepts the licence and drops the archive (or an already-extracted tree) at
+``datasets/_incoming/<subdir>/``; when it is absent ``fetch`` logs that instruction and returns
+``None`` **without crashing the sweep** (T-11-05, mirroring ``models._export``), so one missing
+dataset degrades only itself and the rest of a multi-dataset sweep proceeds.
+
+The raw layouts differ per dataset (``Annotations/`` + ``Images/`` for CARPK/PUCPR+;
+``annotations.json`` + ``images/`` + ``split.json`` for FSCD-147/FSCD-LVIS; ``annotations/`` +
+``images/`` + ``split.json`` for RPINE), so ``fetch`` is layout-agnostic: each :class:`DatasetSpec`
+carries a ``raw_marker`` (the relative path that identifies its raw root) and an ``images_subdir``
+(where its source scenes live), and :func:`_resolve_raw_root` / :func:`_provenance_entries` are
+driven off those rather than any hardcoded CARPK path. For FSCD-147/FSCD-LVIS only the scored
+(val/test) images are converted, so provenance is recorded per produced sidecar -- exactly the
+images each converter actually consumed.
 """
 
 from __future__ import annotations
@@ -80,6 +91,17 @@ class DatasetSpec(BaseModel):
     requires_manual: bool
     incoming_subdir: str
     default_split: str
+    # The relative path *inside the raw tree* that identifies its root -- ``"Annotations"`` (a dir)
+    # for carpk/pucpr_plus, ``"annotations.json"`` (a file) for fscd147/fscd_lvis, ``"annotations"``
+    # (a dir) for rpine. ``_resolve_raw_root`` locates the raw root by this marker rather than a
+    # hardcoded ``Annotations/``, so a dropped archive that wraps everything in one top-level dir is
+    # descended into by looking for the marker, per dataset.
+    raw_marker: str
+    # The subdir holding the source scene images inside the raw tree -- ``"Images"`` for
+    # carpk/pucpr_plus, ``"images"`` for fscd147/fscd_lvis/rpine. ``_provenance_entries`` hashes
+    # ``<images_subdir>/<image_id>.png`` for each produced sidecar (so FSCD's val/test-only
+    # conversion records exactly the images it converted, not every image in the tree).
+    images_subdir: str
     # Pinned SHA-256 of the raw archive when one is known; ``None`` for licence-gated,
     # human-supplied archives whose bytes are recorded (not gated) in provenance.
     archive_sha256: str | None
@@ -103,6 +125,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         requires_manual=True,
         incoming_subdir="carpk",
         default_split="test",
+        raw_marker="Annotations",
+        images_subdir="Images",
         archive_sha256=None,
         added_in_phase=11,
     ),
@@ -121,6 +145,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         requires_manual=True,
         incoming_subdir="pucpr_plus",
         default_split="test",
+        raw_marker="Annotations",
+        images_subdir="Images",
         archive_sha256=None,
         added_in_phase=11,
     ),
@@ -140,6 +166,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         requires_manual=True,
         incoming_subdir="fscd147",
         default_split="test",
+        raw_marker="annotations.json",
+        images_subdir="images",
         archive_sha256=None,
         added_in_phase=11,
     ),
@@ -158,6 +186,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         requires_manual=True,
         incoming_subdir="fscd_lvis",
         default_split="test",
+        raw_marker="annotations.json",
+        images_subdir="images",
         archive_sha256=None,
         added_in_phase=11,
     ),
@@ -176,6 +206,8 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         requires_manual=True,
         incoming_subdir="rpine",
         default_split="test",
+        raw_marker="annotations",
+        images_subdir="images",
         archive_sha256=None,
         added_in_phase=11,
     ),
@@ -214,12 +246,18 @@ def _safe_extract_zip(archive: Path, dest: Path) -> None:
         zf.extractall(dest)
 
 
-def _resolve_raw_root(incoming: Path, dataset_dir: Path) -> tuple[Path | None, Path | None]:
-    """Locate the raw CARPK tree from an ``_incoming`` drop.
+def _resolve_raw_root(
+    incoming: Path, dataset_dir: Path, marker: str
+) -> tuple[Path | None, Path | None]:
+    """Locate a dataset's raw tree from an ``_incoming`` drop, driven by its ``marker``.
 
-    Accepts either a dropped ``*.zip`` archive (extracted, zip-slip-guarded, into ``dataset_dir/
-    _raw``) or an already-extracted tree containing ``Annotations/``. Returns
-    ``(raw_root, archive)`` where either element is ``None`` when nothing usable was dropped.
+    ``marker`` is the relative path (a dir like ``Annotations`` / ``annotations``, or a file like
+    ``annotations.json``) that identifies the raw root -- ``spec.raw_marker``. Accepts either a
+    dropped ``*.zip`` archive (extracted, zip-slip-guarded, into ``dataset_dir/_raw``) or an
+    already-extracted tree. When an archive wraps everything in a single top-level dir the marker is
+    not at the top, so it is found recursively and the raw root is set to the marker's parent.
+
+    Returns ``(raw_root, archive)`` -- either element is ``None`` when nothing usable was dropped.
     """
     if not incoming.is_dir():
         return None, None
@@ -227,13 +265,13 @@ def _resolve_raw_root(incoming: Path, dataset_dir: Path) -> tuple[Path | None, P
     if archives:
         raw_root = dataset_dir / "_raw"
         _safe_extract_zip(archives[0], raw_root)
-        # Some archives wrap everything in a single top-level dir; descend to the Annotations tree.
-        if not (raw_root / "Annotations").is_dir():
-            nested = next((p.parent for p in raw_root.rglob("Annotations") if p.is_dir()), None)
+        # Some archives wrap everything in a single top-level dir; descend to the marker's parent.
+        if not (raw_root / marker).exists():
+            nested = next((p.parent for p in raw_root.rglob(marker)), None)
             if nested is not None:
                 raw_root = nested
         return raw_root, archives[0]
-    if (incoming / "Annotations").is_dir():
+    if (incoming / marker).exists():
         return incoming, None
     return None, None
 
@@ -264,14 +302,15 @@ def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -
         return out
 
     incoming = incoming_dir(root) / spec.incoming_subdir
-    raw_root, archive = _resolve_raw_root(incoming, dataset_dir)
+    raw_root, archive = _resolve_raw_root(incoming, dataset_dir, spec.raw_marker)
     if raw_root is None:
         incoming.mkdir(parents=True, exist_ok=True)
         logger.warning(
             "{}: no data found. Accept the licence at {} and place the archive (or extracted "
-            "Images/ + Annotations/ tree) at {}, then re-run `pixi run fetch-datasets`.",
+            "tree containing {!r}) at {}, then re-run `pixi run fetch-datasets`.",
             spec.key,
             spec.source_url,
+            spec.raw_marker,
             incoming,
         )
         return None
@@ -294,9 +333,15 @@ def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -
 def _provenance_entries(
     spec: DatasetSpec, raw_root: Path, sidecars: list[Path]
 ) -> list[dict[str, str]]:
-    """One entry per converted image's raw source bytes: sha256 + source_url + licence (D-08)."""
+    """One entry per converted image's raw source bytes: sha256 + source_url + licence (D-08).
+
+    Iterates the *produced* sidecars, so a dataset that converts only a subset of its images (FSCD's
+    val/test-only conversion) records provenance for exactly those images, not every image in the
+    raw tree. The source image lives at ``<images_subdir>/<image_id>.png`` (``Images`` for CARPK's
+    capitalized layout, ``images`` for the FSC/RPINE layouts) -- ``spec.images_subdir``.
+    """
     entries: list[dict[str, str]] = []
-    images_dir = raw_root / "Images"
+    images_dir = raw_root / spec.images_subdir
     for sidecar in sidecars:
         image_id = sidecar.name[: -len(".gt.json")]
         source_image = images_dir / f"{image_id}.png"

@@ -17,9 +17,11 @@ from typer.testing import CliRunner
 
 from object_search.cli import app
 from object_search.eval import datasets
+from object_search.eval.labels import load_research_ground_truth
 from object_search.provenance import repo_root
 
-_FIXTURE_ROOT = repo_root() / "tests" / "fixtures" / "research" / "carpk"
+_RESEARCH_FIXTURES = repo_root() / "tests" / "fixtures" / "research"
+_FIXTURE_ROOT = _RESEARCH_FIXTURES / "carpk"
 _CARPK = datasets.DATASET_REGISTRY["carpk"]
 
 
@@ -30,6 +32,35 @@ def _build_carpk_zip(dest_zip: Path) -> None:
         for sub in ("Images", "Annotations"):
             for path in sorted((_FIXTURE_ROOT / sub).iterdir()):
                 zf.write(path, arcname=f"{sub}/{path.name}")
+
+
+def _fixture_root(key: str) -> Path:
+    """The committed native-format fixture tree for dataset ``key``."""
+    return _RESEARCH_FIXTURES / key
+
+
+def _zip_tree(src_root: Path, dest_zip: Path, *, prefix: str = "") -> None:
+    """Zip every file under ``src_root`` into ``dest_zip``, preserving its relative structure.
+
+    ``prefix`` wraps the whole tree under one top-level dir, so a single-wrapping-dir archive (the
+    common "the whole dataset is inside one folder" drop) can be exercised against the raw-marker
+    descent in :func:`datasets._resolve_raw_root`.
+    """
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(dest_zip, "w") as zf:
+        for path in sorted(src_root.rglob("*")):
+            if path.is_file():
+                arcname = str(Path(prefix) / path.relative_to(src_root))
+                zf.write(path, arcname=arcname)
+
+
+def _copy_tree(src_root: Path, dest_root: Path) -> None:
+    """Copy every file under ``src_root`` into ``dest_root`` (an already-extracted drop)."""
+    for path in sorted(src_root.rglob("*")):
+        if path.is_file():
+            target = dest_root / path.relative_to(src_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
 
 
 # --------------------------------------------------------------------------- provenance + convert
@@ -74,6 +105,75 @@ def test_fetch_missing_archive_is_graceful(tmp_path: Path) -> None:
     # No archive dropped: fetch logs the drop instruction and returns None (never crashes the
     # sweep -- T-11-05), and writes no provenance.
     assert datasets.fetch(_CARPK, root=tmp_path) is None
+    assert not (datasets.datasets_dir(tmp_path) / "provenance.json").is_file()
+
+
+# -------------------------------------------------- every research dataset resolves from _incoming
+
+
+@pytest.mark.parametrize(
+    ("key", "drop_mode"),
+    [
+        # Both a zipped drop and an already-extracted-tree drop, spread across all four native
+        # layouts (FSC's annotations.json marker, RPINE's annotations/ dir marker, CARPK's
+        # Annotations/ marker), plus one single-wrapping-dir zip to exercise the marker descent.
+        ("carpk", "wrapped-zip"),
+        ("fscd147", "zip"),
+        ("fscd147", "tree"),
+        ("fscd_lvis", "zip"),
+        ("fscd_lvis", "tree"),
+        ("rpine", "zip"),
+        ("rpine", "tree"),
+        ("rpine", "wrapped-zip"),
+    ],
+)
+def test_fetch_resolves_each_dataset_from_incoming(
+    key: str, drop_mode: str, tmp_path: Path
+) -> None:
+    # Drop the committed native fixture at _incoming/<subdir>/ as either a zip, a single-wrapping-
+    # dir zip, or an extracted tree, then assert fetch converts + records provenance for each.
+    spec = datasets.DATASET_REGISTRY[key]
+    fixture = _fixture_root(key)
+    incoming = datasets.incoming_dir(tmp_path) / spec.incoming_subdir
+    if drop_mode == "zip":
+        _zip_tree(fixture, incoming / f"{key}.zip")
+    elif drop_mode == "wrapped-zip":
+        _zip_tree(fixture, incoming / f"{key}.zip", prefix=key)
+    else:
+        _copy_tree(fixture, incoming)
+
+    out = datasets.fetch(spec, root=tmp_path)
+    assert out is not None
+    assert out == datasets.datasets_dir(tmp_path) / key / spec.default_split
+    sidecars = sorted(out.glob("*.gt.json"))
+    assert sidecars, f"{key}: conversion produced at least one sidecar"
+
+    # Every converted sidecar loads back through the single research GT reader (D-10) -- no second
+    # ground-truth reader exists for any of the five datasets.
+    for sidecar in sidecars:
+        gt = load_research_ground_truth(sidecar)
+        assert gt is not None
+        assert gt.source == "research"
+        assert gt.boxes  # min_length=1 already, but assert the loaded truth is non-empty
+
+    # Provenance records sha256 + source_url + license for exactly the converted images (D-08):
+    # one entry per produced sidecar, hashing the real source image each converter consumed.
+    manifest = json.loads(
+        (datasets.datasets_dir(tmp_path) / "provenance.json").read_text(encoding="utf-8")
+    )
+    files = manifest["datasets"][key]["files"]
+    assert len(files) == len(sidecars)
+    for entry in files:
+        assert entry["sha256"]
+        assert entry["source_url"] == spec.source_url
+        assert entry["license"] == spec.license
+
+
+def test_fetch_missing_archive_is_graceful_for_fscd(tmp_path: Path) -> None:
+    # A licence-gated dataset with nothing dropped logs the drop instruction and returns None
+    # (T-11-05) -- not just CARPK; the graceful-absence path is generalized to every dataset.
+    spec = datasets.DATASET_REGISTRY["fscd147"]
+    assert datasets.fetch(spec, root=tmp_path) is None
     assert not (datasets.datasets_dir(tmp_path) / "provenance.json").is_file()
 
 
