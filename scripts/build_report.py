@@ -2,7 +2,7 @@
 
 Reads the committed docs/benchmark/results.json (run `pixi run bench` first), groups results by
 dataset regime, computes 95% confidence intervals by bootstrapping over IMAGES (instances within
-one image are not independent), renders the four numbered method descriptions with links to their
+one image are not independent), renders the five numbered method descriptions with links to their
 docs and primary references, a dataset section, per-regime scoreboards, and side-by-side overlays
 of every method in every regime. Charts are inline SVG, overlays are base64 JPEG -- no network, no
 JS. Run with `pixi run report`.
@@ -27,14 +27,15 @@ RESULTS = json.loads((REPO_ROOT / "docs/benchmark/results.json").read_text())
 OUT = REPO_ROOT / "docs/reports/benchmark-report.html"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
-ORDER = ["ncc", "sparse-geo", "dino-dense", "propose-retrieve"]
+ORDER = ["ncc", "sparse-geo", "dino-dense", "owlv2-oneshot", "propose-retrieve"]
 COLOR = {
     "ncc": "#4C72B0",
     "sparse-geo": "#DD8452",
     "dino-dense": "#55A868",
+    "owlv2-oneshot": "#8172B3",
     "propose-retrieve": "#C44E52",
 }
-CIRCLED = "①②③④"
+CIRCLED = "①②③④⑤"
 LABEL = {m: f"{CIRCLED[i]} {m}" for i, m in enumerate(ORDER)}
 
 REGIMES = [
@@ -79,6 +80,18 @@ METHODS = [
     ),
     (
         "4",
+        "owlv2-oneshot",
+        "owlv2-oneshot",
+        "OWLv2 image-conditioned one-shot detection. The exemplar crop is encoded as a query image; "
+        "every scene patch is scored by the cosine similarity of its OWLv2 class embedding to a "
+        "single query embedding, and accepted patches are read out through OWLv2's own trained "
+        "detection boxes. One supervised forward pass does localization and matching together — "
+        "Apache-2.0, high recall, scale-robust, but lower precision and the slowest method.",
+        "OWLv2, 2023",
+        "https://arxiv.org/abs/2306.09683",
+    ),
+    (
+        "5",
         "propose-retrieve",
         "propose-retrieve",
         "FastSAM proposes class-agnostic regions; each is embedded with the same DINOv2 and matched "
@@ -397,18 +410,19 @@ def build():
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>Object Search — benchmark report</title><style>{STYLE}</style></head><body><div class='wrap'>
 
-<h1>Object Search — four-method benchmark</h1>
-<p class='lede'>One hand-drawn box, four interchangeable methods, scored across <b>stratified
+<h1>Object Search — five-method benchmark</h1>
+<p class='lede'>One hand-drawn box, five interchangeable methods, scored across <b>stratified
 datasets</b> — the original easy chips plus textured sets that give the keypoint and deep-feature
 methods a fair fight. Confidence intervals are <b>bootstrap over images</b> (instances in one image
 are not independent). Abstentions render as <span class='na'>n/a</span>, never zero.</p>
 <p class='meta'>IoU 0.5 · AP all-point interpolation · CPU (deterministic) ·
 git <code>{RESULTS["git_sha"][:8]}</code> · bootstrap 2000× over images</p>
 
-<h2>The four methods</h2>
-<p class='sub'>Labelled 1–4 as implemented. The source-research numbering is 1, 2, 3, 5 — research
-Methods 4 (exemplar-conditioned detectors) and 6 (personalized segmentation) were deferred. Each
-card links its method doc (algorithm, pseudocode, config reference) and a primary reference.</p>
+<h2>The five methods</h2>
+<p class='sub'>Labelled 1–5 as implemented, now matching the source-research numbering: research
+Method 4 (exemplar-conditioned detectors) ships here as <code>owlv2-oneshot</code>; only Method 6
+(personalized segmentation) remains deferred. Each card links its method doc (algorithm,
+pseudocode, config reference) and a primary reference.</p>
 {methods_section()}
 
 <h2>The datasets</h2>
@@ -428,12 +442,12 @@ lands in a misleading middle. The per-regime tables below are the real result.</
 <div class='callout'><b>The crossover, made concrete.</b> On <b>EASY</b> chips ① NCC is
 near-perfect and ② sparse-geo abstains (too few keypoints). On <b>TEXTURED</b>, ② sparse-geo comes
 alive — the emblems carry real keypoints — and the deep-feature methods hold up. On <b>VARIED</b>
-(scale + rotation), ① NCC's recall collapses while ② sparse-geo, ③ dino-dense, and ④
-propose-retrieve stay competitive. No single method wins everywhere; that is the entire reason four
-exist.</div>
+(scale + rotation), ① NCC's recall collapses while ② sparse-geo, ③ dino-dense, ④ owlv2-oneshot,
+and ⑤ propose-retrieve stay competitive. No single method wins everywhere; that is the entire
+reason five exist.</div>
 
 <h2>Overlays — judge them yourself</h2>
-<p class='sub'>Same query box, all four methods, one representative image per regime. The
+<p class='sub'>Same query box, all five methods, one representative image per regime. The
 <span style='color:var(--accent)'>blue-outlined</span> tile is the exemplar.</p>
 {overlay_section(overlays)}
 

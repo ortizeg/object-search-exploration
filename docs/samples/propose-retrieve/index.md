@@ -5,7 +5,7 @@ hand-edit. Latency is reported live on the CLI, not here (it is not byte-stable)
 
 | image | outcome | instances found | threshold |
 | --- | --- | --- | --- |
-| [cluttered-distractors](cluttered-distractors.png) | ok | 9 | 0.6691 |
-| [lattice-plain](lattice-plain.png) | ok | 12 | 0.6630 |
-| [lattice-touching](lattice-touching.png) | empty | 0 | 1.0000 |
+| [cluttered-distractors](cluttered-distractors.png) | ok | 8 | 0.7000 |
+| [lattice-plain](lattice-plain.png) | ok | 12 | 0.7000 |
+| [lattice-touching](lattice-touching.png) | ok | 16 | 0.7000 |
 | [scatter-scaled](scatter-scaled.png) | ok | 8 | 0.8254 |
