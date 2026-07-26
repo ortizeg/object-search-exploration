@@ -70,8 +70,9 @@ METHODS = [
         "3",
         "dino-dense",
         "dino-dense",
-        "DINOv2 dense patch features for scene and crop; mean-pool the crop into a prototype, "
-        "cosine-similarity it against every location, threshold, connected components. Handles "
+        "DINOv2 dense patch features for scene and crop; score each scene location by its "
+        "best-matching-part cosine to the crop tokens (max-token), threshold at a contrast-"
+        "calibrated cut, connected components with exemplar-relative area bounds. Handles "
         "pose/lighting variation; coarse (stride-14) on tiny objects.",
         "DINOv2, 2023",
         "https://arxiv.org/abs/2304.07193",
