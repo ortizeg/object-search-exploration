@@ -126,7 +126,8 @@ AP with **no** change to F1:
 | VARIED (scale/rotation) | 0.239 | **0.459** | 0.177 | **0.398** |
 | CLUTTERED | 0.307 | **0.768** | 0.269 | **0.820** |
 
-The other three methods are **byte-for-byte unchanged** (the change is isolated to `ncc.py`). NCC
+The other four methods (`sparse-geo`, `dino-dense`, `propose-retrieve`, `owlv2-oneshot`) are
+**byte-for-byte unchanged** (the change is isolated to `ncc.py`). NCC
 now recovers a genuine share of the rotated/rescaled repeats while *strengthening* its home turf —
 EASY improves because `repeat-aware` also rejects the 5 stray baseline false positives.
 

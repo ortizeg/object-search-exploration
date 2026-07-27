@@ -63,6 +63,24 @@ httpx = ">=0.28"  # needed by fastapi's TestClient
 [feature.dev.dependencies]
 onnx = ">=1.22.0,<2"
 
+# Documentation site. mkdocs-material renders the existing docs/ Markdown tree into a themed,
+# searchable static site (dark mode, syntax highlighting, nav). It is pure-Python (PyPI wheel,
+# no native components), so it joins the DEFAULT environment without touching the conda native
+# graph or the onnxruntime pin — which is what lets `pixi run docs` work with no `-e` flag.
+[feature.docs.pypi-dependencies]
+mkdocs-material = ">=9.5"
+
+# UI screenshot capture. Playwright drives a headless Chromium against a running `pixi run
+# serve` to script the real canvas interaction (select method, drag an exemplar box, capture
+# the results + diagnostics overlay). Quarantined in its own `capture` environment: it pulls a
+# ~150 MB Chromium binary (via `pixi run -e capture playwright-install`) and is a one-off
+# maintainer action — the rendered PNGs are committed, so nobody browsing the docs runs this.
+[feature.capture.dependencies]
+python = "3.12.*"
+
+[feature.capture.pypi-dependencies]
+playwright = ">=1.48"
+
 # The FastSAM ONNX export needs Ultralytics, and therefore torch. Those are EXPORT-TIME-ONLY
 # dependencies, quarantined in this feature so the DEFAULT runtime environment stays
 # torch-free -- which makes the "ONNX Runtime for every learned model" constraint structural
@@ -75,16 +93,33 @@ ultralytics = "*"
 pytorch = "*"
 torchvision = "*"
 onnx = "*"
+# OWLv2 export (Method 4) needs transformers. Apache-2.0, so no copyleft constraint -- it is
+# export-time only purely because it pulls torch, which the runtime env deliberately excludes.
+transformers = ">=4.40"
+# torch.onnx.export's exporter imports onnxscript at call time (even the legacy path in torch 2.9+).
+onnxscript = "*"
 
 [environments]
-default = { features = ["dev"], solve-group = "default" }
+default = { features = ["dev", "docs"], solve-group = "default" }
 export = { features = ["export"] }
+# Playwright + Chromium only — deliberately NOT in the default solve-group. Screenshot capture
+# is a rare maintainer action against a running server; keeping it isolated means a browser
+# toolchain never enters the runtime environment.
+capture = { features = ["capture"] }
 
 # Export-only tasks live under the `export` feature so they are runnable ONLY in the `export`
 # environment (torch + ultralytics, AGPL-3.0). This keeps the AGPL exporter off the default
 # task surface: `pixi run export-fastsam` in the runtime env has no such task.
 [feature.export.tasks]
 export-fastsam = { cmd = "python scripts/export_fastsam.py" }
+export-owlv2 = { cmd = "python scripts/export_owlv2.py" }
+
+# Capture-only tasks, runnable ONLY in the `capture` environment (Playwright + Chromium).
+# `playwright-install` fetches the browser binary once; `capture-ui` drives a running server
+# (start `pixi run serve` first) and writes the walkthrough screenshots into docs/assets/ui/.
+[feature.capture.tasks]
+playwright-install = { cmd = "playwright install chromium" }
+capture-ui = { cmd = "python scripts/capture_ui.py" }
 
 # --------------------------------------------------------------------------------- tasks
 # These names are the contract CI invokes. Do not rename them.
@@ -100,6 +135,10 @@ fetch-models = "python -m object_search.cli fetch-models"
 # licence-gated: `fetch-datasets --list` prints where a human drops the archive first (D-08).
 fetch-datasets = "python -m object_search.cli fetch-datasets"
 serve = "uvicorn object_search.api.app:app --reload --port 8000"
+# Documentation site (mkdocs-material). `docs` serves it locally with live-reload at
+# http://127.0.0.1:8001; `docs-build` renders the static site into site/ (what CI publishes).
+docs = "mkdocs serve --dev-addr 127.0.0.1:8001"
+docs-build = "mkdocs build --strict"
 samples = "python -m object_search.cli render-samples"
 report = "python scripts/build_report.py"
 # Render the committed research-dataset report table from the (gitignored, regenerable)

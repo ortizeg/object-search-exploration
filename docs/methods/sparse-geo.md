@@ -8,6 +8,9 @@ This is Lowe's original multi-object recognition pipeline (IJCV 2004 §7.3).
 The module `src/object_search/search/sparse_geo.py` is meant to be read top to bottom; the
 numbered steps below match the `# 1.` … `# 9.` comments in `search()` one-for-one (METHOD-11).
 
+> How the current defaults were arrived at — the experiments run, kept, and reverted, with
+> before/after benchmark numbers — is recorded in the [tuning log](sparse-geo-tuning.md).
+
 ## What it is and when it wins
 
 `sparse-geo` targets the case NCC struggles with: instances that are the same object but sit at
@@ -98,6 +101,12 @@ project's explicit-preprocessing constraint, exact numbers not "standard normali
 - Degeneracy rejection uses **scale plausibility** and **mirror rejection** (negative determinant
   of the fitted linear part). Shear and aspect distortion are deliberately NOT tested — a 4-DoF
   similarity has neither by construction, so those tests are vacuous.
+- **Duplicate suppression.** Hough de-duplicates in *pose* space (the 3⁴ neighbourhood), but two
+  peaks in genuinely different pose bins can still map the exemplar to nearly the **same scene
+  box** — a duplicate the benchmark scores as 1 TP + 1 FP (EVAL-16). A final IoU NMS
+  (`nms_iou`, keyed on inlier support) drops the weaker of each overlapping pair. The shared
+  deterministic `nms` offering is used for its `(-score, y, x)` tie-break, so the symmetric-lattice
+  case (all scores tie exactly) stays byte-identical across runs.
 - **METHOD-12**: multiple distinct models are returned; there is no single-best short-circuit.
 
 ### SuperPoint output decoding (exact)
@@ -125,17 +134,18 @@ defaults, ranges, and help text):
 | field | type / range | default | purpose |
 |---|---|---|---|
 | `backend` | `sift`/`akaze`/`orb`/`superpoint` | `sift` | detector/descriptor; metric + frame fixed by it |
-| `k` | int ≥ 1 | 6 | top-k scene neighbours kept per crop keypoint (ratio test disabled) |
+| `k` | int ≥ 1 | 8 | top-k scene neighbours kept per crop keypoint (ratio test disabled) |
 | `use_kplus1_ratio` | bool | `false` | enable the only ratio test available (k-vs-(k+1)) |
 | `kplus1_ratio` | 0 < f ≤ 1 | 0.9 | drop a crop keypoint when dist(k) ≥ ratio·dist(k+1) |
 | `voting_mode` | `single-4dof`/`translation-2dof`/`pairwise-4dof` | `single-4dof` (classical), `translation-2dof` (superpoint) | how a correspondence becomes a pose vote |
 | `decomposition` | `hough`/`sequential-ransac` | `hough` | cluster-into-instances strategy |
-| `min_votes` | int ≥ 1 | 3 | min accumulated bin weight to hypothesize a cluster |
+| `min_votes` | int ≥ 1 | 2 | min accumulated bin weight to hypothesize a cluster (a cheap pre-filter before RANSAC) |
 | `min_inliers` | int ≥ 2 | 5 | min RANSAC inliers to accept a verified instance |
 | `pairwise_cap` | int ≥ 1 | 20000 | cap on sampled pairs for `pairwise-4dof` (O(n²)) |
-| `min_exemplar_keypoints` | int ≥ 1 | 20 | below this the crop abstains WITH a note (METHOD-04c) |
+| `min_exemplar_keypoints` | int ≥ 1 | 8 | below this the crop abstains WITH a note (METHOD-04c) |
 | `ransac_iters` | int ≥ 1 | 200 | RANSAC iterations per peak (2-point samples) |
-| `ransac_thresh_px` | f > 0 | 5.0 | inlier reprojection-error threshold in scene pixels |
+| `ransac_thresh_px` | f > 0 | 3.0 | inlier reprojection-error threshold in scene pixels |
+| `nms_iou` | 0 < f ≤ 1 | 0.4 | duplicate-instance suppression: drop a box overlapping a stronger one by more than this IoU |
 | `min_scale` / `max_scale` | f > 0 | 0.2 / 5.0 | scale-plausibility bounds for degeneracy rejection |
 | `seed` | int ≥ 0 | 0 | the REAL seed for `np.random.default_rng` (NOT `cv2.setRNGSeed`) |
 
@@ -254,6 +264,7 @@ with research Methods 4 and 6 deferred). The steps below mirror the `# 1.` … `
        accept at >= min_inliers inliers
 
 8. transform the exemplar box corners by each fitted model -> axis-aligned scene box
+   IoU NMS over the verified boxes (nms_iou, keyed on inliers) -> drop duplicate detections
    label the best-overlapping instance is_exemplar=True; keep sub-threshold peaks as candidates
 
 9. return every verified instance as a Match (with its fitted 2x3 transform)  # METHOD-12: no single-best

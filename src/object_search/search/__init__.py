@@ -21,7 +21,9 @@ cost of adding a method (INFRA-10).
 from object_search.search import (
     dino_dense,  # noqa: F401  (registers "dino-dense"; imported before propose_retrieve, which
     #                              reuses its DINOv2 singleton -- one model, shared)
+    mosse,  # noqa: F401  (registers "mosse"; the FFT correlation-filter cousin of ncc)
     ncc,  # noqa: F401  (registers "ncc")
+    owlv2_oneshot,  # noqa: F401  (registers "owlv2-oneshot")
     propose_retrieve,  # noqa: F401  (registers "propose-retrieve")
     sparse_geo,  # noqa: F401  (registers "sparse-geo")
 )

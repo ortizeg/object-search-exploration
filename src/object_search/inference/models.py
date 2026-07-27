@@ -121,6 +121,34 @@ MODEL_REGISTRY: Mapping[str, ModelSpec] = {
         dest="fastsam_s.onnx",
         added_in_phase=7,
     ),
+    # Method 4 (owlv2-oneshot): OWLv2 image-conditioned one-shot detection. Apache-2.0 (Google) --
+    # the permissive detector adopted after T-Rex2 / Rex-Omni were rejected as non-commercial.
+    "owlv2-base-patch16": ModelSpec(
+        key="owlv2-base-patch16",
+        source="export",
+        repo_id="google/owlv2-base-patch16-ensemble",
+        revision="main",
+        filename="owlv2_base_patch16.onnx",
+        # Pinned from the first verified in-env export (EVAL-09): opset 17, legacy exporter,
+        # transformers export env. scripts/export_owlv2.py asserted the graph I/O (class_embeds
+        # [b, num_patches, 512], pred_boxes [b, num_patches, 4], 3600 patches at 960). A
+        # byte-different re-export refuses to install. NOTE: the .onnx is machine-reproducible but
+        # torch/transformers version drift can shift bytes; re-pin if the export env is upgraded.
+        sha256="2271d85b1467cbedb07bd5b63cf1b0d9d06dc4574e0cd6e2a450ad431a050728",
+        license="Apache-2.0",
+        license_note=(
+            "Apache-2.0 (Google), the permissive tier -- NO AGPL/§13 and NO non-commercial "
+            "clause, unlike T-Rex2 / Rex-Omni (IDEA License 1.0, research-only). Adopting it does "
+            "not constrain how this repo may be shared."
+        ),
+        source_note=(
+            "Custom-head export (image-guided vision graph -> class_embeds + pred_boxes) via "
+            "transformers + torch, both Apache-2.0. Run in the `export` pixi env: `pixi run -e "
+            "export export-owlv2`. Image size 960, patch 16 (60x60 = 3600 patches)."
+        ),
+        dest="owlv2_base_patch16.onnx",
+        added_in_phase=8,
+    ),
 }
 
 
@@ -185,6 +213,15 @@ def fetch(spec: ModelSpec, *, force: bool = False) -> Path:
 
 
 def _export(spec: ModelSpec, dest: Path) -> Path:
+    """Dispatch a ``source="export"`` model to its per-model exporter (export pixi env only)."""
+    if spec.key == "fastsam-s":
+        return _export_fastsam(spec, dest)
+    if spec.key == "owlv2-base-patch16":
+        return _export_owlv2(spec, dest)
+    raise ValueError(f"no exporter registered for {spec.key!r}")
+
+
+def _export_fastsam(spec: ModelSpec, dest: Path) -> Path:
     """Run the scripted FastSAM export, or explain how to when torch is unavailable."""
     try:
         from ultralytics import FastSAM  # export env only; AGPL-3.0, never in the runtime env
@@ -199,6 +236,73 @@ def _export(spec: ModelSpec, dest: Path) -> Path:
     model = FastSAM("FastSAM-s.pt")
     exported = model.export(format="onnx", imgsz=1024, dynamic=True, simplify=False, opset=17)
     Path(exported).replace(dest)
+    logger.info(f"{spec.key}: exported to {dest}")
+    return dest
+
+
+# The OWLv2 image-guided vision graph: given one image, emit per-patch class embeddings and boxes.
+# 960/16 = 60 patches per side. Torch/transformers (Apache-2.0) are export-env only; the runtime
+# package never imports them. See scripts/export_owlv2.py and docs/library-reviews/owlv2.md.
+_OWLV2_IMAGE_SIZE = 960
+_OWLV2_OPSET = 17
+
+
+def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:
+    """Export OWLv2's image-guided vision graph (class_embeds + pred_boxes), or explain how to.
+
+    Wraps ``Owlv2ForObjectDetection`` so the ONNX graph takes a single ``pixel_values`` input and
+    returns the two tensors the method needs: projected per-patch ``class_embeds`` and normalized
+    per-patch ``pred_boxes``. The query-embedding selection and cosine scoring stay in NumPy in the
+    method module -- the graph is deliberately just the shared image encoder.
+    """
+    try:
+        import torch  # export env only (Apache-2.0); never imported by the runtime package
+        from transformers import Owlv2ForObjectDetection
+    except ImportError:
+        logger.warning(
+            f"{spec.key}: export needs the `export` pixi env (torch + transformers is not in "
+            f"the runtime env). Run: pixi run -e export fetch-models --only {spec.key}"
+        )
+        return dest
+
+    logger.info(f"{spec.key}: exporting OWLv2 image-guided vision graph to ONNX (Apache-2.0)")
+    model = Owlv2ForObjectDetection.from_pretrained(spec.repo_id)
+    model.eval()
+
+    class _VisionGraph(torch.nn.Module):  # type: ignore[misc]  # torch is untyped (Any) in this env
+        """Single-input wrapper: pixel_values -> (class_embeds, pred_boxes), per patch."""
+
+        def __init__(self, owlv2: Owlv2ForObjectDetection) -> None:
+            super().__init__()
+            self.owlv2 = owlv2
+
+        def forward(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            # Mirrors transformers' Owlv2ForObjectDetection.image_guided_detection encode path.
+            feature_map = self.owlv2.image_embedder(pixel_values=pixel_values)[0]
+            batch, grid_h, grid_w, hidden = feature_map.shape
+            image_feats = feature_map.reshape(batch, grid_h * grid_w, hidden)
+            pred_boxes = self.owlv2.box_predictor(image_feats, feature_map)
+            _, class_embeds = self.owlv2.class_predictor(image_feats)
+            return class_embeds, pred_boxes
+
+    example = torch.zeros((1, 3, _OWLV2_IMAGE_SIZE, _OWLV2_IMAGE_SIZE), dtype=torch.float32)
+    part = dest.with_suffix(dest.suffix + ".part")
+    torch.onnx.export(
+        _VisionGraph(model),
+        (example,),
+        str(part),
+        input_names=["pixel_values"],
+        output_names=["class_embeds", "pred_boxes"],
+        dynamic_axes={
+            "pixel_values": {0: "batch"},
+            "class_embeds": {0: "batch", 1: "num_patches"},
+            "pred_boxes": {0: "batch", 1: "num_patches"},
+        },
+        opset_version=_OWLV2_OPSET,
+        do_constant_folding=True,
+        dynamo=False,  # legacy exporter: honours dynamic_axes (the dynamo path uses dynamic_shapes)
+    )
+    part.replace(dest)
     logger.info(f"{spec.key}: exported to {dest}")
     return dest
 

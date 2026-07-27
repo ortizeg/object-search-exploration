@@ -131,7 +131,14 @@ class BenchmarkConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    methods: tuple[str, ...] = ("ncc", "sparse-geo", "dino-dense", "propose-retrieve")
+    methods: tuple[str, ...] = (
+        "ncc",
+        "mosse",
+        "sparse-geo",
+        "dino-dense",
+        "propose-retrieve",
+        "owlv2-oneshot",
+    )
     image_ids: tuple[str, ...] = _SYNTHETIC_IMAGE_IDS
     ci: bool = False
     iou_threshold: float = Field(default=0.5, gt=0.0, le=1.0)

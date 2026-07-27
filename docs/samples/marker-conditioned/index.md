@@ -5,6 +5,6 @@ hand-edit. Latency is reported live on the CLI, not here (it is not byte-stable)
 
 | image | outcome | instances found | threshold |
 | --- | --- | --- | --- |
-| [arrows](arrows.png) | ok | 1 | n/a |
-| [arrows-with-targets](arrows-with-targets.png) | ok | 1 | n/a |
+| [arrows](arrows.png) | ok | 6 | n/a |
+| [arrows-with-targets](arrows-with-targets.png) | ok | 3 | n/a |
 | [dots](dots.png) | ok | 5 | n/a |

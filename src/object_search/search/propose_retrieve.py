@@ -59,12 +59,24 @@ Post-processing (exact)
   a FAISS index is pure dependency cost; the embedding matrix is shaped ``(N, D)`` so a FAISS index
   slots in unchanged when corpus-scale search arrives (backlog).
 - **Threshold** via ``common.calibration`` (``gmm`` by default, or a fixed
-  ``retrieval_threshold``): an absolute cosine cut does not transfer across images for deep
-  features, which is what the calibrator is for. The exemplar's own region scores ~1.0 and anchors
-  the high mode.
-- **Post-retrieval NMS at ``nms_iou``** collapses SAM over-segmentation -- one object that FastSAM
-  split into several overlapping proposals, each of which embeds well, would otherwise produce
-  duplicate detections. The proposal count is recorded in diagnostics so the over-segmentation is
+  ``retrieval_threshold``), **clamped to an absolute ``similarity_floor``**: the gmm gives a
+  per-image adaptive cut between the "matches" mode (the exemplar's own region scores ~1.0) and the
+  background mode, but the cut is never allowed to sink below ``similarity_floor`` (a cosine to the
+  exemplar, whose self-cosine is 1.0). The floor does two things a bare two-mode fit cannot. (1) It
+  stops a *low* gmm cut from admitting moderate-cosine background -- the dominant precision leak on
+  cluttered scenes. (2) It rescues the **degenerate single-mode** case: a uniform lattice of
+  identical instances scores ~1.0 with no second mode, where the gmm's ``ratio`` fallback lands the
+  cut *at* the max score and the strict ``> threshold`` then rejects **every true match** (recall 0
+  -- the worst possible failure for a repeated-instance finder). In that case the floor alone
+  decides, so all the near-1.0 regions are accepted; an image with no other instances scores below
+  the floor and is correctly rejected. The floor is a distribution-independent *anchor*, not a
+  label-fit cut: the same value runs on every image and AP stays threshold-free (it sweeps the full
+  candidate log).
+- **Post-retrieval NMS at ``nms_iou`` (0.3)** collapses SAM over-segmentation -- one object that
+  FastSAM split into several *partially*-overlapping proposals (shifted/partial boxes that each
+  embed well) would otherwise produce duplicate detections. Tighter than the classical 0.5 because
+  "everything mode" emits many such partial proposals; 0.3 folds them in without merging genuinely
+  distinct instances. The proposal count is recorded in diagnostics so the over-segmentation is
   visible, not hidden.
 - **Sub-threshold candidates are retained** (EVAL-08) and **every accepted region survives** into
   matches after NMS -- there is **no single-best short-circuit** (METHOD-12).
@@ -110,9 +122,19 @@ Deferred deliberately (mirrored in ``docs/methods/propose-retrieve.md`` and
 - **FAISS index for corpus-scale retrieval** -- unnecessary for a few hundred proposals in one
   image; the ``(N, D)`` embedding matrix is shaped so it slots in when corpus search arrives.
 - **Background-masked region embedding** -- embed the FastSAM mask interior rather than the raw box
-  crop; the mask is already produced, so this is cheap and likely a real accuracy win.
+  crop. **Measured (2026-07-25), deferred.** *Pixel*-masking (fill background with the ImageNet
+  mean) HURT: it crashed synthetic recall 0.94 -> 0.65, because objects that fill their box gain
+  artificial fill edges and coarse-mask errors corrupt the descriptor. *Token*-masking (pool only
+  DINOv2 tokens whose patch centre is inside the mask) gave a real but small gain (+0.006 macro-F1,
+  helping the weakest cluttered/varied regimes) at ~2x latency (the per-proposal mask upsample from
+  ``return_masks=True``) and it erodes the clean ``embed_regions`` seam (which by design knows
+  nothing of masks). Not worth the cost yet; revisit if cluttered precision becomes the priority.
 - **Proposal filtering by an exemplar size/aspect prior** -- drop proposals whose shape cannot
-  match the exemplar before embedding, cutting both cost and false positives.
+  match the exemplar before embedding. **Measured (2026-07-25), rejected.** An area-ratio gate of
+  [0.25, 4]x exemplar-area crashed textured recall (varied 0.93 -> 0.59): the true instances
+  legitimately span a range of scales (that is the regime's whole point), so a size prior discards
+  them along with the clutter. A size prior fights the scale-invariance this method exists to
+  provide; do not add it.
 - **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
 - **MobileSAM everything-mode** with a ported ``SamAutomaticMaskGenerator`` as a second backend.
@@ -194,13 +216,31 @@ class ProposeRetrieveConfig(BaseModel):
         ),
     )
     nms_iou: float = Field(
-        default=0.5,
+        default=0.3,
         ge=0.0,
         le=1.0,
         description=(
             "Post-retrieval NMS IoU. A later accepted box overlapping a kept one by MORE than this "
             "is suppressed -- this is what collapses FastSAM over-segmentation (one object split "
-            "into several proposals) into a single detection."
+            "into several partially-overlapping proposals) into a single detection. Tighter than a "
+            "classical 0.5 because 'everything mode' emits many shifted/partial proposals of the "
+            "same object that only partly overlap the true box; 0.3 folds those in without merging "
+            "genuinely distinct instances."
+        ),
+    )
+    similarity_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Absolute cosine floor on the calibrated accept threshold (ignored when a fixed "
+            "retrieval_threshold is given). The gmm cut may raise the threshold ABOVE this but "
+            "never below it: the floor stops a low gmm cut from admitting background, AND rescues "
+            "the degenerate single-mode case -- a uniform lattice of identical instances scores "
+            "~1.0 with no second mode, where the bare gmm/ratio fallback lands the cut at the max "
+            "and rejects every true match. Anchored on the exemplar self-cosine (=1.0 for an "
+            "L2-normalized embedding), so a proposal is accepted when it is at least this fraction "
+            "as similar to the exemplar as the exemplar is to itself."
         ),
     )
     max_candidates: int = Field(
@@ -452,19 +492,32 @@ def search(
     #    sides are already L2-normalized, so the dot IS cosine similarity in [-1, 1].
     scores = np.asarray(proposal_embeddings @ exemplar_embedding, dtype=np.float32)
 
-    # 5. Calibrate/threshold. A fixed retrieval_threshold passes straight through; otherwise a
+    # 5. Calibrate/threshold. A fixed retrieval_threshold passes straight through. Otherwise a
     #    two-mode gmm cuts between the "matches" mode (the exemplar's own region scores ~1.0) and
-    #    the background mode. Absolute cosine cuts do not transfer across images, hence calibration.
-    strategy: calibration.CalibrationStrategy = (
-        "fixed" if config.retrieval_threshold is not None else "gmm"
-    )
-    calib = calibration.calibrate(
-        scores.astype(np.float64),
-        strategy=strategy,
-        fixed_threshold=config.retrieval_threshold,
-        seed=config.seed,
-    )
-    threshold = calib.threshold
+    #    the background mode, but the cut is clamped to an absolute similarity_floor (a cosine to
+    #    the exemplar, whose self-cosine is 1.0). The floor does two things a bare gmm cannot:
+    #    it stops a low gmm cut from admitting background, and it rescues the DEGENERATE single-mode
+    #    case -- a uniform lattice of identical instances scores ~1.0 with no second mode, where the
+    #    gmm/ratio fallback lands the cut at the max score and rejects every true match (recall 0,
+    #    the worst failure for a repeated-instance finder). There the floor accepts everything above
+    #    it; an image with no other instances scores below the floor and is correctly rejected.
+    if config.retrieval_threshold is not None:
+        calib = calibration.calibrate(
+            scores.astype(np.float64),
+            strategy="fixed",
+            fixed_threshold=config.retrieval_threshold,
+            seed=config.seed,
+        )
+        threshold = calib.threshold
+    else:
+        calib = calibration.calibrate(scores.astype(np.float64), strategy="gmm", seed=config.seed)
+        # Degenerate (single mode) => the gmm/ratio cut is meaningless; use the floor alone.
+        # Otherwise let the gmm raise the cut above the floor, but never sink it below.
+        threshold = (
+            config.similarity_floor
+            if calib.degenerate
+            else max(calib.threshold, config.similarity_floor)
+        )
 
     # 6. Split into accepted (matches) and sub-threshold candidates (EVAL-08), then POST-RETRIEVAL
     #    NMS the accepted set to collapse SAM over-segmentation. The candidate log keeps the top
@@ -498,6 +551,7 @@ def search(
     )
     metrics: dict[str, float] = {
         "threshold": threshold,
+        "similarity_floor": float(config.similarity_floor),
         "n_proposals": float(len(proposals)),
         "n_accepted_pre_nms": float(len(accepted)),
         "n_matches": float(len(matches)),
@@ -508,8 +562,14 @@ def search(
         "proposal_ms": proposal_ms,
         "embedding_ms": embedding_ms,
     }
+    floor_note = (
+        "fixed threshold (floor not applied)"
+        if config.retrieval_threshold is not None
+        else f"clamped to similarity_floor {config.similarity_floor:.2f}"
+        + (" (degenerate single mode)" if calib.degenerate else "")
+    )
     notes = (
-        f"calibration[{calib.strategy}]: {calib.reason}",
+        f"calibration[{calib.strategy}]: {calib.reason}; {floor_note}",
         (
             f"{len(proposals)} FastSAM proposal(s); {len(accepted)} cleared cosine threshold "
             f"{threshold:.4f}; NMS(iou={config.nms_iou}) collapsed {len(accepted) - len(matches)} "

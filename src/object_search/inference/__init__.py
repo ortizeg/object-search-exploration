@@ -19,6 +19,7 @@ from object_search.inference.onnx_inferencer import (
     ONNXInputSpec,
     PreprocessInfo,
 )
+from object_search.inference.owlv2 import Owlv2Embeddings, OWLv2Inferencer
 from object_search.inference.superpoint import SuperPointInferencer, SuperPointResult
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "ONNXContractError",
     "ONNXInferencer",
     "ONNXInputSpec",
+    "OWLv2Inferencer",
+    "Owlv2Embeddings",
     "PostProcessor",
     "PreprocessInfo",
     "Proposal",
