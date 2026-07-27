@@ -20,7 +20,7 @@ See the [benchmark report](reports/benchmark-report.html) for the per-regime res
 | **markers** (Milestone 2) | 3 | ✅ (tip/dir) | `pixi run markers` | Arrow/dot markers for the marker-conditioned exploration |
 | **basketball** | 3 | ✖ (rating-only) | — | Real broadcast frames with genuine texture; no box GT |
 
-Licensing and provenance for every committed file are in [`assets/demo/LICENSES.md`](../assets/demo/LICENSES.md).
+Licensing and provenance for every committed file are in [`assets/demo/LICENSES.md`](https://github.com/ortizeg/object-search-exploration/blob/main/assets/demo/LICENSES.md).
 
 ---
 

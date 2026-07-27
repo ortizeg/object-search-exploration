@@ -10,8 +10,8 @@ An *exploration* is a registry-level concept mirroring a method (`explorations/r
 estimator and the scoring function; its result is an ordinary `SearchResult`, so it persists and is
 scored through the Milestone 1 store/stats layer with **no schema migration**.
 
-Implemented in [`src/object_search/explorations/marker_conditioned.py`](../../src/object_search/explorations/marker_conditioned.py)
-(the pipeline) and [`src/object_search/explorations/markers.py`](../../src/object_search/explorations/markers.py)
+Implemented in [`src/object_search/explorations/marker_conditioned.py`](https://github.com/ortizeg/object-search-exploration/blob/main/src/object_search/explorations/marker_conditioned.py)
+(the pipeline) and [`src/object_search/explorations/markers.py`](https://github.com/ortizeg/object-search-exploration/blob/main/src/object_search/explorations/markers.py)
 (the orientation estimation). The numbered steps below match the numbered comments in the module.
 
 ## Pipeline
