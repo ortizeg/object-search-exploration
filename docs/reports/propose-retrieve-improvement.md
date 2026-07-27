@@ -4,7 +4,7 @@ A record of the empirical loop that took Method ④ `propose-retrieve` from **po
 catastrophic recall-0 hole on uniform lattices** to **pooled F1 0.91 and the best overall method on
 the bench**, by fixing the calibration and NMS post-processing. Two changes landed; three further
 levers were measured and deferred/rejected with data. The code is isolated to
-[`src/object_search/search/propose_retrieve.py`](../../src/object_search/search/propose_retrieve.py);
+[`src/object_search/search/propose_retrieve.py`](https://github.com/ortizeg/object-search-exploration/blob/main/src/object_search/search/propose_retrieve.py);
 this log captures the *why* and the measured deltas so the reasoning is not lost in the diff.
 
 Cross-references: the method is documented in

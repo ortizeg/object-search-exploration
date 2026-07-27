@@ -1,0 +1,62 @@
+name: docs
+
+# Build the MkDocs Material site from docs/ and publish it to GitHub Pages. Build on every PR
+# (so a broken link fails review — `docs-build` runs `mkdocs build --strict`), but only deploy
+# from main.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          # Same pin as ci.yml — the version that produced the committed lock. See ci.yml for
+          # why this is pinned rather than floated.
+          pixi-version: v0.62.2
+          environments: default
+          locked: true
+          cache: true
+          cache-write: ${{ github.ref == 'refs/heads/main' }}
+
+      # --strict turns a dead internal link or a nav typo into a red build instead of a
+      # silently-broken page. Same task a developer runs locally.
+      - name: Build site (mkdocs --strict)
+        run: pixi run docs-build
+
+      - name: Upload Pages artifact
+        # Only the deploy job (main) consumes this, but uploading on PRs too keeps the build
+        # job's success meaningful and lets a PR download the rendered site as an artifact.
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy
+    # Publish only from main; PRs build-and-check but never deploy.
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write        # to deploy to Pages
+      id-token: write     # to verify the deployment originates from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
