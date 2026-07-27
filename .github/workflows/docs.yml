@@ -40,7 +40,8 @@ jobs:
       - name: Upload Pages artifact
         # Only the deploy job (main) consumes this, but uploading on PRs too keeps the build
         # job's success meaningful and lets a PR download the rendered site as an artifact.
-        uses: actions/upload-pages-artifact@v3
+        # v5 targets Node 24 (v3 pulled a Node-20 upload-artifact, now deprecated).
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
@@ -59,4 +60,5 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        # v5 targets Node 24 (v4 was flagged as a deprecated Node-20 action).
+        uses: actions/deploy-pages@v5
