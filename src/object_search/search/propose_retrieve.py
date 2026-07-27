@@ -152,7 +152,7 @@ import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from object_search.inference import FastSAMConfig, models
+from object_search.inference import FastSAMConfig, models, resolve_providers
 from object_search.inference.dinov2 import DINOV2_EMBED_DIM, DINOV2_PATCH, DINOv2Inferencer
 from object_search.schemas import (
     BBox,
@@ -176,7 +176,7 @@ _METHOD_VERSION = "1.0.0"
 _FASTSAM_KEY = "fastsam-s"  # the MODEL_REGISTRY key for the proposal backend
 # DINOv2 is reused from Method 3 via dino_dense._get_inferencer(); its model key ("dinov2-small")
 # is defined ONCE, there. This method deliberately does not name a second dinov2 model.
-_PROVIDERS = ["CPUExecutionProvider"]  # pin the CPU EP so a run is bit-identical machine to machine
+_PROVIDERS = resolve_providers()  # CPU by default (bit-identical); OS_ONNX_PROVIDERS opts into GPU
 _EXEMPLAR_IOU = 0.5  # a match overlapping the exemplar by >= this is the exemplar's own region
 _EPS = 1e-12  # guards a zero-norm division; a genuinely zero embedding is background, not a match
 

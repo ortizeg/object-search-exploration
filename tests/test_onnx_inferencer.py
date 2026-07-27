@@ -14,7 +14,12 @@ import onnx
 import pytest
 from onnx import TensorProto, helper
 
-from object_search.inference import ONNXContractError, ONNXInferencer, ONNXInputSpec
+from object_search.inference import (
+    ONNXContractError,
+    ONNXInferencer,
+    ONNXInputSpec,
+    resolve_providers,
+)
 
 # Pin the CPU provider: the dev machine also exposes CoreML, and a fixed provider keeps the
 # tiny-model runs identical run to run.
@@ -172,3 +177,18 @@ def test_snap_to_multiple_requires_size_multiple() -> None:
             std=(1.0, 1.0, 1.0),
             resize="snap-to-multiple",
         )
+
+
+# ----------------------------------------------------- execution-provider resolution (GPU opt-in)
+
+
+def test_resolve_providers_defaults_to_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default is the CPU EP so a run is bit-identical across machines (reproducibility guarantee).
+    monkeypatch.delenv("OS_ONNX_PROVIDERS", raising=False)
+    assert resolve_providers() == ["CPUExecutionProvider"]
+
+
+def test_resolve_providers_env_override_opts_into_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A GPU box sets OS_ONNX_PROVIDERS to opt into CUDA (explicit, per-run, not bit-identical).
+    monkeypatch.setenv("OS_ONNX_PROVIDERS", "CUDAExecutionProvider, CPUExecutionProvider")
+    assert resolve_providers() == ["CUDAExecutionProvider", "CPUExecutionProvider"]
