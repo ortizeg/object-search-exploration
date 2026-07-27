@@ -159,6 +159,18 @@ def test_fetch_raises_and_cleans_up_on_sha256_mismatch(
     assert not dest.with_suffix(".onnx.part").exists()  # the partial was unlinked
 
 
+def test_fetch_installs_without_verification_when_no_sha256_is_pinned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A spec with no pinned sha256 installs the download as-is (the verification is skipped)."""
+    monkeypatch.setattr("object_search.provenance.repo_root", lambda: tmp_path)
+    spec = _github_spec(None)  # no integrity gate declared
+    monkeypatch.setattr(models.urllib.request, "urlopen", lambda _url: _FakeResponse(b"any bytes"))
+
+    dest = models.fetch(spec)
+    assert dest.read_bytes() == b"any bytes"
+
+
 def test_fetch_refetches_when_present_file_has_the_wrong_sha256(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -221,7 +221,11 @@ def _export(spec: ModelSpec, dest: Path) -> Path:
     raise ValueError(f"no exporter registered for {spec.key!r}")
 
 
-def _export_fastsam(spec: ModelSpec, dest: Path) -> Path:
+# pragma-excluded: the export bodies run torch + ultralytics, which live ONLY in the `export`
+# pixi env and are absent from the runtime/CI env by design, so they cannot execute under
+# coverage. The import-guarded fallback (deps absent -> log + return) is still asserted in
+# test_models.py; excluding the function stops export-env-only code reading as an untested gap.
+def _export_fastsam(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover
     """Run the scripted FastSAM export, or explain how to when torch is unavailable."""
     try:
         from ultralytics import FastSAM  # export env only; AGPL-3.0, never in the runtime env
@@ -247,7 +251,7 @@ _OWLV2_IMAGE_SIZE = 960
 _OWLV2_OPSET = 17
 
 
-def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:
+def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (export env only)
     """Export OWLv2's image-guided vision graph (class_embeds + pred_boxes), or explain how to.
 
     Wraps ``Owlv2ForObjectDetection`` so the ONNX graph takes a single ``pixel_values`` input and
