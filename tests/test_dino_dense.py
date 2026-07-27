@@ -310,6 +310,135 @@ def test_search_rejects_a_foreign_config() -> None:
         search(scene, ExemplarBox(box=BBox(x=5, y=5, w=20, h=20)), NCCConfig())
 
 
+# --------------------------------- model-free: the full search path (stubbed inferencer)
+#
+# The dense-matching core of `search` -- scoring, upsampling, contrast calibration, connected-
+# component extraction, exemplar labelling, the candidate/threshold split and diagnostics -- is
+# reachable in CI with NO gitignored weight by injecting a stub through the `_get_inferencer`
+# seam the module already exposes (the same pattern `test_owlv2_oneshot` uses). Without this, that
+# whole path is exercised only by the real-weight tests below, which skip in CI.
+
+_STUB_DIM = 8  # a tiny embedding: index 0 is the object direction, index 1 the background one.
+
+
+class _StubDinoInferencer:
+    """A minimal DINOv2 stand-in returning fixed token grids: object tokens vs background tokens.
+
+    Proves ``search`` needs only something with a ``dense_tokens(image) -> (grid, sx, sy)`` method.
+    The crop is far smaller than the scene, so image size disambiguates which grid to return --
+    exactly how the real two-call path (encode the crop, then the scene) is driven.
+    """
+
+    def __init__(
+        self, crop_grid: npt.NDArray[np.float32], scene_grid: npt.NDArray[np.float32]
+    ) -> None:
+        self.crop_grid = crop_grid
+        self.scene_grid = scene_grid
+        self.calls: list[tuple[int, int]] = []
+
+    def dense_tokens(
+        self, image: npt.NDArray[np.uint8]
+    ) -> tuple[npt.NDArray[np.float32], float, float]:
+        h, w = int(image.shape[0]), int(image.shape[1])
+        self.calls.append((h, w))
+        # scale_x/scale_y = 1.0: the stub grids already correspond 1:1 to a multiple-of-14 input,
+        # so `_upsample_similarity` recovers the exact scene pixel size (gw*14 x gh*14).
+        return (self.crop_grid, 1.0, 1.0) if max(h, w) <= 60 else (self.scene_grid, 1.0, 1.0)
+
+
+# Four well-separated 3x3-token object blocks on a 10x15 background grid. At scale 1.0 that grid
+# upsamples to a 140x210 scene; block (row, col) top-lefts are chosen so no two blocks touch after
+# the bilinear ramp, so connected components emits four distinct instances (METHOD-12).
+_STUB_BLOCKS: tuple[tuple[int, int], ...] = ((0, 0), (0, 12), (7, 0), (7, 6))
+# The exemplar box covers the top-left block's pixel footprint (its object-token centres span
+# x,y in [7, 35]); a generous 36px box overlaps that component well above the 0.5 exemplar IoU.
+_STUB_EXEMPLAR = ExemplarBox(box=BBox(x=3, y=3, w=36, h=36))
+
+
+def _stub_grids() -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    """Build the (crop_grid, scene_grid) pair: uniform-object crop, four object blocks on scene."""
+    crop = np.zeros((3, 3, _STUB_DIM), dtype=np.float32)
+    crop[..., 0] = 1.0  # every crop token points in the object direction -> prototype/bank = e0
+
+    scene = np.zeros((10, 15, _STUB_DIM), dtype=np.float32)
+    scene[..., 1] = 1.0  # background tokens are orthogonal to the object (cosine 0)
+    for r0, c0 in _STUB_BLOCKS:
+        scene[r0 : r0 + 3, c0 : c0 + 3, :] = 0.0
+        scene[r0 : r0 + 3, c0 : c0 + 3, 0] = 1.0  # object tokens (cosine 1 with the crop bank)
+    return crop, scene
+
+
+def _stub_scene() -> npt.NDArray[np.uint8]:
+    """A 140x210 scene image; its pixels are irrelevant (the stub keys off image size only)."""
+    return np.zeros((140, 210, 3), dtype=np.uint8)
+
+
+def test_search_end_to_end_with_a_stub_inferencer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search embeds crop + scene, scores, calibrates, extracts components, labels the exemplar."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    result = search(_stub_scene(), _STUB_EXEMPLAR, DinoDenseConfig())  # default contrast/max-token
+
+    assert result.outcome is SearchOutcome.OK
+    # METHOD-12: four object blocks -> four matches, never a single-best short-circuit.
+    assert len(result.matches) == 4
+    assert sum(m.is_exemplar for m in result.matches) == 1  # the block overlapping the exemplar
+    assert all(-1.0 <= m.score <= 1.0 for m in result.matches)  # scores are cosine similarities
+    assert all(m.transform is None for m in result.matches)  # appearance method, no affine
+    # Two forward passes, attributed separately: the crop encode, then the scene encode.
+    assert stub.calls[0] == (36, 36) and stub.calls[1] == (140, 210)
+    # Diagnostics carry the debug heatmap and the shipped metrics keys.
+    assert result.diagnostics.similarity_heatmap is not None
+    assert result.diagnostics.metrics["n_matches"] == 4.0
+    assert result.diagnostics.metrics["grid_h"] == 10.0
+    assert result.diagnostics.metrics["grid_w"] == 15.0
+    assert result.diagnostics.metrics["sim_max"] == pytest.approx(1.0, abs=1e-5)
+    assert result.candidates  # sub-threshold candidates retained (EVAL-08)
+
+
+def test_search_prototype_scoring_path_finds_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `prototype` scoring branch (mean-pooled vector, not the token bank) recovers them too."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    result = search(_stub_scene(), _STUB_EXEMPLAR, DinoDenseConfig(scoring="prototype"))
+
+    assert result.outcome is SearchOutcome.OK
+    assert len(result.matches) == 4
+
+
+@pytest.mark.parametrize("calibration_strategy", ["self-similarity", "ratio", "gmm"])
+def test_search_every_delegated_calibration_runs(
+    monkeypatch: pytest.MonkeyPatch, calibration_strategy: str
+) -> None:
+    """The classical calibrators (delegated to the shared `calibrate`) each produce a threshold."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    result = search(
+        _stub_scene(),
+        _STUB_EXEMPLAR,
+        DinoDenseConfig(calibration=calibration_strategy),  # type: ignore[arg-type]
+    )
+
+    assert result.threshold_applied is not None
+    assert result.outcome in {SearchOutcome.OK, SearchOutcome.EMPTY}
+
+
+def test_search_empty_when_threshold_clears_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An impossible fixed threshold yields EMPTY-with-note, never a raise (the no-match branch)."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    result = search(_stub_scene(), _STUB_EXEMPLAR, DinoDenseConfig(threshold=1.5))
+
+    assert result.outcome is SearchOutcome.EMPTY
+    assert result.matches == ()
+    assert result.threshold_applied == pytest.approx(1.5)
+    assert result.diagnostics.notes  # a note explains that nothing cleared the threshold
+
+
 # ================================================== real-model behaviour (skipped in CI)
 
 
