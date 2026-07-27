@@ -2,7 +2,7 @@
 
 Reads the committed docs/benchmark/results.json (run `pixi run bench` first), groups results by
 dataset regime, computes 95% confidence intervals by bootstrapping over IMAGES (instances within
-one image are not independent), renders the five numbered method descriptions with links to their
+one image are not independent), renders the six numbered method descriptions with links to their
 docs and primary references, a dataset section, per-regime scoreboards, and side-by-side overlays
 of every method in every regime. Charts are inline SVG, overlays are base64 JPEG -- no network, no
 JS. Run with `pixi run report`.
@@ -422,19 +422,20 @@ def build():
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>Object Search — benchmark report</title><style>{STYLE}</style></head><body><div class='wrap'>
 
-<h1>Object Search — five-method benchmark</h1>
-<p class='lede'>One hand-drawn box, five interchangeable methods, scored across <b>stratified
+<h1>Object Search — six-method benchmark</h1>
+<p class='lede'>One hand-drawn box, six interchangeable methods, scored across <b>stratified
 datasets</b> — the original easy chips plus textured sets that give the keypoint and deep-feature
 methods a fair fight. Confidence intervals are <b>bootstrap over images</b> (instances in one image
 are not independent). Abstentions render as <span class='na'>n/a</span>, never zero.</p>
 <p class='meta'>IoU 0.5 · AP all-point interpolation · CPU (deterministic) ·
 git <code>{RESULTS["git_sha"][:8]}</code> · bootstrap 2000× over images</p>
 
-<h2>The five methods</h2>
-<p class='sub'>Labelled 1–5 as implemented, now matching the source-research numbering: research
+<h2>The six methods</h2>
+<p class='sub'>Labelled 1–6 as implemented. Five map onto the source-research numbering — research
 Method 4 (exemplar-conditioned detectors) ships here as <code>owlv2-oneshot</code>; only Method 6
-(personalized segmentation) remains deferred. Each card links its method doc (algorithm,
-pseudocode, config reference) and a primary reference.</p>
+(personalized segmentation) remains deferred — and ⑥ <code>mosse</code> is an added FFT
+correlation-filter variant of NCC beyond the original research set. Each card links its method doc
+(algorithm, pseudocode, config reference) and a primary reference.</p>
 {methods_section()}
 
 <h2>The datasets</h2>
@@ -454,12 +455,12 @@ lands in a misleading middle. The per-regime tables below are the real result.</
 <div class='callout'><b>The crossover, made concrete.</b> On <b>EASY</b> chips ① NCC is
 near-perfect and ② sparse-geo abstains (too few keypoints). On <b>TEXTURED</b>, ② sparse-geo comes
 alive — the emblems carry real keypoints — and the deep-feature methods hold up. On <b>VARIED</b>
-(scale + rotation), ① NCC's recall collapses while ② sparse-geo, ③ dino-dense, ④ owlv2-oneshot,
-and ⑤ propose-retrieve stay competitive. No single method wins everywhere; that is the entire
-reason five exist.</div>
+(scale + rotation), ① NCC's recall collapses — as does its ⑥ mosse FFT cousin — while ② sparse-geo,
+③ dino-dense, ④ owlv2-oneshot, and ⑤ propose-retrieve stay competitive. No single method wins
+everywhere; that is the entire reason six exist.</div>
 
 <h2>Overlays — judge them yourself</h2>
-<p class='sub'>Same query box, all five methods, one representative image per regime. The
+<p class='sub'>Same query box, all six methods, one representative image per regime. The
 <span style='color:var(--accent)'>blue-outlined</span> tile is the exemplar.</p>
 {overlay_section(overlays)}
 
