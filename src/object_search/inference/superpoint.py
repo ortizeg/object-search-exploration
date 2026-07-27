@@ -106,6 +106,76 @@ class SuperPointResult(NamedTuple):
     descriptors: npt.NDArray[np.float32]  # (N, 256) -- already L2-normalized
 
 
+# -- pure pre/post-processing (model-free, so CI gates them without the gitignored weight) ------
+#
+# The SuperPoint preprocessing (BT.601 luma + pad-to-stride) and output decoding are the two most
+# fragile pieces of this inferencer and the exact contract the project constraints require pinned
+# with exact numbers. They are pulled out as free functions -- mirroring ``owlv2_preprocess_tensor``
+# -- so they are testable in CI with no weight; the instance methods below simply delegate.
+
+
+def superpoint_preprocess(
+    image: npt.NDArray[np.uint8], *, scale: float = SUPERPOINT_INPUT_SPEC.scale
+) -> PreprocessInfo:
+    """BGR-or-grayscale -> BT.601 luma, scaled to [0, 1], padded to a multiple of 8.
+
+    Accepts either a BGR ``(H, W, 3)`` scene/crop or an already-grayscale ``(H, W)`` array
+    (Method 2 grayscales the scene once and hands the single-channel crop and scene here, so
+    both shapes occur). The luma weighting is BT.601 either way -- ``cv2.COLOR_BGR2GRAY`` for a
+    colour input, or the caller's already-BT.601 gray untouched.
+
+    Padding is on the **bottom/right only**, so the top-left origin is preserved and keypoint
+    coordinates come back directly in original-image pixels with **no** remapping -- hence the
+    returned ``scale_x``/``scale_y`` are ``1.0`` and ``pad_x``/``pad_y`` are ``0``. ``scale`` is
+    the input contract's ``1/255`` (passed in so the value has a single source of truth).
+    """
+    luma = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    orig_h, orig_w = int(luma.shape[0]), int(luma.shape[1])
+
+    # Snap each side up to a multiple of the stride (pad, never resize): non-multiple sides are
+    # silently floored by the graph, dropping trailing rows/columns -- a coordinate truncation.
+    pad_h = (-orig_h) % SUPERPOINT_STRIDE
+    pad_w = (-orig_w) % SUPERPOINT_STRIDE
+    if pad_h or pad_w:
+        luma = cv2.copyMakeBorder(luma, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+
+    scaled = np.asarray(luma, dtype=np.float32) * np.float32(scale)
+    tensor = np.ascontiguousarray(scaled[np.newaxis, np.newaxis, :, :], dtype=np.float32)
+    return PreprocessInfo(
+        tensor=tensor,
+        scale_x=1.0,
+        scale_y=1.0,
+        pad_x=0,
+        pad_y=0,
+        input_w=orig_w + pad_w,
+        input_h=orig_h + pad_h,
+    )
+
+
+def superpoint_decode(
+    outputs: list[npt.NDArray[np.generic]],
+    output_names: tuple[str, ...],
+) -> SuperPointResult:
+    """Decode the three outputs into a :class:`SuperPointResult`, mapped by output name.
+
+    The v1.0.0 graph names its outputs ``keypoints`` / ``scores`` / ``descriptors``; they are
+    looked up by name (falling back to positional order if a re-export ever renames them) so a
+    graph-order change cannot silently swap them. The batch dimension (fixed at 1) is dropped.
+    """
+    named = dict(zip(output_names, outputs, strict=True))
+    try:
+        raw_kpts = named["keypoints"]
+        raw_scores = named["scores"]
+        raw_desc = named["descriptors"]
+    except KeyError:  # a re-export renamed the outputs -- fall back to the documented order
+        raw_kpts, raw_scores, raw_desc = outputs[0], outputs[1], outputs[2]
+
+    keypoints = np.asarray(raw_kpts, dtype=np.int64).reshape(-1, 2)
+    scores = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
+    descriptors = np.asarray(raw_desc, dtype=np.float32).reshape(-1, SUPERPOINT_DESCRIPTOR_DIM)
+    return SuperPointResult(keypoints, scores, descriptors)
+
+
 class SuperPointInferencer(ONNXInferencer[SuperPointResult]):
     """Load SuperPoint (ONNX), validate its grayscale input contract at load, run it.
 
@@ -143,38 +213,13 @@ class SuperPointInferencer(ONNXInferencer[SuperPointResult]):
     # -- pre-processing (the SuperPoint-specific override) -----------------------------
 
     def preprocess(self, image: npt.NDArray[np.uint8]) -> PreprocessInfo:
-        """BGR-or-grayscale -> BT.601 luma, scaled to [0, 1], padded to a multiple of 8.
+        """SuperPoint's grayscale luma-and-pad contract; delegates to :func:`superpoint_preprocess`.
 
-        Accepts either a BGR ``(H, W, 3)`` scene/crop or an already-grayscale ``(H, W)`` array
-        (Method 2 grayscales the scene once and hands the single-channel crop and scene here, so
-        both shapes occur). The luma weighting is BT.601 either way -- ``cv2.COLOR_BGR2GRAY`` for a
-        colour input, or the caller's already-BT.601 gray untouched.
-
-        Padding is on the **bottom/right only**, so the top-left origin is preserved and keypoint
-        coordinates come back directly in original-image pixels with **no** remapping -- hence the
-        returned ``scale_x``/``scale_y`` are ``1.0`` and ``pad_x``/``pad_y`` are ``0``.
+        Kept as an override (the base is the general RGB mean/std path) so the model's single-
+        channel, no-normalization contract is honoured; the pure logic lives in the free function
+        so it is testable without the gitignored weight.
         """
-        luma = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-        orig_h, orig_w = int(luma.shape[0]), int(luma.shape[1])
-
-        # Snap each side up to a multiple of the stride (pad, never resize): non-multiple sides are
-        # silently floored by the graph, dropping trailing rows/columns -- a coordinate truncation.
-        pad_h = (-orig_h) % SUPERPOINT_STRIDE
-        pad_w = (-orig_w) % SUPERPOINT_STRIDE
-        if pad_h or pad_w:
-            luma = cv2.copyMakeBorder(luma, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-
-        scaled = np.asarray(luma, dtype=np.float32) * np.float32(self.input_spec.scale)
-        tensor = np.ascontiguousarray(scaled[np.newaxis, np.newaxis, :, :], dtype=np.float32)
-        return PreprocessInfo(
-            tensor=tensor,
-            scale_x=1.0,
-            scale_y=1.0,
-            pad_x=0,
-            pad_y=0,
-            input_w=orig_w + pad_w,
-            input_h=orig_h + pad_h,
-        )
+        return superpoint_preprocess(image, scale=self.input_spec.scale)
 
     # -- output decoding ---------------------------------------------------------------
 
@@ -184,26 +229,13 @@ class SuperPointInferencer(ONNXInferencer[SuperPointResult]):
         orig_w: int,
         orig_h: int,
     ) -> SuperPointResult:
-        """Decode the three outputs into a :class:`SuperPointResult`, mapped by output name.
+        """Decode the three outputs; delegates to :func:`superpoint_decode`.
 
-        The v1.0.0 graph names its outputs ``keypoints`` / ``scores`` / ``descriptors``; they are
-        looked up by name (falling back to positional order if a re-export ever renames them) so a
-        graph-order change cannot silently swap them. The batch dimension (fixed at 1) is dropped.
         ``orig_w`` / ``orig_h`` are unused: preprocess pads on the far edges only, so keypoint
-        coordinates are already in original pixels.
+        coordinates are already in original pixels. The name-mapped decode logic lives in the free
+        function so it is testable without the gitignored weight.
         """
-        named = dict(zip(self.output_names, outputs, strict=True))
-        try:
-            raw_kpts = named["keypoints"]
-            raw_scores = named["scores"]
-            raw_desc = named["descriptors"]
-        except KeyError:  # a re-export renamed the outputs -- fall back to the documented order
-            raw_kpts, raw_scores, raw_desc = outputs[0], outputs[1], outputs[2]
-
-        keypoints = np.asarray(raw_kpts, dtype=np.int64).reshape(-1, 2)
-        scores = np.asarray(raw_scores, dtype=np.float32).reshape(-1)
-        descriptors = np.asarray(raw_desc, dtype=np.float32).reshape(-1, SUPERPOINT_DESCRIPTOR_DIM)
-        return SuperPointResult(keypoints, scores, descriptors)
+        return superpoint_decode(outputs, self.output_names)
 
     # -- the detection API -------------------------------------------------------------
 

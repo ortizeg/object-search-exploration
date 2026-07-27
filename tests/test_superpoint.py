@@ -2,10 +2,11 @@
 
 Two tiers, deliberately (mirroring `test_dinov2.py`):
 
-* **Model-free** -- the frozen grayscale input spec, the docstring contract, the frameless
-  keypoint mapping, and the config-only voting-mode rules (single-4dof rejected for superpoint,
-  translation-2dof the superpoint default). These need no weight and so **run in CI**, which is
-  where the load-bearing "single-4dof + superpoint raises" rule is gated.
+* **Model-free** -- the frozen grayscale input spec, the docstring contract, the extracted
+  preprocessing (BT.601 luma + pad-to-stride) and output decoding (name-mapped, batch-dropped),
+  the frameless keypoint mapping, and the config-only voting-mode rules (single-4dof rejected for
+  superpoint, translation-2dof the superpoint default). These need no weight and so **run in CI**,
+  which is where the load-bearing "single-4dof + superpoint raises" rule is gated.
 * **Real-model** -- loading `superpoint.onnx` and asserting the verified I/O contract
   (int64 keypoints, L2-normalized descriptors, 8-px border, variable count). These need the
   gitignored weight and are **skipped when it is absent**, exactly as the phase context requires.
@@ -27,6 +28,8 @@ from object_search.inference.superpoint import (
     SUPERPOINT_STRIDE,
     SuperPointInferencer,
     SuperPointResult,
+    superpoint_decode,
+    superpoint_preprocess,
 )
 from object_search.search.sparse_geo import (
     SparseGeoConfig,
@@ -86,6 +89,109 @@ def test_border_and_stride_constants_are_the_verified_values() -> None:
     assert SUPERPOINT_BORDER_PX == 8
     assert SUPERPOINT_STRIDE == 8
     assert SUPERPOINT_DESCRIPTOR_DIM == 256
+
+
+# ---------------------------------- model-free: the extracted preprocessing (luma + pad-to-8)
+
+
+def test_preprocess_grayscale_pads_to_stride_and_scales_by_1_over_255() -> None:
+    """A grayscale side that is not a multiple of 8 is zero-padded bottom/right, then scaled."""
+    gray = np.full((13, 21), 255, dtype=np.uint8)  # 13 -> 16, 21 -> 24 (next multiples of 8)
+    info = superpoint_preprocess(gray)
+
+    # NCHW, batch 1, single channel, sides snapped up to the stride.
+    assert info.tensor.shape == (1, 1, 16, 24)
+    assert info.tensor.dtype == np.float32
+    assert info.input_h == 16 and info.input_w == 24
+    # Far-edge padding preserves the top-left origin: no remap, no offset.
+    assert info.scale_x == 1.0 and info.scale_y == 1.0
+    assert info.pad_x == 0 and info.pad_y == 0
+    # The real content is 255/255 == 1.0; the padded rows/cols are exactly zero.
+    assert info.tensor[0, 0, :13, :21] == pytest.approx(1.0)
+    assert np.all(info.tensor[0, 0, 13:, :] == 0.0)
+    assert np.all(info.tensor[0, 0, :, 21:] == 0.0)
+
+
+def test_preprocess_multiple_of_eight_needs_no_padding() -> None:
+    gray = np.full((16, 24), 128, dtype=np.uint8)
+    info = superpoint_preprocess(gray)
+    assert info.tensor.shape == (1, 1, 16, 24)
+    assert info.input_h == 16 and info.input_w == 24
+    assert info.tensor[0, 0] == pytest.approx(128.0 / 255.0)
+
+
+def test_preprocess_applies_only_the_scale_no_mean_or_std() -> None:
+    """A uniform 0 stays 0 and a uniform 255 becomes 1.0: pure 1/255, never a mean subtraction."""
+    zeros = superpoint_preprocess(np.zeros((8, 8), dtype=np.uint8))
+    assert np.all(zeros.tensor == 0.0)  # a mean subtraction would push this negative
+    ones = superpoint_preprocess(np.full((8, 8), 255, dtype=np.uint8))
+    assert ones.tensor == pytest.approx(1.0)
+
+
+def test_preprocess_bgr_input_uses_bt601_luma() -> None:
+    """A 3-channel BGR input is reduced to one channel via BT.601 luma (COLOR_BGR2GRAY)."""
+    import cv2
+
+    rng = np.random.default_rng(0)
+    bgr = rng.integers(0, 256, size=(16, 24, 3), dtype=np.uint8)
+    info = superpoint_preprocess(bgr)
+
+    assert info.tensor.shape == (1, 1, 16, 24)  # collapsed to a single channel
+    expected = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    assert np.allclose(info.tensor[0, 0], expected, atol=1e-6)
+
+
+# ------------------------------- model-free: the extracted decode (name-mapped, batch-dropped)
+
+
+def _raw_outputs() -> tuple[npt.NDArray[np.generic], ...]:
+    """Three raw graph outputs with the batch dim present, one shared N=3."""
+    keypoints = np.array([[[10, 20], [30, 40], [50, 60]]], dtype=np.int64)  # [1, 3, 2]
+    scores = np.array([[0.9, 0.8, 0.7]], dtype=np.float32)  # [1, 3]
+    descriptors = np.zeros((1, 3, SUPERPOINT_DESCRIPTOR_DIM), dtype=np.float32)  # [1, 3, 256]
+    return keypoints, scores, descriptors
+
+
+def test_decode_maps_by_name_not_position_and_drops_the_batch_dim() -> None:
+    """Outputs are looked up by NAME, so a graph emitting them out of order still decodes right."""
+    keypoints, scores, descriptors = _raw_outputs()
+    # Deliberately NOT in (keypoints, scores, descriptors) order: descriptors first.
+    outputs = [descriptors, keypoints, scores]
+    names = ("descriptors", "keypoints", "scores")
+
+    result = superpoint_decode(outputs, names)
+
+    assert result.keypoints.dtype == np.int64
+    assert result.keypoints.shape == (3, 2)  # batch dim dropped
+    assert result.keypoints.tolist() == [[10, 20], [30, 40], [50, 60]]
+    assert result.scores.dtype == np.float32
+    assert result.scores.shape == (3,)
+    assert result.descriptors.shape == (3, SUPERPOINT_DESCRIPTOR_DIM)
+
+
+def test_decode_falls_back_to_documented_order_when_outputs_are_renamed() -> None:
+    """A re-export that renames the outputs falls back to positional (documented) order."""
+    keypoints, scores, descriptors = _raw_outputs()
+    outputs = [keypoints, scores, descriptors]  # documented order
+    renamed = ("out0", "out1", "out2")  # none of the expected names present -> KeyError -> fallback
+
+    result = superpoint_decode(outputs, renamed)
+
+    assert result.keypoints.tolist() == [[10, 20], [30, 40], [50, 60]]
+    assert result.scores.shape == (3,)
+    assert result.descriptors.shape == (3, SUPERPOINT_DESCRIPTOR_DIM)
+
+
+def test_decode_casts_keypoints_to_int64() -> None:
+    """Keypoints arriving as float are cast to int64 (the frameless integer-pixel contract)."""
+    keypoints = np.array([[[10.0, 20.0], [30.0, 40.0]]], dtype=np.float32)
+    scores = np.array([[0.9, 0.8]], dtype=np.float32)
+    descriptors = np.zeros((1, 2, SUPERPOINT_DESCRIPTOR_DIM), dtype=np.float32)
+    result = superpoint_decode(
+        [keypoints, scores, descriptors], ("keypoints", "scores", "descriptors")
+    )
+    assert result.keypoints.dtype == np.int64
+    assert result.keypoints.tolist() == [[10, 20], [30, 40]]
 
 
 # --------------------------------------------- model-free: the backend keypoints are frameless
