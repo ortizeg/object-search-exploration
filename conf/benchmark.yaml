@@ -22,6 +22,7 @@ defaults:
 # whose weights are absent records an error for that image rather than aborting the sweep.
 methods:
   - ncc
+  - mosse
   - sparse-geo
   - dino-dense
   - propose-retrieve

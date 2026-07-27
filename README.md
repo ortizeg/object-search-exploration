@@ -1,7 +1,7 @@
 # Object Search Exploration
 
 Draw a box around one object in an image; find every other instance of that same object
-**in that same image**. Five independent search methods sit behind one interface, selectable
+**in that same image**. Several independent search methods sit behind one interface, selectable
 *before* the box is drawn, so the same query can be run through different algorithms and
 compared side by side. A rating layer records how well each method did on each query, and a
 statistics layer turns those ratings — plus objective metrics on ground-truthed images —
@@ -36,26 +36,30 @@ are drawn back on the image with a diagnostics overlay. `ncc` and classical `spa
 no weights; `dino-dense`, `propose-retrieve`, and `owlv2-oneshot` need `fetch-models` first
 (the OWLv2 graph is produced by the export task — see below).
 
-## The five methods
+## The methods
 
 | Method | Key | Idea | Needs weights |
 | --- | --- | --- | --- |
-| 1 | [`ncc`](docs/methods/ncc.md) | Zero-model baseline: `cv2.matchTemplate` with `TM_CCOEFF_NORMED` over the full scene, then peak extraction and NMS. Pyramid scale search, optional rotation bank. | No |
+| 1 | [`ncc`](docs/methods/ncc.md) | Zero-model baseline: `cv2.matchTemplate` with `TM_CCOEFF_NORMED` over the full scene, then peak extraction and NMS. Pyramid scale search + a rotated-template bank for rotated repeats. | No |
+| 1′ | [`mosse`](docs/methods/mosse.md) | The **FFT cousin of `ncc`**: a small bank of MOSSE/ASEF correlation filters is synthesized from the warped exemplar (the rotation bank folded into the closed-form solve) and matched by **FFT** cross-correlation — a handful of transforms instead of one spatial pass per rotation. Near-`ncc` F1 on near-identical repeats at **~6× lower latency**; weaker in clutter. | No |
 | 2 | [`sparse-geo`](docs/methods/sparse-geo.md) | Keypoints on the crop matched into the scene, then **many** geometric models recovered rather than one (Hough voting / sequential RANSAC). Classical (SIFT/AKAZE/ORB) and learned (SuperPoint ONNX) backends. | No (classical) / yes (SuperPoint) |
 | 3 | [`dino-dense`](docs/methods/dino-dense.md) | Dense deep-feature similarity: DINOv2 patch tokens for scene and exemplar, cosine-similarity map, calibrate, peak-pick. | Yes (DINOv2) |
 | 4 | [`owlv2-oneshot`](docs/methods/owlv2-oneshot.md) | Image-conditioned one-shot detection: the exemplar crop is encoded as a query image, every scene patch is scored by cosine similarity of its OWLv2 class embedding to the query, and accepted patches are read out through OWLv2's own trained detection boxes. One supervised forward pass does localization and matching together. Apache-2.0. | Yes (OWLv2) |
 | 5 | [`propose-retrieve`](docs/methods/propose-retrieve.md) | Propose → embed → retrieve: FastSAM class-agnostic proposals, DINOv2 region embeddings, nearest-neighbour rank against the exemplar. Its `propose()` and `embed_regions()` stages are independently callable — the Milestone 2 seam. | Yes (FastSAM + DINOv2) |
 
-Method numbering follows the project brief; Method 6 remains deferred (see
-[`docs/ROBUSTNESS-BACKLOG.md`](docs/ROBUSTNESS-BACKLOG.md)).
+Method numbers 1–5 follow the project brief (Method 6 remains deferred — see
+[`docs/ROBUSTNESS-BACKLOG.md`](docs/ROBUSTNESS-BACKLOG.md)); `mosse` (1′) is a later research spike,
+the FFT correlation-filter alternative to `ncc`'s spatial bank, kept as a *separate* method so the
+spatial-NCC crossover baseline stays intact for a fair head-to-head (see
+[`docs/reports/mosse-improvement.md`](docs/reports/mosse-improvement.md)).
 
-## Sample runs — all five methods, side by side
+## Sample runs — each method, side by side
 
 Pre-rendered sample runs are committed under `docs/samples/` so the behaviour of each method
 is reviewable without running anything. The gallery is produced by a single renderer that
-**iterates the method registry**, so every registered method appears with no per-method code.
-Regenerate the whole gallery with `pixi run samples` (deterministic — it regenerates
-byte-for-byte).
+**iterates the method registry**, so every registered method (including `mosse`) appears with no
+per-method code. Regenerate the whole gallery with `pixi run samples` (deterministic — it
+regenerates byte-for-byte).
 
 The plain lattice scene (twelve identical instances) run through each method:
 
@@ -66,6 +70,12 @@ The plain lattice scene (twelve identical instances) run through each method:
 | ![dino-dense](docs/samples/dino-dense/lattice-plain.png) | ![owlv2-oneshot](docs/samples/owlv2-oneshot/lattice-plain.png) |
 | [`propose-retrieve`](docs/samples/propose-retrieve/) | |
 | ![propose-retrieve](docs/samples/propose-retrieve/lattice-plain.png) | |
+
+`mosse`'s gallery lives at [`docs/samples/mosse/`](docs/samples/mosse/): it recovers all twelve on
+the plain lattice and correctly abstains (`empty`) on the textureless solid-rectangle lattice, but
+misses the scale-varied `scatter-scaled` and over-detects the `cluttered-distractors` scene — the
+same transformed-regime weakness the [benchmark](#benchmark) quantifies, where its value is the
+near-`ncc` accuracy on near-identical repeats at a fraction of the latency, not clutter robustness.
 
 Each method's gallery also covers `cluttered-distractors`, `scatter-scaled`, and the
 solid-rectangle `lattice-touching` scene, where texture-free methods honestly abstain rather
@@ -104,11 +114,12 @@ canvas-sensitive method like `ncc` reads high here — see the latency-by-canvas
 
 | method | precision | recall | F1 | mean AP | p50 latency |
 | --- | --- | --- | --- | --- | --- |
-| `ncc` | 0.855 | 0.730 | 0.788 | 0.779 | 1664 ms |
-| `sparse-geo` | 0.884 | 0.770 | 0.823 | 0.751 | 107 ms |
-| `dino-dense` | 0.474 | 0.698 | 0.565 | 0.475 | 533 ms |
-| `owlv2-oneshot` | 0.509 | 0.878 | 0.645 | 0.499 | 4926 ms |
-| `propose-retrieve` | 0.865 | 0.955 | 0.908 | 0.599 | 384 ms |
+| `ncc` | 0.855 | 0.730 | 0.788 | 0.779 | 1451 ms |
+| `mosse` | 0.722 | 0.665 | 0.692 | 0.734 | **209 ms** |
+| `sparse-geo` | 0.884 | 0.770 | 0.823 | 0.751 | 87 ms |
+| `dino-dense` | 0.474 | 0.698 | 0.565 | 0.475 | 468 ms |
+| `owlv2-oneshot` | 0.509 | 0.878 | 0.645 | 0.499 | 4026 ms |
+| `propose-retrieve` | 0.865 | 0.955 | 0.908 | 0.599 | 362 ms |
 
 ![metrics by method](docs/benchmark/metrics_by_method.png)
 
@@ -118,9 +129,14 @@ the entire point of the project):
 - **`propose-retrieve` is the strongest general retriever** — best F1 (0.908) and best recall
   (0.955), scale-robust (fixed 0.971 / varied 0.934) — at a moderate, roughly canvas-independent
   latency.
-- **`ncc` wins the fixed-scale, near-identical regime decisively** (fixed-scale recall 0.959) and
-  posts the highest mean AP (0.779), but still collapses when instance scale varies (varied-scale
-  recall 0.412), and its cost grows steeply with canvas size (71 s at 6000×4000).
+- **`ncc` and `mosse` are the NCC crossover, made visible.** `ncc` wins the fixed-scale,
+  near-identical regime decisively (fixed-scale recall 0.959) and posts the highest mean AP (0.779),
+  but collapses when instance scale varies (varied-scale recall 0.412) and its cost grows steeply
+  with canvas size (tens of seconds at 6000×4000). **`mosse`** reaches near-`ncc` F1 on the
+  near-identical regimes (EASY ≈ 0.90, TEXTURED ≈ 0.99) at **~7× lower median latency**
+  (209 ms vs 1451 ms) by folding `ncc`'s spatial rotation bank into a small FFT correlation-filter
+  bank — while `ncc`'s exhaustive bank keeps the edge in clutter. See
+  [`docs/reports/mosse-improvement.md`](docs/reports/mosse-improvement.md).
 - **`sparse-geo` is now competitive, not an abstainer.** The NMS + tuned-defaults fix
   (F1 0.72 → 0.82) recovers it: F1 0.823, best precision (0.884), and scale-robust
   (fixed 0.773 / varied 0.765). It still abstains on 6 of 60 low-texture queries — declining
@@ -129,7 +145,7 @@ the entire point of the project):
 - **`dino-dense` recovered from its one-giant-box failure** (textured F1 ≈ 0.03 → pooled F1 0.565
   after the per-instance-peak + contrast-calibration fix), and is scale-robust (varied 0.749); the
   stride-14 token grid still under-localises the small flat chips, which is why NCC owns that regime.
-- **`owlv2-oneshot` (Method 4, new)** is the permissive Apache-2.0 learned detector: high recall
+- **`owlv2-oneshot` (Method 4)** is the permissive Apache-2.0 learned detector: high recall
   (0.878) and scale-robust (fixed 0.855 / varied 0.909) from a supervised detection head, but low
   precision (0.509) and the slowest method (~5 s, essentially canvas-independent).
 
@@ -159,6 +175,7 @@ src/object_search/
 ├── search/
 │   ├── registry.py   # @register_method -- the only indirection in the codebase
 │   ├── ncc.py                # Method 1 -- self-contained
+│   ├── mosse.py              # Method 1' -- FFT correlation-filter cousin of ncc, self-contained
 │   ├── sparse_geo.py         # Method 2 -- self-contained
 │   ├── dino_dense.py         # Method 3 -- self-contained
 │   ├── owlv2_oneshot.py      # Method 4 -- self-contained

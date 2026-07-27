@@ -20,6 +20,27 @@ None of the following is built in Phase 2; all are captured here and in the `ncc
 - **Discriminative correlation filters (MOSSE/KCF)** trained on the single exemplar crop, so
   the filter learns to suppress background instead of correlating raw pixels.
 
+> **Realized by the [`mosse`](methods/mosse.md) method** (see
+> [`reports/mosse-improvement.md`](reports/mosse-improvement.md)): the first two items — **FFT-based
+> correlation** and **discriminative correlation filters (MOSSE/ASEF)** — are now a separate,
+> registered method rather than a change to `ncc` (so the spatial-NCC crossover baseline stays
+> intact for a fair head-to-head). The **log-polar / Fourier-Mellin** item remains deferred and is
+> carried forward in `mosse`'s own section below.
+
+## `mosse` (MOSSE/ASEF correlation-filter matching via FFT)
+
+None of the following is built in this spike; all are captured here and in the `mosse.py` docstring
+and [`methods/mosse.md`](methods/mosse.md) (mirrored so the three cannot drift).
+
+- **Log-polar / Fourier-Mellin front end** so one correlation spans rotation **and** scale,
+  retiring the scale pyramid entirely (the rotation bank is already folded into the filter).
+- **A dedicated DSST-style scale filter** — a separate 1-D correlation filter over a scale pyramid
+  of the peak patch — for continuous scale estimation instead of the discrete pyramid.
+- **OTSDF / UMACE variants** exposing an explicit sharpness-vs-noise trade-off parameter, for scenes
+  where the MOSSE default is either too sharp (misses poses) or too broad (clutter FPs).
+- **Kernelized correlation filters (KCF)** — a non-linear kernel in the closed-form solve, more
+  discriminative against structured background than the linear MOSSE filter here.
+
 ## `sparse-geo` (Method 2 — sparse keypoint matching + geometric verification)
 
 None of the following is built in Phase 5; all are captured here and in the `sparse_geo.py`
