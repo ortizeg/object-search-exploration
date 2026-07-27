@@ -217,6 +217,33 @@ def test_impossible_threshold_yields_empty_not_error() -> None:
     assert result.diagnostics.notes
 
 
+# ------------------------------------------------------------- coarse-to-fine verify (step 6b)
+
+
+@pytest.mark.parametrize("verify", [True, False])
+def test_verify_toggle_finds_every_instance(verify: bool) -> None:
+    """Both the coarse-to-fine (default) and the pure-filter control recover the clean repeats."""
+    scene, boxes = _textured_scene()
+    result = search(scene, ExemplarBox(box=boxes[0]), MOSSEConfig(verify=verify))
+    assert result.outcome is SearchOutcome.OK
+    for box in boxes:
+        assert any(m.box.iou(box) >= 0.5 for m in result.matches), f"missed instance {box.xyxy}"
+
+
+def test_verify_restores_the_raw_ncc_self_anchor() -> None:
+    """verify=True re-scores on a raw local NCC, so the exemplar self-match is ~1.0 -- ncc's anchor
+    -- whereas the whitened-filter self-response (verify=False) is a lower, image-dependent number.
+    This is the anchor the re-tuned repeat-aware fractions and retain_frac depend on."""
+    scene, boxes = _textured_scene()
+    exemplar = ExemplarBox(box=boxes[0])
+    on = search(scene, exemplar, MOSSEConfig(verify=True))
+    off = search(scene, exemplar, MOSSEConfig(verify=False))
+    assert on.diagnostics.metrics["self_score"] == pytest.approx(1.0, abs=0.05)
+    assert on.diagnostics.metrics["self_score"] > off.diagnostics.metrics["self_score"]
+    # Every accepted match's score is the raw normalized correlation, bounded in [-1, 1].
+    assert all(-1.0 <= m.score <= 1.0 for m in on.matches)
+
+
 # ------------------------------------------------------------- strategy / calibration coverage
 
 

@@ -37,6 +37,7 @@ runs.db-shm
 
 # --- scratch ----------------------------------------------------------------
 .tmp-probe/
+.scratch/
 
 # --- benchmark output (EVAL-04) ---------------------------------------------
 # results.json is a regenerable benchmark artifact (`pixi run bench` / `bench-ci`); the

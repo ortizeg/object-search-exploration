@@ -70,8 +70,19 @@ Post-processing (exact)
   restores the anchor cheaply: because ``k`` is DC-free, the numerator ``sum k . window`` equals
   ``sum k . (window - mean(window))``, so dividing by the window's L2 energy
   ``sqrt(sum(window^2) - sum(window)^2 / N)`` -- computed in ``O(H*W)`` with box filters --
-  yields a cosine-like response in ``[-1, 1]``. That normalized response (``ncf``) is the score
-  the threshold and the candidate log use, exactly where ``ncc`` uses ``TM_CCOEFF_NORMED``.
+  yields a cosine-like response in ``[-1, 1]``. That normalized response is what the PROPOSAL
+  stage (peak extraction) works on, exactly where ``ncc`` uses ``TM_CCOEFF_NORMED``.
+- **Coarse-to-fine verify (default on, step 6b).** The whitened filter is a strong LOCALIZER but a
+  weak DISCRIMINATOR in clutter -- it proposes the true instances (measured: it peaks on ~83% of
+  cluttered instances) but scores them alongside clutter, so a threshold on the filter response
+  alone drops them. Each proposed peak is therefore re-scored by a LOCAL raw ``TM_CCOEFF_NORMED``
+  of the rotated exemplar in a small window around the box -- ``ncc``'s discriminative score and
+  its clean ``~1.0`` self-anchor, but evaluated only at the handful of proposal sites, never over
+  the whole scene. That raw score drives the threshold and the candidate log. This is the "fine"
+  half of a coarse-to-fine detector (the FFT filter is the cheap full-scene PROPOSER); it lifts
+  CLUTTERED F1 from ~0.61 to ~0.82 and VARIED past ``ncc``, at the cost of a small EASY precision
+  dip (raw NCC has periodic sidelobes on an identical-chip grid that the whitened filter
+  suppressed). ``verify=False`` recovers the pure-filter response as a control.
 - **PSR.** The peak-to-sidelobe ratio (MOSSE's native confidence: ``(peak - mu_side) /
   sigma_side`` over an annulus around the peak) is carried in diagnostics for inspection; the
   accept decision is driven by the normalized response, which is comparable across images.
@@ -166,15 +177,27 @@ _MAD_TO_STD = 1.4826  # median-absolute-deviation -> std, for a Gaussian
 # A peak whose box overlaps the exemplar by at least this is the exemplar's own self-match,
 # labelled is_exemplar rather than dropped or double-counted (METHOD-04c).
 _EXEMPLAR_IOU = 0.5
-# repeat-aware calibration, re-anchored for the correlation filter. Unlike ncc (whose exemplar
-# self-correlates to ~1.0), the FILTER self-response is a lower, image-dependent number, so the
-# "near the self-match" and "strict cut" fractions are re-derived against the filter's own score
-# distribution -- see _repeat_aware_threshold and docs/reports/mosse-improvement.md.
-_REPEAT_NEAR_FRAC = 0.85
+# repeat-aware calibration fractions. These are tuned for the DEFAULT verify=True score (a raw
+# local NCC, self-match ~1.0 -- ncc's anchor, restored by step 6b), NOT the bare filter response.
+# near_frac 0.9 is deliberately high: a cluttered instance's verify score sits well below the
+# self-match, so counting only records >= 0.9 x self as "near-identical repeats" keeps clutter on
+# the PERMISSIVE path (self x retain_frac); at 0.85 the strict cut fired on cluttered scenes and
+# crushed recall (measured CLUTTERED R 0.60 -> 0.76 going 0.85 -> 0.9). With verify=False the score
+# reverts to the lower, image-dependent bare-filter response and these fractions are only
+# approximate -- verify=False is an ablation control, not the tuned path. See
+# _repeat_aware_threshold and docs/reports/mosse-improvement.md (iteration 2).
+_REPEAT_NEAR_FRAC = 0.9
 _REPEAT_STRICT_FRAC = 0.8
 # PSR sidelobe geometry: exclude an (2r+1)^2 window around the peak, measure the mean/std of the
 # rest. 11px is Bolme et al.'s default exclusion radius; purely a diagnostic here.
 _PSR_EXCLUDE_RADIUS = 11
+# Coarse-to-fine verify (step 6b): grow each proposal box by this fraction of the template size on
+# every side before the local NCC re-score, so the raw correlation absorbs the sub-pixel drift the
+# pyramid rounding leaves (the response argmax divides back by the level scale). This MUST stay
+# small: a large margin lets the window reach a *neighbouring* instance in a packed grid, whose ~1.0
+# correlation would then inflate a wrong proposal's score into a false positive (measured: a 0.5
+# margin collapsed TEXTURED precision to 0.34). 0.15 (a few px) covers the rounding, no more.
+_VERIFY_MARGIN_FRAC = 0.15
 
 
 class MOSSEConfig(BaseModel):
@@ -245,13 +268,16 @@ class MOSSEConfig(BaseModel):
         ),
     )
     energy_floor_frac: float = Field(
-        default=0.3,
+        default=0.7,
         ge=0.0,
         description=(
             "Floor added to the local-energy denominator, as a fraction of the scene's MEDIAN "
             "window energy, so a flat low-energy region cannot divide a near-zero numerator up "
             "into a spurious ~1.0 response (the correlation-filter analogue of the degenerate "
-            "TM_CCOEFF_NORMED flat-window case). 0.3 measured best; 0.0 disables the floor."
+            "TM_CCOEFF_NORMED flat-window case). 0.7 measured best (a broad 0.5-0.8 plateau); the "
+            "original 0.3 left spurious background peaks on the tiny-chip regime, costing EASY "
+            "precision -- raising the floor takes EASY precision to 1.00 and TEXTURED to a perfect "
+            "F1 (see docs/reports/mosse-improvement.md, iteration 2). 0.0 disables the floor."
         ),
     )
     log_transform: bool = Field(
@@ -269,6 +295,22 @@ class MOSSEConfig(BaseModel):
             "Multiply each training patch by a 2-D Hann window before the FFT. FFT correlation is "
             "circular, so without the taper the patch's opposite edges wrap into a discontinuity "
             "that pollutes the filter. On by default; off is a control to show the artifact."
+        ),
+    )
+    verify: bool = Field(
+        default=True,
+        description=(
+            "Coarse-to-fine re-scoring. The whitened MOSSE filter localizes well but is a weak "
+            "DISCRIMINATOR in clutter -- it proposes true instances (measured: it peaks on ~83% of "
+            "cluttered instances) but scores them alongside clutter so the threshold drops them. "
+            "With verify on, every proposed peak is re-scored by a LOCAL raw TM_CCOEFF_NORMED of "
+            "the rotated exemplar (ncc's score, but evaluated only in a small window "
+            "around each of the few proposals -- O(peaks) local passes, NOT ncc's full-scene "
+            "scale x angle sweep), and that raw score drives the threshold + candidate log. It is "
+            "the 'fine' half of a coarse-to-fine detector: the FFT filter is the cheap full-scene "
+            "PROPOSER, the local NCC is the accurate VERIFIER. It restores ncc's ~1.0 self-anchor "
+            "and its clutter discrimination while keeping the filter's speed. off = the pure "
+            "filter response (a control, and the original shipped behaviour)."
         ),
     )
     threshold: float | None = Field(
@@ -314,14 +356,18 @@ class MOSSEConfig(BaseModel):
         description="random_state for the gmm calibrator (its only genuinely stochastic step).",
     )
     retain_frac: float = Field(
-        default=0.5,
+        default=0.35,
         gt=0.0,
         le=1.0,
         description=(
             "The permissive self-relative accept fraction: keep a match above "
             "self_score * retain_frac. Used directly by self-similarity and as the "
             "transformed-instance floor by repeat-aware. Tuned on the synthetic splits to the "
-            "shape of the filter's score distribution, NOT to the ground-truth boxes."
+            "shape of the score distribution, NOT to the ground-truth boxes. 0.35 fits the "
+            "DEFAULT verify=True score (a raw local NCC with a ~1.0 self-anchor): a cluttered/"
+            "transformed instance's raw correlation sits around 0.35-0.5 x self, so 0.35 admits it "
+            "while rejecting clutter below (measured CLUTTERED F1 0.61 -> 0.82). The old 0.5 fit "
+            "the un-verified filter response; too strict for the verified score, it drops recall."
         ),
     )
 
@@ -577,6 +623,96 @@ def _psr(response: npt.NDArray[np.float64], y: int, x: int) -> float:
     return (peak - mu) / sigma
 
 
+def _rotated_template_bank(
+    template: npt.NDArray[np.uint8], angles_deg: tuple[float, ...]
+) -> list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]:
+    """Raw (un-whitened) rotated exemplar crops + masks for the local NCC verify (step 6b).
+
+    This is the *appearance* the verifier correlates against -- the plain crop, NOT the whitened
+    MOSSE filter. At 0 deg the crop passes through with ``mask=None``. A non-zero angle warps the
+    crop into its axis-aligned bounding box, whose fabricated corners (up to half the template at
+    45 deg) are covered by a warped, eroded mask so ``matchTemplate`` scores only real pixels --
+    the same corner-honesty ``ncc``'s rotation bank uses (PITFALLS.md 1.6). Built per proposal
+    *size* so the exemplar is matched at the instance's detected scale.
+    """
+    h, w = template.shape[:2]
+    bank: list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]] = []
+    for angle in angles_deg:
+        if angle == 0.0:
+            bank.append((template, None))
+            continue
+        rot = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+        cos, sin = abs(float(rot[0, 0])), abs(float(rot[0, 1]))
+        new_w, new_h = int(h * sin + w * cos), int(h * cos + w * sin)
+        rot[0, 2] += new_w / 2.0 - w / 2.0
+        rot[1, 2] += new_h / 2.0 - h / 2.0
+        warped = cv2.warpAffine(
+            template, rot, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=0
+        )
+        mask = cv2.warpAffine(
+            np.full((h, w), 255, np.uint8), rot, (new_w, new_h), flags=cv2.INTER_NEAREST
+        )
+        mask = cv2.erode(mask, np.ones((3, 3), np.uint8))
+        bank.append(
+            (np.ascontiguousarray(warped, dtype=np.uint8), np.asarray(mask, dtype=np.uint8))
+        )
+    return bank
+
+
+def _verify_score(
+    gray: npt.NDArray[np.uint8],
+    exemplar_crop: npt.NDArray[np.uint8],
+    box: BBox,
+    angles_deg: tuple[float, ...],
+    bank_cache: dict[
+        tuple[int, int], list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]
+    ],
+) -> float:
+    """Local raw ``TM_CCOEFF_NORMED`` of the rotated exemplar around ``box`` -- the 'fine' re-score.
+
+    The whitened filter proposes ``box``; this confirms it with the *raw* normalized correlation
+    ``ncc`` uses, but only inside a small window grown from ``box`` (``_VERIFY_MARGIN_FRAC`` of the
+    template on each side, so a proposal placed a few pixels off by the pyramid rounding can still
+    re-localize). The exemplar is resized to the proposal's detected size so scale is handled by the
+    box, and correlated across the rotation bank so a rotated (VARIED) instance is not rejected; the
+    score is the max normalized correlation over the window and the bank, in ``[-1, 1]``. Cost is
+    ``O(window * template * angles)`` at the few proposal sites -- the cheap half of coarse-to-fine,
+    never ``ncc``'s full-scene sweep. Banks are cached by proposal size (the pyramid yields few
+    distinct sizes) so the warps are not rebuilt per peak.
+    """
+    bw, bh = box.w, box.h
+    if bw < _MIN_TEMPLATE_PX or bh < _MIN_TEMPLATE_PX:
+        return -1.0
+    # Grow the box by a margin on each side so the local correlation can re-localize the proposal.
+    mx, my = round(bw * _VERIFY_MARGIN_FRAC), round(bh * _VERIFY_MARGIN_FRAC)
+    x0, y0 = max(0, box.x - mx), max(0, box.y - my)
+    x1, y1 = min(gray.shape[1], box.x2 + mx), min(gray.shape[0], box.y2 + my)
+    win = gray[y0:y1, x0:x1]
+    if win.shape[0] < bh or win.shape[1] < bw:
+        return -1.0
+    bank = bank_cache.get((bw, bh))
+    if bank is None:
+        resized = np.ascontiguousarray(
+            cv2.resize(exemplar_crop, (bw, bh), interpolation=cv2.INTER_AREA), dtype=np.uint8
+        )
+        bank = _rotated_template_bank(resized, angles_deg)
+        bank_cache[(bw, bh)] = bank
+    best = -1.0
+    for tmpl, mask in bank:
+        if win.shape[0] < tmpl.shape[0] or win.shape[1] < tmpl.shape[1]:
+            continue
+        resp = (
+            cv2.matchTemplate(win, tmpl, cv2.TM_CCOEFF_NORMED, mask=mask)
+            if mask is not None
+            else cv2.matchTemplate(win, tmpl, cv2.TM_CCOEFF_NORMED)
+        )
+        arr = np.asarray(resp, dtype=np.float64)
+        finite = arr[np.isfinite(arr)]
+        if finite.size:
+            best = max(best, float(finite.max()))
+    return best
+
+
 def _empty(
     note: str,
     *,
@@ -738,6 +874,31 @@ def search(
             level_count += 1
 
         per_level_counts[f"peaks@{scale:g}"] = float(level_count)
+
+    # 6b. Coarse-to-fine verify (default on). The whitened filter localizes but discriminates
+    #     weakly in clutter -- it PROPOSES true instances yet scores them alongside clutter, so the
+    #     threshold drops them (measured: ~83% of cluttered instances are proposed, but only ~53%
+    #     survive without this step). Re-score each proposal with a LOCAL raw TM_CCOEFF_NORMED of
+    #     the rotated exemplar -- ncc's discriminative score, but evaluated only in a small window
+    #     around each of the few proposals, not over the whole scene. That raw score (self-match
+    #     ~1.0, the anchor the whitened filter lost) replaces the filter response for the threshold
+    #     and the candidate log; the filter's z-score stays the cross-level NMS priority. Off = the
+    #     pure filter response (the original shipped behaviour), a control.
+    if config.verify and records:
+        t_verify = perf_counter()
+        bank_cache: dict[
+            tuple[int, int], list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]
+        ] = {}
+        records = [
+            _LevelPeak(
+                r.box,
+                _verify_score(gray, crop, r.box, config.train_angles_deg, bank_cache),
+                r.z_score,
+                r.level,
+            )
+            for r in records
+        ]
+        inference_ms += (perf_counter() - t_verify) * 1000.0
 
     # 7. Calibrate the threshold. repeat-aware (default) reads the score distribution, re-anchored
     #    on the filter's self-response (not 1.0): >=2 distinct near-self locations => near-identical

@@ -5,6 +5,13 @@ filter matched by FFT — as a **new, separate method** alongside the shipped `n
 spatial-NCC crossover baseline stays intact for a fair head-to-head. This log captures the *why*,
 the measured per-regime deltas, and the dead ends, so the reasoning is not lost in the diff.
 
+> **Iteration 2 (2026-07-27) closed the gap to `ncc`.** The v1 build below shipped as a *fast
+> specialist that lost to `ncc` on the transformed regimes by design* (CLUTTERED F1 0.61 vs 0.77).
+> Iteration 2 raised the energy floor and added a **coarse-to-fine verify** (a local raw-NCC
+> re-score of each filter proposal), which lifted CLUTTERED to 0.82 and VARIED past `ncc`, taking
+> `mosse` to overall parity-or-better with `ncc` (0.809 vs 0.807) at the same speed. The full
+> iteration-2 log is the last section of this file; the v1 build log follows first.
+
 Cross-references: the method is documented in [`../methods/mosse.md`](../methods/mosse.md); the
 deferred work is in [`../ROBUSTNESS-BACKLOG.md`](../ROBUSTNESS-BACKLOG.md); the shipped `ncc` this is
 measured against is in [`ncc-improvement.md`](ncc-improvement.md).
@@ -193,3 +200,122 @@ floor) were selected on the pooled per-regime score, not per-image against the b
 the filter-bank partition, the re-anchored repeat-aware switch, the candidate/threshold split, the
 candidate-log dedup, and byte-for-byte reproducibility. Benchmark report and charts regenerated from
 a fresh `pixi run bench`; only `mosse` numbers were added.
+
+---
+
+# Iteration 2 — closing the gap to `ncc` with a coarse-to-fine verify (2026-07-27)
+
+## Symptom / goal
+
+The v1 build shipped as an *intentional* fast specialist: at parity with `ncc` on EASY/TEXTURED but
+losing the transformed regimes by design (CLUTTERED F1 0.61 vs 0.77). The ask this iteration:
+**get `mosse` close to `ncc` everywhere**, without regressing the regimes it already wins and without
+giving back the speed. Same measurement setup as v1 (four regimes, IoU 0.5, `repeat-aware` cut tuned
+to the score *shape*, never the labels). Fast iteration ran on the 6 small chipset images + all 48
+textured; the final config was re-measured on the full set (all 10 chipset + 48 textured).
+
+## Where the gap actually was (measure first)
+
+The shipped `mosse` trailed `ncc` in exactly two places, and the bottleneck differed:
+
+| regime | `mosse` F1 | bottleneck |
+| --- | --- | --- |
+| EASY | 0.899 | **precision** 0.86 — spurious peaks in flat chip background |
+| CLUTTERED | 0.606 | **recall** 0.54 — true instances scored below the cut |
+
+A candidate-log diagnostic settled the CLUTTERED question: **proposal-recall 0.825 vs match-recall
+0.531** — the FFT filter *proposes* 83 % of cluttered instances but the whitened-filter score buries
+47 of 160 below the threshold. So the peaks are there; the filter is a good localizer but a weak
+discriminator. That is the precise signature a coarse-to-fine verifier fixes.
+
+## The iteration (fast subset; overall F1 / AP)
+
+| step | change | EASY | TEX | VAR | CLU | overall F1 | AP |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| v1 | shipped defaults (efloor 0.3, single-stage filter) | 0.847 | 0.985 | 0.448 | 0.606 | 0.725 | 0.730 |
+| +1 | **energy_floor_frac 0.3 → 0.7** | 0.952 | 1.000 | 0.439 | 0.609 | 0.743 | 0.735 |
+| +2 | **coarse-to-fine verify** (local raw NCC re-score, margin 0.15) | 0.917 | 1.000 | 0.456 | 0.600 | 0.753 | 0.771 |
+| +3 | **retain_frac 0.5 → 0.35** (re-anchor the cut on verify's ~1.0) | 0.917 | 1.000 | 0.504 | 0.725 | 0.777 | 0.776 |
+| +4 | **near_frac 0.85 → 0.9** (keep clutter off the strict cut) | 0.917 | 1.000 | 0.504 | 0.823 | 0.802 | 0.780 |
+
+### +1 The energy floor was set too low for the chip regime (EASY precision)
+
+`energy_floor_frac` was tuned to 0.3 on the *pooled* v1 set. On the tiny-chip regime that left flat
+background regions dividing a near-zero numerator into spurious `~1.0` peaks — EASY precision 0.86. A
+broad 0.5–0.8 plateau all lift it; 0.7 takes EASY precision to **1.00** and TEXTURED to a perfect F1
+with CLUTTERED/VARIED flat. A pure config win, no code.
+
+### +2 Coarse-to-fine verify (the crossover-defining change)
+
+The whitened filter proposes but does not discriminate, so each proposed peak is **re-scored by a
+local raw `TM_CCOEFF_NORMED`** of the rotated exemplar — `ncc`'s discriminative score and its clean
+`~1.0` self-anchor, but at the handful of proposal sites, never over the whole scene (the FFT filter
+stays the cheap full-scene *proposer*). Precision jumped everywhere (CLUTTERED 0.71 → 0.99) and **AP
+rose 0.735 → 0.771** — the ranking was now right — but F1 lagged because the *threshold* was still
+set for the old filter-score distribution (recall fell). Levers +3/+4 re-tune the cut.
+
+> **Dead end caught by measurement:** the first verify used a window grown 0.5 × template. In the
+> packed grids a *wrong* proposal's oversized window bled into a neighbouring instance, scored ~1.0
+> from it, and passed — **TEXTURED precision collapsed to 0.34, overall F1 0.504**. Shrinking the
+> margin to 0.15 (just enough for pyramid-rounding drift, too small to reach a neighbour) fixed it.
+
+### +3 / +4 Re-tuning the cut for the verified score (recovers the recall)
+
+Verify restores `ncc`'s ~1.0 anchor, so the v1 fractions (tuned for the sub-1.0 filter response) are
+wrong. Two changes, each measured: **`retain_frac` 0.5 → 0.35** (a cluttered instance's raw NCC sits
+at ≈ 0.35–0.5 × self, so 0.35 admits it) lifted CLUTTERED 0.60 → 0.73; **`near_frac` 0.85 → 0.9**
+stops cluttered scenes from tripping the *strict* repeat cut and lifted CLUTTERED recall 0.60 → 0.76
+(F1 → 0.82). Neither touches the labels — both are read off the score-distribution shape.
+
+## Result — final config, full set (all 10 chipset + 48 textured, IoU 0.5)
+
+| regime | shipped `mosse` | **new `mosse`** | `ncc` |
+| --- | --- | --- | --- |
+| EASY (chipset) | 0.899 | 0.920 | **1.000** |
+| TEXTURED | 0.985 | **1.000** | **1.000** |
+| VARIED | 0.448 | **0.504** | 0.459 |
+| CLUTTERED | 0.606 | **0.823** | 0.768 |
+| **OVERALL F1** | 0.741 | **0.809** | 0.807 |
+| **OVERALL AP** | 0.749 | **0.795** | 0.784 |
+
+`mosse` now reaches **overall parity-or-better with `ncc`** (F1 0.809 vs 0.807, AP 0.795 vs 0.784),
+**beats** it on VARIED and CLUTTERED, ties TEXTURED, and trails only on the identical-chip EASY grid
+— all at the filter's 6.4× lower median latency (the verify re-score is O(#proposals) local passes,
+not a second full-scene sweep). Changed defaults: `energy_floor_frac` 0.3 → 0.7, `retain_frac`
+0.5 → 0.35, `verify=True` (new), and the module constant `_REPEAT_NEAR_FRAC` 0.85 → 0.9. `ncc` and
+the other methods are untouched.
+
+## Why EASY still trails (the honest remaining half)
+
+EASY 0.920 vs `ncc`'s 1.000 is a genuine cost of verify, not a tuning miss. Raw NCC has **periodic
+sidelobes on a grid of identical chips** — a half-period shift of an identical chip correlates highly
+— that the whitened filter had suppressed. No `strict` (0.8/0.85/0.9), `near`, or `margin` value
+removes those FPs without losing the CLUTTERED/VARIED gains (measured: strict 0.85 and 0.9 left EASY
+unchanged at 0.92, because the sidelobes score > 0.9). Trading 0.08 on EASY for +0.22 on CLUTTERED
+and a VARIED win is the right side of the crossover, and the scoreboard shows it.
+
+## What I tried and reverted
+
+- **verify margin 0.5 → 0.05:** 0.5 bled into neighbours (TEXTURED P 0.34); 0.05 was too tight to
+  align even a true chip (EASY 0.84). **0.15** is the plateau.
+- **retain_frac 0.3:** CLUTTERED recall rose (0.79) but VARIED precision crashed (0.46) — overall
+  0.779 < 0.802. Kept 0.35.
+- **strict_frac 0.85 / 0.9:** no effect on EASY (the sidelobe FPs score above 0.9) and slightly hurt
+  CLUTTERED. Left strict at 0.8.
+- **energy_floor 0.5 / 0.6 / 0.8 / 1.0:** all within ±0.01 of 0.7 on the plateau; 0.7 best on TEXTURED.
+
+## Fairness
+
+Unchanged from v1: `repeat-aware` reads the score-distribution *shape* (how many distinct locations
+sit near the self-response), never the ground-truth boxes, and the identical rule runs on every
+dataset. The re-tuned `retain_frac` 0.35 and `near_frac` 0.9 were selected on the pooled per-regime
+score, not per-image against the labels; AP is threshold-free. The verify re-score is `ncc`'s own
+`TM_CCOEFF_NORMED`, so it inherits `ncc`'s (already-audited) fairness.
+
+## Verification
+
+`pixi run quality` green: Ruff + Ruff-format clean, MyPy strict clean, coverage floor held (535
+passed, 89.8 % total; the `mosse` module stays > 90 %). New tests pin the coarse-to-fine toggle
+(both `verify` paths recover the clean repeats) and that verify restores the raw-NCC ~1.0 self-anchor
+the re-tuned fractions depend on. `ncc` re-measured on the current checkout to confirm the head-to-
+head is apples-to-apples (0.807 F1, unchanged from its own log).
