@@ -225,3 +225,65 @@ at `datasets/_incoming/<carpk|pucpr_plus>/`, then re-run `pixi run fetch-dataset
   + `Images/` layout the converter reads.
 - **Official** — the NTU CARPK/PUCPR+ terms-of-use page linked from https://lafi.github.io/LPN/ (request
   form). This is the native format the converter expects.
+
+## Improving these results
+
+The first real-dataset run (T4, N=20/dataset/split — see `docs/reports/research-report.html`) is weak
+across the board (F1 0.04–0.35). The per-method precision/recall shape says *why*, and points at the
+fixes. These are ordered by expected payoff.
+
+### 1. Actually run the tune-on-val protocol (the biggest lever)
+
+The run used each method's **default config** — thresholds and calibration picked on the *synthetic*
+chip/textured sets — and reported straight on test. The whole `val → test` protocol this harness was
+built for (sweep each method's threshold/config on `val`, freeze, report on `test`) was **never
+exercised**. The P/R shape shows how much that costs, because almost every method is mis-thresholded
+for real images:
+
+| Method | P | R | Read |
+|---|---|---|---|
+| propose-retrieve | 0.71 | 0.25 | too **conservative** — accurate when it fires, misses most. **Lower** the retrieval threshold. |
+| sparse-geo | 0.80 | 0.04 | extremely conservative — **abstains on ~8 of 20 images** (the ≥20-keypoint gate) and verifies too strictly. |
+| ncc | 0.37 | 0.24 | mis-scaled threshold; best-behaved but under-recalling. |
+| owlv2-oneshot | 0.11 | 0.41 | the opposite — **over-detects** (threshold too low). **Raise** the score threshold. |
+| mosse | 0.16 | 0.14 | low both; correlation-peak threshold untuned for real texture. |
+| dino-dense | 0.08 | 0.04 | **both** low → the dense-similarity threshold/decoding is genuinely miscalibrated for real scenes; not just a threshold nudge (see §3). |
+
+A per-dataset `val` sweep of the single threshold each method already exposes (`config_model`) —
+lower it for the conservative methods, raise it for owlv2 — is the highest-payoff change and is exactly
+what the harness supports; it just needs a driver that grid-searches `val` and writes the winning config
+per (method, dataset).
+
+### 2. Kill the sample noise — larger N (or the full sweep)
+
+N=20 images against datasets with hundreds of instances per image is directional at best; a single hard
+image swings a cell. The classical methods are CPU-bound over the large real images (why the full sweep
+is ~2 days on one T4), so scaling means either a bigger/multi-GPU box, capping the classical methods to
+a subset while the learned methods run full, or simply leaving `scripts/gpu_bench.sh` to run overnight at
+a larger N.
+
+### 3. Fix `dino-dense` specifically (P=0.08, R=0.04)
+
+Both metrics near zero means the boxes are *wrong*, not merely missing — a decoding/calibration failure
+on real scenes, not a threshold nudge. Likely culprits: the cosine-similarity threshold and the
+connected-components → box step tuned for clean synthetic lattices, and the mean-pooled crop prototype
+being unrepresentative on cluttered real crops. Inspect the similarity-map diagnostics on a few real
+images; recalibrate the threshold on `val`; consider multi-scale scene inference.
+
+### 4. Use the datasets' native exemplars
+
+RPINE ships real **query exemplars** (`exemplars.json`) and FSCD-* ship 3 exemplar boxes/image; the run
+**sampled exemplars from GT** instead. Real exemplars are the intended query and should improve every
+retrieval/template method — wiring them through (the `convert_rpine` TODO) is a clean, isolated win.
+
+### 5. Give `owlv2` a fair GPU run
+
+`owlv2-base` at 960px OOMs the T4's 16 GB, so it ran on CPU (18 s/img). Re-export at a smaller `imgsz`
+(fits 16 GB), or run on a ≥24 GB GPU, to get a real GPU latency and let its recall-heavy behaviour be
+threshold-tuned into usable precision.
+
+### 6. Report per-slice, not just pooled
+
+The pooled F1 hides where each method wins. Slicing by instance count, object scale, and clutter (as the
+synthetic benchmark already does) would turn "everything is bad" into "method X holds up on sparse
+scenes, collapses on dense" — the actionable signal.
