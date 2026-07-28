@@ -134,6 +134,9 @@ fetch-models = "python -m object_search.cli fetch-models"
 # Convert the research evaluation datasets (EVAL-21) into the gitignored datasets/ tree. CARPK is
 # licence-gated: `fetch-datasets --list` prints where a human drops the archive first (D-08).
 fetch-datasets = "python -m object_search.cli fetch-datasets"
+# Per-method domain threshold tuning on the floor plans: argmax F1@0.5 on val, freeze, report
+# tuned-vs-default on test. Gated on fetch-datasets having converted floorplans-door/window.
+tune-floorplans = "python -m object_search.cli tune-floorplans"
 serve = "uvicorn object_search.api.app:app --reload --port 8000"
 # Documentation site (mkdocs-material). `docs` serves it locally with live-reload at
 # http://127.0.0.1:8001; `docs-build` renders the static site into site/ (what CI publishes).

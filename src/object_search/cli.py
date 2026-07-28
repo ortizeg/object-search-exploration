@@ -114,6 +114,37 @@ def fetch_datasets(
     dataset_registry.fetch_all(force=force)
 
 
+@app.command("tune-floorplans")
+def tune_floorplans(
+    dataset: Annotated[
+        str, typer.Option("--dataset", help="floorplans-door | floorplans-window | both.")
+    ] = "both",
+    research_root: Annotated[
+        Path, typer.Option("--research-root", help="Base dir of converted datasets.")
+    ] = Path("datasets"),
+    exemplars: Annotated[int, typer.Option("--exemplars", help="Exemplars per query.")] = 1,
+) -> None:
+    """Tune each method's acceptance threshold on the floor-plan val split, freeze, report on test.
+
+    Selects the argmax-F1 @ IoU 0.5 config per method on ``val``, freezes it, and scores both the
+    frozen and the default config on ``test`` -- the tuned-vs-default table. Requires
+    ``fetch-datasets`` to have converted the floor-plan tree first.
+    """
+    from object_search.eval.tuning import run_domain_tuning
+
+    keys = ("floorplans-door", "floorplans-window") if dataset == "both" else (dataset,)
+    for key in keys:
+        out = f"docs/benchmark/{key}-tuning-results.json"
+        report = run_domain_tuning(key, research_root, exemplar_count=exemplars, out=out)
+        typer.echo(f"{key}: tuned {len(report['methods'])} method(s) -> {out}")
+        for entry in report["methods"]:
+            typer.echo(
+                f"  {entry['method']:16s} overrides={entry['tuned_overrides']}  "
+                f"testF1 tuned={entry['tuned_test'].get('f1')} "
+                f"default={entry['default_test'].get('f1')}"
+            )
+
+
 @app.command("synth")
 def synth(
     out: Annotated[Path, typer.Option("--out", help="Output directory.")] = _SYNTH_DIR,
