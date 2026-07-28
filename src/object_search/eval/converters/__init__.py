@@ -17,6 +17,7 @@ The dataset->converter dispatch that *does* exist lives once, in :mod:`object_se
 from __future__ import annotations
 
 from object_search.eval.converters.carpk import convert_carpk
+from object_search.eval.converters.floorplans import convert_floorplans
 from object_search.eval.converters.fscd147 import (
     Fscd147DedupResult,
     Fscd147Splits,
@@ -29,6 +30,7 @@ __all__ = [
     "Fscd147DedupResult",
     "Fscd147Splits",
     "convert_carpk",
+    "convert_floorplans",
     "convert_fscd147",
     "convert_rpine",
     "dedup_fscd147",
