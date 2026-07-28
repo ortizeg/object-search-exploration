@@ -526,6 +526,7 @@ def _run_one_research(
     split: str,
     exemplar_count: int,
     seed: int = 0,
+    config: BaseModel | None = None,
 ) -> ImageResult:
     """Run one method on one research image and score it with the full literature metric set.
 
@@ -533,6 +534,11 @@ def _run_one_research(
     error-catch so a missing weight degrades one cell rather than aborting the sweep) and adds the
     COCO AP sweep plus the per-image predicted/true counts. The per-image ``ap`` field is the COCO
     mean here (the literature's headline AP), with ``ap50``/``ap75`` alongside it.
+
+    ``config`` is the method config instance to run with; ``None`` uses the method's defaults
+    (``spec.config_model()``), the committed behaviour. A non-default config is how domain threshold
+    tuning (:mod:`object_search.eval.tuning`) evaluates a candidate on val/test without touching the
+    method files -- the config must be an instance of this method's own ``config_model``.
     """
     canvas = f"{gt.width}x{gt.height}" if gt.width and gt.height else None
     true_count = gt.achieved_count
@@ -543,7 +549,8 @@ def _run_one_research(
         # box, then fuse. The sampled exemplars REMAIN in gt.boxes and are scored like any other
         # instance, so the recall denominator (len(gt.boxes)) is identical at count=1 and count=3.
         exemplars = sample_exemplars(gt, count=exemplar_count, seed=seed)
-        result = run_multi_exemplar(spec.fn, scene, exemplars, spec.config_model())
+        run_config = config if config is not None else spec.config_model()
+        result = run_multi_exemplar(spec.fn, scene, exemplars, run_config)
     except Exception as exc:
         logger.warning("{} on research {}/{} failed: {}", method, dataset, image_id, exc)
         return ImageResult(
@@ -674,6 +681,7 @@ def run_research_benchmark(
     iou_threshold: float = 0.5,
     seed: int = 0,
     manifest_root: Path | None = None,
+    config: BaseModel | None = None,
 ) -> dict[str, Any]:
     """Run one method over a research dataset split, returning the report block (11-01 tracer).
 
@@ -694,6 +702,9 @@ def run_research_benchmark(
         iou_threshold: IoU for a prediction to count as a true positive at the P/R/F1 level.
         seed: Config seed for the exemplar sampler's non-native draw (D-11).
         manifest_root: Optional base dir for the committed split manifest (tests use ``tmp_path``).
+        config: Method config instance to run with; ``None`` uses the method defaults. A tuned
+            config (an instance of the method's ``config_model``) is how domain threshold tuning
+            evaluates a frozen operating point on val/test.
 
     Returns:
         A report block: ``method``/``dataset``/``split``/``exemplar_count``, ``coverage``,
@@ -729,6 +740,7 @@ def run_research_benchmark(
                 split=split,
                 exemplar_count=exemplar_count,
                 seed=seed,
+                config=config,
             )
         )
 
