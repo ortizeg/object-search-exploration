@@ -1,0 +1,14 @@
+{
+  "train": [
+    "lvis-train-1",
+    "lvis-train-2",
+    "lvis-train-3",
+    "lvis-train-4",
+    "lvis-train-5",
+    "lvis-train-6"
+  ],
+  "test": [
+    "lvis-test-1",
+    "lvis-test-2"
+  ]
+}

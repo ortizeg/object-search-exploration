@@ -120,7 +120,7 @@ import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from object_search.inference import DINOv2Inferencer, models
+from object_search.inference import DINOv2Inferencer, models, resolve_providers
 from object_search.inference.dinov2 import DINOV2_PATCH
 from object_search.schemas import (
     BBox,
@@ -143,7 +143,7 @@ _METHOD_VERSION = "1.0.0"
 _MODEL_KEY = "dinov2-small"  # the MODEL_REGISTRY key this method reuses (shared with Method 5)
 # Pin the CPU provider so a run is bit-identical machine to machine (dev boxes also expose
 # CoreML, whose kernels differ). Reproducibility is a hard project constraint.
-_PROVIDERS = ["CPUExecutionProvider"]
+_PROVIDERS = resolve_providers()
 # The exemplar's own prototype is L2-normalized, so its cosine similarity with itself is exactly
 # 1.0. That is the self-match score the "self-similarity" calibrator anchors on.
 _SELF_MATCH_SCORE = 1.0

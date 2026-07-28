@@ -26,6 +26,15 @@ models/
 *.pt
 *.pth
 
+# --- research datasets (EVAL-21, D-08) --------------------------------------
+# Raw research data (CARPK, FSCD-*, RPINE) is large and licence-restricted; it is never
+# committed and arrives only via `pixi run fetch-datasets`, which records SHA-256 + source
+# URL + licence in datasets/provenance.json. The committed, diffable facts live OUTSIDE this
+# tree: split manifests in dataset_splits/ and the offline test fixtures in tests/fixtures/.
+# Leading slash anchors this to the REPO-ROOT datasets/ only, so the committed dataset_splits/
+# manifests (kept out of conf/ so Hydra does not see a `datasets` config group) are untouched.
+/datasets/
+
 # --- local data stores ------------------------------------------------------
 runs.db
 runs.db-journal
@@ -44,6 +53,10 @@ runs.db-shm
 # COMMITTED deliverable is the derived charts/tables (EVAL-06, plan 08-02), not this raw dump.
 # The full run also depends on fetched weights, so the file's contents vary by environment.
 docs/benchmark/results.json
+# research-results.json is the analogous raw dump from the research sweep (`pixi run bench-research`
+# / run_research_sweep); it depends on the licence-gated fetched archives + weights, so its numbers
+# vary by environment. The COMMITTED deliverable is docs/reports/research-report.* + the DOC-07 doc.
+docs/benchmark/research-results.json
 # Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
 benchmark.log
 

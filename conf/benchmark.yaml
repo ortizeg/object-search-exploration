@@ -46,6 +46,21 @@ out: docs/benchmark/results.json
 # Cap on chipset images in the CI subset, bounding CI runtime while still spanning canvas sizes.
 ci_image_limit: 6
 
+# --- research sweep (EVAL-23/24) --------------------------------------------------------------
+# These dimensions drive the RESEARCH sweep only (`pixi run bench-research` -> run_research_sweep):
+# method x dataset x {1,3 exemplars} x {val,test}, over the converted datasets/ tree. They are
+# DELIBERATELY empty by default and are NEVER part of the default `bench`/`bench-ci` chipset sweep
+# nor the model-free CI subset (which stays chipset-only, per the RESEARCH risk note) -- the
+# research sweep is gated on the licence-gated fetched archives exactly as the full sweep gates on
+# fetched models. Populate on the CLI once the data is fetched, e.g.:
+#   pixi run bench-research research_root=datasets datasets=[rpine,fscd147,fscd_lvis,carpk]
+datasets: []                 # research dataset keys to sweep; empty -> no research cells
+splits: [val, test]          # tune on val, report on test (D-02); CARPK/PUCPR+ emit no val cell
+exemplar_counts: [1, 3]      # the product operating point AND the literature convention (D-05)
+seed: 0                      # exemplar-sampler seed (np.random.default_rng, never cv2 -- D-11)
+research_root: null          # base of the converted datasets/<dataset>/<split>/ tree; required
+research_out: docs/benchmark/research-results.json  # gitignored, regenerable raw dump
+
 # Keep Hydra from chdir-ing into a per-run output dir or scattering .hydra folders in the repo;
 # the benchmark resolves its own paths against the repo root.
 hydra:

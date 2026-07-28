@@ -42,6 +42,7 @@ The last of those is guarded by :attr:`ONNXInferencer.model_sha256` (EVAL-09 pro
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -54,6 +55,25 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from object_search import provenance
 from object_search.inference.base import BaseInferencer, PostProcessor
+
+# The env var that opts a run into non-default execution providers (e.g. a GPU benchmark box).
+_PROVIDERS_ENV = "OS_ONNX_PROVIDERS"
+
+
+def resolve_providers() -> list[str]:
+    """The default ONNX execution providers for the learned methods.
+
+    Pinned to the **CPU** execution provider so a run is bit-identical across machines -- the
+    project's reproducibility guarantee (same image + box + method + config => identical results;
+    GPU float kernels are NOT bit-identical to CPU). Set ``OS_ONNX_PROVIDERS`` (comma-separated,
+    e.g. ``CUDAExecutionProvider,CPUExecutionProvider``) to opt a single run into other providers --
+    an explicit per-run choice (the GPU benchmark box does this; GPU is not bit-identical to CPU).
+    """
+    override = os.environ.get(_PROVIDERS_ENV)
+    if override:
+        return [provider.strip() for provider in override.split(",") if provider.strip()]
+    return ["CPUExecutionProvider"]
+
 
 # ONNX tensor-type string -> numpy dtype name, for readable error messages.
 ONNX_TYPE_TO_NUMPY: dict[str, str] = {

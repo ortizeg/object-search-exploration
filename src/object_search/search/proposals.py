@@ -31,7 +31,13 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import BaseModel
 
-from object_search.inference import FastSAMConfig, FastSAMInferencer, Proposal, models
+from object_search.inference import (
+    FastSAMConfig,
+    FastSAMInferencer,
+    Proposal,
+    models,
+    resolve_providers,
+)
 
 
 @runtime_checkable
@@ -63,12 +69,11 @@ def default_backend(
         model_path: Path to ``fastsam_s.onnx``. ``None`` uses the gitignored registry location
             (``models/`` + the ``fastsam-s`` spec's ``dest``), which must have been produced by
             ``pixi run -e export export-fastsam``.
-        providers: ONNX Runtime execution providers. ``None`` pins ``CPUExecutionProvider``
-            -- NOT the runtime default. On macOS the runtime default puts CoreML first, whose
-            kernels are non-deterministic and, empirically, fail to build an execution plan for
-            some input shapes ("Error in building plan"). Reproducibility is a hard project
-            constraint (same input => identical results), so the proposal backend pins CPU
-            exactly as ``dino_dense`` does. Pass an explicit list to override.
+        providers: ONNX Runtime execution providers. ``None`` uses :func:`resolve_providers`
+            (``CPUExecutionProvider`` by default, so a run is bit-identical across machines --
+            NOT the runtime default, which puts CoreML first on macOS: its kernels are
+            non-deterministic and empirically fail to build a plan for some shapes). Set the
+            ``OS_ONNX_PROVIDERS`` env var (or pass an explicit list) to opt into GPU.
 
     Raises:
         FileNotFoundError: If the weight is absent -- surfaced here rather than swallowed, so the
@@ -79,7 +84,7 @@ def default_backend(
         if model_path is not None
         else (models.models_dir() / models.MODEL_REGISTRY["fastsam-s"].dest)
     )
-    resolved_providers = providers if providers is not None else ["CPUExecutionProvider"]
+    resolved_providers = providers if providers is not None else resolve_providers()
     return FastSAMInferencer(path, providers=resolved_providers)
 
 

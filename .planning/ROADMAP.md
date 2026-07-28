@@ -35,6 +35,11 @@ checkpoints in each phase.
 - [x] **Phase 6: Method 3** - DINOv2 ONNX inferencer and `dino-dense` dense similarity
 - [x] **Phase 7: Method 5** - FastSAM proposals + DINOv2 region embeddings, `propose-retrieve`
 - [x] **Phase 8: Evaluation & docs** - Benchmark, paired comparison, charts, docs, Milestone 2 spec
+- [ ] **Phase 11: Research-dataset evaluation harness** - Fetch/loaders/splits for RPINE, FSCD-147, FSCD-LVIS, CARPK/PUCPR+; 1- & 3-exemplar sampling; literature metrics (MAE/RMSE/NAE + COCO AP/AP50/AP75); tune-on-val → report-on-test
+
+> Note: Phases 9 (marker-conditioned, Milestone 2) and 10 (textured-benchmark) exist as phase
+> directories and are tracked in `.planning/STATE.md`; their detail blocks were not carried into
+> this ROADMAP body. Phase 11 is the next planned work.
 
 ## Phase Details
 
@@ -343,6 +348,50 @@ Plans:
 - [x] 08-02: Committed charts and tables, README with side-by-side sample runs, per-method
       doc pages, `docs/ROBUSTNESS-BACKLOG.md`, `docs/MILESTONE-2.md` (PR #16)
 
+### Phase 11: Research-dataset evaluation harness
+
+**Goal**: Extend the benchmark beyond the synthetic chip/textured sets to four external research
+datasets, tuned on val and reported on test with the literature's own metrics — so each method's
+numbers are comparable to published few-shot counting/detection work and are stress-tested on real
+distractors, density, and cross-domain shift instead of only self-generated images.
+**Depends on**: Phase 8 (benchmark runner, metrics module, ground-truth sidecar loader)
+**Requirements**: EVAL-21, EVAL-22, EVAL-23, EVAL-24, DOC-07
+**Success Criteria** (what must be TRUE):
+
+  1. `pixi run fetch-datasets` acquires RPINE, FSCD-147, FSCD-LVIS, and CARPK/PUCPR+ into a
+     gitignored tree with a SHA-256 provenance manifest, and no raw dataset file is tracked in git —
+     proven by grepping the index and by a fetch that records SHA-256 + source + licence.
+
+  2. FSC-147/FSCD-147 is de-duplicated on load — a test asserts the 11 train↔test leaked images and
+     the pixel-identical duplicates are removed before any image is scored.
+
+  3. Every research dataset runs through the existing benchmark at BOTH 1 and 3 exemplars, with
+     tuning confined to val and headline numbers reported on test — proven by a test asserting the
+     test split membership is independent of the seed while a carved val slice is seed-reproducible.
+
+  4. The report table carries, per method × dataset × {1,3 exemplars} × {val,test}: P/R/F1 and
+     COCO-style AP@[.5:.95:.05], AP50, AP75, plus MAE/RMSE/NAE — the same metrics the source papers
+     report.
+
+  5. CARPK/PUCPR+ are evaluated test-only with no tuning, yielding an explicit cross-domain
+     generalization number rather than an in-domain-tuned one.
+
+  6. `docs/eval/research-datasets.md` documents each dataset (purpose, source link, annotation type,
+     splits, strengths/weaknesses) and the tune-on-val → report-on-test protocol.
+**Plans**: 3/3 plans executed (on offline fixtures; real licence-gated data fetched by the user)
+
+Plans:
+
+- [x] 11-01-PLAN.md — Tracer: CARPK end-to-end (fetch + provenance + gitignore + native→sidecar
+      converter + split-manifest schema + COCO AP sweep / MAE-RMSE-NAE metrics + benchmark row at
+      1 exemplar), proving the whole research-dataset architecture on one dataset
+- [x] 11-02-PLAN.md — Converters for FSCD-147 (+ dedup: 11 train↔test leaks + pixel-identical
+      dups), FSCD-LVIS (unseen), and RPINE; shared seeded val-carve helper; four committed split
+      manifests (native / seeded-carve / test-only) with seed-stability guarantees
+- [x] 11-03-PLAN.md — Seeded 1-&-3 exemplar sampler + `run_multi_exemplar` k-shot late fusion,
+      full benchmark sweep (method × dataset × {1,3} × {val,test}, CARPK/PUCPR+ test-only),
+      literature-metric report table, and `docs/eval/research-datasets.md` (DOC-07)
+
 ## Progress
 
 **Execution Order:**
@@ -361,3 +410,4 @@ the shared DINOv2 inferencer. Valid parallel schedule: 5 ∥ 6, then 7, then 8.
 | 6. Method 3 | 0/2 | Not started | - |
 | 7. Method 5 | 1/2 | In Progress|  |
 | 8. Evaluation & docs | 2/2 | Complete | 2026-07-25 |
+| 11. Research-dataset evaluation harness | 3/3 | Executed | 2026-07-26 |

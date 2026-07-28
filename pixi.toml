@@ -131,6 +131,9 @@ typecheck = "mypy src/"
 test = "pytest tests/ -v"
 quality = { depends-on = ["lint", "format-check", "typecheck", "test"] }
 fetch-models = "python -m object_search.cli fetch-models"
+# Convert the research evaluation datasets (EVAL-21) into the gitignored datasets/ tree. CARPK is
+# licence-gated: `fetch-datasets --list` prints where a human drops the archive first (D-08).
+fetch-datasets = "python -m object_search.cli fetch-datasets"
 serve = "uvicorn object_search.api.app:app --reload --port 8000"
 # Documentation site (mkdocs-material). `docs` serves it locally with live-reload at
 # http://127.0.0.1:8001; `docs-build` renders the static site into site/ (what CI publishes).
@@ -138,12 +141,21 @@ docs = "mkdocs serve --dev-addr 127.0.0.1:8001"
 docs-build = "mkdocs build --strict"
 samples = "python -m object_search.cli render-samples"
 report = "python scripts/build_report.py"
+# Render the committed research-dataset report table from the (gitignored, regenerable)
+# docs/benchmark/research-results.json produced by run_research_sweep. Fails with an actionable
+# message when that file is absent (the numbers depend on the licence-gated fetched archives).
+report-research = "python scripts/build_research_report.py"
 # Hydra's @hydra.main seizes sys.argv, so the benchmark CANNOT be a Typer subcommand
 # (the Typer parser and Hydra's would both try to own argv). It is its own module entry
 # point instead. `bench` runs the full sweep (needs fetched models); `bench-ci` runs the
 # model-free chipset subset (ncc + classical sparse-geo) with no ONNX weights.
 bench = "python -m object_search.eval.benchmark"
 bench-ci = "python -m object_search.eval.benchmark ci=true"
+# The RESEARCH sweep (EVAL-23/24): method x dataset x {1,3} x {val,test} over the fetched datasets/
+# tree. Gated on fetch-datasets (+ fetched models for the learned methods), never in CI. Needs
+# research_root + datasets on the CLI, e.g.:
+#   pixi run bench-research research_root=datasets datasets=[rpine,fscd147,fscd_lvis,carpk]
+bench-research = "python -m object_search.eval.benchmark --research"
 # Render the committed, byte-identical charts + results.md from the last `bench` run (EVAL-06).
 bench-charts = "python -m object_search.eval.charts"
 synth = "python -m object_search.cli synth"

@@ -119,7 +119,7 @@ import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from object_search.inference import models
+from object_search.inference import models, resolve_providers
 from object_search.inference.owlv2 import OWLv2Inferencer
 from object_search.schemas import (
     BBox,
@@ -139,7 +139,7 @@ from object_search.search.registry import register_method
 
 _METHOD_VERSION = "1.0.0"
 _OWLV2_KEY = "owlv2-base-patch16"  # the MODEL_REGISTRY key for the OWLv2 vision graph
-_PROVIDERS = ["CPUExecutionProvider"]  # pin the CPU EP so a run is bit-identical across machines
+_PROVIDERS = resolve_providers()  # CPU by default (bit-identical); OS_ONNX_PROVIDERS opts into GPU
 _EXEMPLAR_IOU = 0.5  # a match overlapping the exemplar by >= this is the exemplar's own region
 _EXEMPLAR_SELF_IOU = 0.3  # looser overlap used to read off the exemplar's own self-match score
 _EPS = 1e-12  # guards a zero-norm division; a genuinely zero embedding is background, not a match

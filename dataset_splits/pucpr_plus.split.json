@@ -1,0 +1,9 @@
+{
+  "dataset": "pucpr_plus",
+  "provenance_ref": "datasets/provenance.json",
+  "seed": 0,
+  "test": [],
+  "train": [],
+  "val": [],
+  "val_strategy": "test-only"
+}

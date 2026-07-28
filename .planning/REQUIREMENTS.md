@@ -209,6 +209,33 @@ which kind of image, and at what latency.
       complementing the NCC-favourable chipset so the four-method comparison spans both regimes.
       No hand-labeling, no licensing — same exact-GT-by-construction contract as EVAL-19.
 
+- [ ] **EVAL-21**: **Research-dataset fetch & provenance** — a `pixi run fetch-datasets` task
+      acquires the external research sets (RPINE, FSCD-147, FSCD-LVIS, CARPK/PUCPR+) into a
+      **gitignored** `datasets/` tree, each recorded with a SHA-256 manifest plus source URL and
+      licence in a provenance file; no raw dataset file is ever tracked in git (same contract as
+      `models/`). FSC-147/FSCD-147 is **de-duplicated on load** — the pixel-identical duplicates
+      and the 11 images that leak across train↔test are dropped, so precision, recall, and counts
+      are not inflated.
+
+- [ ] **EVAL-22**: **Reproducible loaders & split manifests** — each dataset has a loader that
+      yields `(image, all-instance GT boxes, exemplar candidates)` against a committed split
+      manifest. The protocol is **tune-on-val, report-on-test**: where a dataset ships no official
+      val split (RPINE, FSCD-LVIS unseen), a val slice is carved from train **deterministically
+      from a config seed** and the test split is never touched; CARPK/PUCPR+ are **test-only** (no
+      tuning). Same seed ⇒ identical split membership, proven by a test.
+
+- [ ] **EVAL-23**: **Exemplar sampling & box-conversion layer** — a seeded sampler draws exemplar
+      box(es) from each image's ground truth per dataset convention, running every method at both
+      **1 exemplar** (the product's one-box operating point) and **3 exemplars** (literature
+      comparability). Datasets whose native labels are dots rather than boxes are **excluded from
+      box-IoU scoring** rather than given fabricated boxes.
+
+- [ ] **EVAL-24**: **Literature-standard metrics** — the benchmark reports, per
+      method × dataset × {1,3 exemplars} × {val,test}: detection/localization **Precision, Recall,
+      F1** and **COCO-style AP@[.5:.95:.05], AP50, AP75**; and counting **MAE, RMSE, NAE** — the
+      same metrics the source papers report. The synthetic chip/textured sets remain the tuning
+      surface; the research datasets are the held-out evaluation.
+
 ### Demo Assets & Docs (DOC)
 
 - [x] **DOC-01**: Demo image set — basketball broadcast frames from the sibling project,
@@ -226,6 +253,11 @@ which kind of image, and at what latency.
 - [x] **DOC-05**: `docs/ROBUSTNESS-BACKLOG.md` aggregating every method's backlog
 - [x] **DOC-06**: `docs/MILESTONE-2.md` specifying the marker-conditioned region proposal
       feature and which Milestone 1 components it reuses
+
+- [ ] **DOC-07**: **Research-dataset survey** — `docs/eval/research-datasets.md` records each
+      external dataset (purpose, source link, annotation type, splits, strengths / weaknesses /
+      biases) and the tune-on-val / report-on-test protocol, so the choice of datasets and metrics
+      is documented and defensible rather than incidental.
 
 ## v2 Requirements
 

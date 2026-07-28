@@ -18,6 +18,7 @@ from object_search.inference.onnx_inferencer import (
     ONNXInferencer,
     ONNXInputSpec,
     PreprocessInfo,
+    resolve_providers,
 )
 from object_search.inference.owlv2 import Owlv2Embeddings, OWLv2Inferencer
 from object_search.inference.superpoint import SuperPointInferencer, SuperPointResult
@@ -38,4 +39,5 @@ __all__ = [
     "SuperPointInferencer",
     "SuperPointResult",
     "decode_fastsam",
+    "resolve_providers",
 ]

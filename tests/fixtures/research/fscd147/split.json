@@ -1,0 +1,19 @@
+{
+  "train": [
+    "fscd147-fixture-train-1",
+    "fscd147-fixture-train-2",
+    "fscd147-fixture-train-3",
+    "fscd147-fixture-leak"
+  ],
+  "val": [
+    "fscd147-fixture-val-1",
+    "fscd147-fixture-val-2",
+    "fscd147-fixture-dup-a",
+    "fscd147-fixture-dup-b"
+  ],
+  "test": [
+    "fscd147-fixture-test-1",
+    "fscd147-fixture-test-2",
+    "fscd147-fixture-leak"
+  ]
+}

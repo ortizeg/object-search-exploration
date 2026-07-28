@@ -63,6 +63,11 @@ class GroundTruth(BaseModel):
             ``achieved_n`` field, when present, is only a cross-check.
         exemplar_index: Index into ``boxes`` of the designated query instance. ``0`` when the
             sidecar does not name one (deterministic given the generator's sort).
+        exemplar_indices: Every designated exemplar index, in order. An **additive** field for
+            the research datasets whose native annotations ship *several* exemplar boxes per image
+            (FSCD-* provides three): the 3-exemplar run honours all of them and the 1-exemplar run
+            takes the first. Empty by default; :attr:`effective_exemplar_indices` falls back to
+            ``(exemplar_index,)`` so every existing single-exemplar sidecar is unchanged.
         width: Canvas width in pixels, or ``None`` if the sidecar did not record it.
         height: Canvas height in pixels, or ``None`` if the sidecar did not record it.
         slice_metadata: Per-slice descriptors (true instance count, scale range, ...). For the
@@ -75,6 +80,7 @@ class GroundTruth(BaseModel):
     image_id: str = Field(min_length=1)
     boxes: tuple[BBox, ...] = Field(min_length=1)
     exemplar_index: int = Field(ge=0)
+    exemplar_indices: tuple[int, ...] = ()
     width: int | None = None
     height: int | None = None
     slice_metadata: SliceMetadata = Field(default_factory=SliceMetadata)
@@ -86,9 +92,31 @@ class GroundTruth(BaseModel):
         return len(self.boxes)
 
     @property
+    def effective_exemplar_indices(self) -> tuple[int, ...]:
+        """Designated exemplar indices, falling back to ``(exemplar_index,)`` when none listed.
+
+        The single source every caller reads, so a single-exemplar sidecar (``exemplar_indices``
+        empty) and a multi-exemplar research sidecar are queried through the same code path.
+        """
+        return self.exemplar_indices or (self.exemplar_index,)
+
+    @property
     def exemplar(self) -> ExemplarBox:
         """The designated query box, so every method searches from the same exemplar."""
         return ExemplarBox(box=self.boxes[self.exemplar_index])
+
+    def exemplar_at(self, count: int) -> ExemplarBox:
+        """The exemplar for an ``count``-exemplar run: the first of the designated indices.
+
+        The harness scores at 1 and 3 exemplars (a locked decision). Every method in this repo
+        takes a single :class:`ExemplarBox`, so the ``count`` selects *which* designated box seeds
+        the run -- ``1`` uses the first, ``3`` would use the third when three are listed -- rather
+        than handing the method several boxes at once. ``count`` is clamped to the available
+        indices so a 3-exemplar request on a 1-exemplar sidecar degrades to the first box.
+        """
+        indices = self.effective_exemplar_indices
+        chosen = indices[min(count, len(indices)) - 1] if count >= 1 else indices[0]
+        return ExemplarBox(box=self.boxes[chosen])
 
 
 def _canvas_size(payload: dict[str, object]) -> tuple[int | None, int | None]:
@@ -112,8 +140,36 @@ def _source_for(root_name: str) -> str:
     return "hand"
 
 
-def _parse_sidecar(path: Path, image_id: str) -> GroundTruth:
-    """Parse one ``*.gt.json`` into a :class:`GroundTruth`, cross-checking the achieved count."""
+def _parse_exemplar_indices(
+    payload: dict[str, object], path: Path, n_boxes: int
+) -> tuple[int, ...]:
+    """Parse the optional additive ``exemplar_indices`` list, validating each is in range.
+
+    Absent (the common single-exemplar case) yields ``()`` -- :attr:`GroundTruth.effective_
+    exemplar_indices` then falls back to ``(exemplar_index,)``. Present, it must be a list of
+    integers each inside ``[0, n_boxes)``, so a corrupt research sidecar fails loudly here rather
+    than indexing out of bounds when the benchmark seeds an exemplar.
+    """
+    raw = payload.get("exemplar_indices")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(i, int) for i in raw):
+        raise ValueError(f"{path}: exemplar_indices={raw!r} must be a list of integers")
+    indices = tuple(int(i) for i in raw)
+    if any(not (0 <= i < n_boxes) for i in indices):
+        raise ValueError(f"{path}: exemplar_indices={indices} outside [0, {n_boxes})")
+    return indices
+
+
+def _parse_sidecar(path: Path, image_id: str, *, source_override: str | None = None) -> GroundTruth:
+    """Parse one ``*.gt.json`` into a :class:`GroundTruth`, cross-checking the achieved count.
+
+    ``source_override`` tags the provenance explicitly (research sidecars live under the
+    ``datasets/`` tree, whose directory name would otherwise fall through to the ``"hand"``
+    default and mislabel them in the report). Everything else -- the schema, the achieved-count
+    cross-check, the exemplar-index validation -- is shared, so there is still exactly one parser
+    (D-10): no research dataset gets a second GT reader.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     boxes = tuple(BBox.model_validate(box) for box in payload["boxes"])
     if not boxes:
@@ -133,6 +189,8 @@ def _parse_sidecar(path: Path, image_id: str) -> GroundTruth:
     if not isinstance(exemplar_index, int) or not (0 <= exemplar_index < len(boxes)):
         raise ValueError(f"{path}: exemplar_index={exemplar_index!r} is outside [0, {len(boxes)})")
 
+    exemplar_indices = _parse_exemplar_indices(payload, path, len(boxes))
+
     width, height = _canvas_size(payload)
 
     slice_block = payload.get("slice_metadata")
@@ -146,10 +204,11 @@ def _parse_sidecar(path: Path, image_id: str) -> GroundTruth:
         image_id=image_id,
         boxes=boxes,
         exemplar_index=exemplar_index,
+        exemplar_indices=exemplar_indices,
         width=width,
         height=height,
         slice_metadata=slice_metadata,
-        source=_source_for(path.parent.name),
+        source=source_override or _source_for(path.parent.name),
     )
 
 
@@ -223,3 +282,32 @@ def load_ground_truth(image_id: str, root: Path | None = None) -> GroundTruth | 
             return _parse_sidecar(sidecar, image_id)
     logger.debug("no ground truth sidecar for {} (searched {} root(s))", image_id, len(roots))
     return None
+
+
+def load_research_ground_truth(sidecar_path: Path) -> GroundTruth | None:
+    """Load a research-dataset ``*.gt.json`` sidecar by explicit path, tagged ``source="research"``.
+
+    A thin wrapper over the single :func:`_parse_sidecar` (D-10): research datasets reach the
+    benchmark by converting their native annotations into the **same** sidecar schema, so there is
+    no second GT reader. The only difference from :func:`load_ground_truth` is that research
+    sidecars are addressed by their absolute path under the gitignored ``datasets/`` tree (they are
+    not in the committed ``_GT_ROOTS``) and are tagged ``"research"`` rather than falling through
+    to the ``"hand"`` provenance default.
+
+    Args:
+        sidecar_path: Absolute path to a converted ``<image_id>.gt.json`` under ``datasets/``.
+
+    Returns:
+        A frozen :class:`GroundTruth` with ``source == "research"``, or ``None`` if the sidecar is
+        not on disk (the raw research tree is gitignored and fetched, so absence is expected in a
+        clean checkout).
+
+    Raises:
+        ValueError: If the sidecar is found but internally inconsistent (same guards as
+            :func:`load_ground_truth`).
+    """
+    if not sidecar_path.is_file():
+        logger.debug("no research ground truth sidecar at {}", sidecar_path)
+        return None
+    image_id = sidecar_path.name[: -len(".gt.json")]
+    return _parse_sidecar(sidecar_path, image_id, source_override="research")
