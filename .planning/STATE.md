@@ -33,9 +33,10 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-07-26 — Quick task 260726-lct: MkDocs Material docs site (`pixi run docs`),
-GitHub Pages deploy workflow, Playwright UI-screenshot capture, and an interface walkthrough
-page. `mkdocs build --strict` green.
+Last activity: 2026-07-27 — Quick task 260727-fpe: Roboflow floor-plans-500 target-domain eval
+(floorplans-door/window, per-class single-class COCO conversion) + per-method domain threshold
+tuning (tune-on-val F1@0.5 → freeze → tuned-vs-default on test) + vast.ai gpu_bench extension.
+Full suite green (696 passed, 93.74% coverage).
 
 Progress: [█████████░] 88%
 
@@ -44,6 +45,7 @@ Progress: [█████████░] 88%
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
+| 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 
 ## Performance Metrics
 
