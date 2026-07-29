@@ -33,10 +33,11 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-07-27 — Quick task 260727-fpe: Roboflow floor-plans-500 target-domain eval
-(floorplans-door/window, per-class single-class COCO conversion) + per-method domain threshold
-tuning (tune-on-val F1@0.5 → freeze → tuned-vs-default on test) + vast.ai gpu_bench extension.
-Full suite green (696 passed, 93.74% coverage).
+Last activity: 2026-07-29 — Quick task 260729-dh6: floor-plan eval enrichment — per-slice research
+metrics (recall by symbol-size, F1 by crowding, F1 by plan-resolution via a matched-GT-index sibling
+of match_predictions), broadened aggressive tuning grids (+ size-representative exemplar, exemplar
+{1,3}), and an opt-in dino-dense fixed-size letterbox (GPU-OOM fix). Full suite green (714 passed,
+93.60% coverage). Aggressive GPU re-run is the pending manual vast.ai step.
 
 Progress: [█████████░] 88%
 
@@ -46,6 +47,7 @@ Progress: [█████████░] 88%
 |---|-------------|------|--------|-----------|
 | 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
+| 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
 
 ## Performance Metrics
 
