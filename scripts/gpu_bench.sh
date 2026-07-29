@@ -35,10 +35,20 @@ echo "== 1/7  install envs (default + export) =="
 "$PIXI" install
 "$PIXI" install -e export
 # Swap the pinned CPU onnxruntime for onnxruntime-gpu INSIDE the pixi env (ephemeral box only; the
-# committed pin stays CPU for the macOS wheel-tag reason). onnxruntime-gpu >=1.19 bundles CUDA 12.
-"$PIXI" run pip uninstall -y onnxruntime >/dev/null 2>&1 || true
-"$PIXI" run pip install "onnxruntime-gpu>=1.19,<2"
-"$PIXI" run python -c "import onnxruntime as ort; print('ORT providers:', ort.get_available_providers())"
+# committed pin stays CPU for the macOS wheel-tag reason). TWO gotchas make the naive
+# `pixi run pip uninstall/install` a silent no-op that leaves the learned methods on CPU:
+#   1. onnxruntime is a CONDA package here, so `pip uninstall onnxruntime` cannot remove it, and
+#   2. the pixi env ships NO pip, so `pixi run pip ...` fails outright.
+# So: bootstrap pip into the env, force-install the GPU build OVER the conda CPU one (--no-deps keeps
+# the pinned numpy/etc.), and put the CUDA image's libs on the load path so the CUDA provider loads.
+PYBIN="$("$PIXI" run -q which python)"
+"$PYBIN" -m ensurepip --upgrade
+"$PYBIN" -m pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.19,<2"
+export LD_LIBRARY_PATH="/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export OS_ONNX_PROVIDERS="CUDAExecutionProvider,CPUExecutionProvider"
+# Run inference via the env python DIRECTLY below (not `pixi run`), so a later `pixi run` cannot
+# re-sync the conda CPU onnxruntime back over this pip install. Assert CUDA is actually available.
+"$PYBIN" -c "import onnxruntime as o; ps=o.get_available_providers(); print('ORT providers:', ps); assert 'CUDAExecutionProvider' in ps, 'CUDAExecutionProvider missing -- check CUDA libs / driver'"
 
 echo "== 2/7  fetch / export models (dinov2, superpoint, fastsam, owlv2) =="
 "$PIXI" run fetch-models || true                       # dinov2 (HF) + superpoint (GH release)
@@ -98,23 +108,71 @@ else
   echo "floor plans NOT present (no datasets/_incoming/floorplans drop) -> skipping floor plans"
 fi
 
-echo "== 5/7  run the 6-method sweep on GPU (method x dataset x {1,3} x {val,test}) =="
-"$PIXI" run bench-research \
-  research_root=datasets \
-  "datasets=[rpine,fscd147,fscd_lvis${FP_DATASETS}]" \
-  'methods=[ncc,mosse,sparse-geo,dino-dense,propose-retrieve,owlv2-oneshot]' \
-  'splits=[val,test]' \
-  'exemplar_counts=[1,3]'
+echo "== 5/7  6-method sweep on GPU -- ONE PROCESS PER METHOD (method x dataset x {1,3} x {val,test}) =="
+# Per-method is not cosmetic: the learned methods' ONNX sessions (dino + fastsam + owlv2) do not all
+# fit on a 24GB card at once, and onnxruntime re-allocates its CUDA arena per distinct input
+# resolution (real datasets vary in image size), so sharing ONE process OOMs dino-dense /
+# propose-retrieve on high-res sets like the floor plans. Running each method in its own process
+# keeps a single model resident; the per-method result files are then merged into the standard
+# research-results.json the report reads. Uses the env python directly (see step 1) so `pixi run`
+# cannot re-sync the conda CPU onnxruntime over the GPU build.
+ALL_DATASETS="rpine,fscd147,fscd_lvis${FP_DATASETS}"
+METHODS="ncc mosse sparse-geo dino-dense propose-retrieve owlv2-oneshot"
+mkdir -p docs/benchmark/permethod
+for m in $METHODS; do
+  echo "--- sweep $m ---"
+  "$PYBIN" -m object_search.eval.benchmark --research research_root=datasets \
+    "datasets=[${ALL_DATASETS}]" "methods=[$m]" 'splits=[val,test]' 'exemplar_counts=[1,3]' \
+    "research_out=docs/benchmark/permethod/rr-$m.json" || echo "SWEEP_FAIL $m"
+done
+"$PYBIN" - <<'PYEOF'
+import json, glob, pathlib
+merged = None
+for f in sorted(glob.glob("docs/benchmark/permethod/rr-*.json")):
+    d = json.load(open(f))
+    if merged is None:
+        merged = {k: v for k, v in d.items() if k != "cells"}; merged["cells"] = []
+    merged["cells"].extend(d.get("cells", []))
+if merged:
+    pathlib.Path("docs/benchmark/research-results.json").write_text(
+        json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    print("merged", len(merged["cells"]), "sweep cells")
+PYEOF
 
-echo "== 6/7  tune each method's acceptance threshold to the floor-plan domain (val->freeze->test) =="
+echo "== 6/7  domain threshold tuning on floor plans (per dataset x method, val->freeze->test) =="
 if [ -n "$FP_DATASETS" ]; then
-  "$PIXI" run tune-floorplans --research-root datasets --exemplars 1
+  for ds in floorplans-door floorplans-window; do
+    for m in $METHODS; do
+      echo "--- tune $ds / $m ---"
+      "$PYBIN" - "$ds" "$m" <<'PYEOF' || echo "TUNE_FAIL"
+import sys
+from object_search.eval.tuning import run_domain_tuning
+ds, m = sys.argv[1], sys.argv[2]
+run_domain_tuning(ds, "datasets", methods=(m,), exemplar_count=1,
+                  out=f"docs/benchmark/permethod/tune-{ds}-{m}.json")
+PYEOF
+    done
+  done
+  "$PYBIN" - <<'PYEOF'
+import json, glob, pathlib
+for ds in ("floorplans-door", "floorplans-window"):
+    merged = None
+    for f in sorted(glob.glob(f"docs/benchmark/permethod/tune-{ds}-*.json")):
+        d = json.load(open(f))
+        if merged is None:
+            merged = {k: v for k, v in d.items() if k != "methods"}; merged["methods"] = []
+        merged["methods"].extend(d.get("methods", []))
+    if merged:
+        pathlib.Path(f"docs/benchmark/{ds}-tuning-results.json").write_text(
+            json.dumps(merged, indent=2, sort_keys=True) + "\n")
+        print(ds, "->", len(merged["methods"]), "methods")
+PYEOF
 else
   echo "  skipped (floor plans not present)"
 fi
 
 echo "== 7/7  render the HTML report =="
-"$PIXI" run report-research
+"$PYBIN" scripts/build_research_report.py
 echo "DONE. Artifacts:"
 ls -la docs/reports/research-report.html docs/benchmark/research-results.json
 [ -n "$FP_DATASETS" ] && ls -la \

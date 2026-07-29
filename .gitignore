@@ -57,6 +57,10 @@ docs/benchmark/results.json
 # / run_research_sweep); it depends on the licence-gated fetched archives + weights, so its numbers
 # vary by environment. The COMMITTED deliverable is docs/reports/research-report.* + the DOC-07 doc.
 docs/benchmark/research-results.json
+# Per-method domain threshold tuning dumps (`pixi run tune-floorplans`): same environment-dependent,
+# licence/weights-gated raw numbers as research-results.json, so likewise never committed.
+docs/benchmark/*-tuning-results.json
+docs/benchmark/permethod/
 # Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
 benchmark.log
 
