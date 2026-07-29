@@ -49,6 +49,12 @@ Positional-embedding interpolation is fixed at export time (HF's ``align_corners
 from FB's reference ``offset=0.1`` + antialiasing). It is not re-derived or "corrected" here; the
 export in use is the fp32 ``onnx-community`` graph at the pinned revision recorded in
 :data:`object_search.inference.models.MODEL_REGISTRY`.
+
+Note: Method 3's opt-in fixed-size letterbox (``DinoDenseConfig.fixed_input_side``, a multiple of
+14) feeds this inferencer a single square input for every scene. Because that side is already a
+multiple of 14, the snap-to-multiple(14) resize above is a no-op on it and ``scale_x``/``scale_y``
+come back as ``1.0`` -- the inferencer contract is unchanged; the letterbox lives entirely in
+:mod:`object_search.search.dino_dense`.
 """
 
 from __future__ import annotations
