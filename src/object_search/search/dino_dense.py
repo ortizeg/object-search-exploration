@@ -37,6 +37,20 @@ method's, not the backbone's:
 - **The exemplar crop is taken from the original BGR scene** and embedded on its own. Under the
   default ``max-token`` scoring its patch tokens are kept as a **bank** (one vector per part);
   under ``prototype`` scoring they are mean-pooled into one vector. All tokens are L2-normalized.
+- **Fixed-size letterbox (opt-in, ``fixed_input_side``).** ``None`` (default) is the native/cap
+  path above -- byte-identical on the chipset/synthetic sets. When set to a multiple of 14, the
+  (capped) scene is letterboxed into ONE fixed ``fixed_input_side`` x ``fixed_input_side`` square
+  by a **single uniform aspect-preserving scale** ``side / max(h, w)`` with the content placed
+  top-left and the bottom/right strip filled with a **constant pad**. Because every plan then hits
+  the same input resolution, onnxruntime allocates its CUDA arena once instead of per-scene -- the
+  GPU-OOM fix for varied-resolution plans. Two consequences are handled explicitly: **padding
+  tokens are masked** (a token whose patch centre lands in the padded region is dropped from the
+  threshold calibration, and the padded pixels of the similarity map are set below any threshold,
+  so connected components fire only in real content); and **boxes map back through the single
+  letterbox scale** (top-left placement => zero pad offset => one division by the combined
+  cap x letterbox scale, no offset term). The side is a multiple of 14, so
+  :class:`DINOv2Inferencer`'s snap-to-multiple(14) resize is a no-op on the letterboxed input and
+  its scale factors come back as 1.0. Determinism is preserved (fixed interpolation + constant pad).
 
 Post-processing (exact)
 -----------------------
@@ -118,7 +132,7 @@ import cv2
 import numpy as np
 import numpy.typing as npt
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from object_search.inference import DINOv2Inferencer, models, resolve_providers
 from object_search.inference.dinov2 import DINOV2_PATCH
@@ -276,6 +290,37 @@ class DinoDenseConfig(BaseModel):
             "self-similarity accepts scores above self_score * retain_frac (self_score=1.0)."
         ),
     )
+    fixed_input_side: int | None = Field(
+        default=None,
+        ge=DINOV2_PATCH,
+        description=(
+            "Opt-in GPU-OOM fix for varied-resolution scenes (e.g. floor plans). When None "
+            "(default) the scene runs at its native size capped at `scene_max_side` -- the "
+            "committed path, byte-identical on the chipset/synthetic sets. When set to a multiple "
+            "of 14, EVERY scene is letterboxed (one uniform aspect-preserving scale + a constant "
+            "bottom-right pad) into a single fixed `fixed_input_side` x `fixed_input_side` input, "
+            "so onnxruntime sees ONE input resolution across all plans and the CUDA memory arena "
+            "is allocated once. Padding tokens are masked out before thresholding, and boxes map "
+            "back through the single letterbox scale. Must be a multiple of 14 (the DINOv2 patch "
+            "stride); a non-multiple is rejected at construction."
+        ),
+    )
+
+    @field_validator("fixed_input_side")
+    @classmethod
+    def _fixed_input_side_is_multiple_of_patch(cls, value: int | None) -> int | None:
+        """Reject a ``fixed_input_side`` that is not a multiple of the DINOv2 patch stride (14).
+
+        A non-multiple would be silently floor-divided by the stride-14 patch conv (a systematic
+        spatial offset, not an error -- the exact silent bug :class:`DINOv2Inferencer` guards), so
+        it is caught at construction. ``None`` (the native/cap path) is always valid.
+        """
+        if value is not None and value % DINOV2_PATCH != 0:
+            raise ValueError(
+                f"fixed_input_side={value} must be a multiple of {DINOV2_PATCH} "
+                f"(the DINOv2 patch stride); got remainder {value % DINOV2_PATCH}"
+            )
+        return value
 
 
 @dataclass(frozen=True)
@@ -448,6 +493,54 @@ def _upsample_similarity(
     return np.asarray(upsampled, dtype=np.float32)
 
 
+# -- fixed-size letterbox (opt-in GPU-OOM fix; model-free, so CI gates it without the weight) ----
+# A similarity strictly BELOW any cosine/threshold, written into the padded region so connected
+# components can never fire there. It must be below the candidate floor's own minimum (which is
+# clamped to -1.0), so -2.0 -- outside the [-1, 1] cosine range and below every possible cut,
+# including the candidate_margin floor -- guarantees padded pixels are never foreground.
+_PAD_SENTINEL: float = -2.0
+# The constant pad value for the letterboxed canvas (a flat, deterministic border).
+_LETTERBOX_PAD_VALUE: int = 0
+
+
+def _fixed_letterbox(
+    image: npt.NDArray[np.uint8], side: int
+) -> tuple[npt.NDArray[np.uint8], float, int, int]:
+    """Letterbox a BGR image into a ``side`` x ``side`` square via ONE uniform scale + a pad.
+
+    The single aspect-preserving scale is ``side / max(h, w)``, so the content fits exactly inside
+    the square with no distortion; the resized content is placed at the TOP-LEFT and the remaining
+    bottom/right strip is filled with a constant value (:data:`_LETTERBOX_PAD_VALUE`). A top-left
+    placement means the pad offset is zero, so a box in the square maps back to the original by a
+    single division by the scale -- no offset term. Deterministic (fixed interpolation + constant
+    pad). Returns ``(canvas, scale, content_w, content_h)`` where ``content_w/h`` are the resized
+    content extent in square pixels (everything at or beyond them is padding).
+    """
+    h, w = int(image.shape[0]), int(image.shape[1])
+    scale = side / max(h, w)
+    content_w = min(side, max(1, round(w * scale)))
+    content_h = min(side, max(1, round(h * scale)))
+    resized = cv2.resize(image, (content_w, content_h), interpolation=cv2.INTER_AREA)
+    canvas = np.full((side, side, 3), _LETTERBOX_PAD_VALUE, dtype=np.uint8)
+    canvas[:content_h, :content_w] = resized
+    return np.ascontiguousarray(canvas), scale, content_w, content_h
+
+
+def _content_token_mask(gh: int, gw: int, content_w: int, content_h: int) -> npt.NDArray[np.bool_]:
+    """Boolean ``(gh, gw)`` grid: ``True`` where a token's patch CENTRE lands inside the content.
+
+    A token ``(gy, gx)`` on a multiple-of-14 (unsnapped) input has its patch centre at pixel
+    ``(gx*14 + 7, gy*14 + 7)``; it is a content token when that centre falls within
+    ``[0, content_w) x [0, content_h)`` and a padding token otherwise. Used to exclude padding
+    tokens from the threshold calibration so the padded region cannot drag the cut around.
+    """
+    centre_x = np.arange(gw) * DINOV2_PATCH + DINOV2_PATCH // 2
+    centre_y = np.arange(gh) * DINOV2_PATCH + DINOV2_PATCH // 2
+    valid_x = centre_x < content_w
+    valid_y = centre_y < content_h
+    return np.outer(valid_y, valid_x)
+
+
 def _extract_components(
     sim_full: npt.NDArray[np.float32],
     floor: float,
@@ -590,8 +683,34 @@ def search(
         cap_scale = 1.0
         capped = image
 
+    # 3b. OPT-IN fixed-size letterbox (GPU-OOM fix). When `fixed_input_side` is set, letterbox the
+    #     (capped) scene into ONE fixed square so onnxruntime sees a single input resolution across
+    #     all plans (the CUDA arena is allocated once). `effective_scale` is the combined
+    #     original -> model-input scale used to map boxes back; `content_extent` marks where the
+    #     real content ends and the constant pad begins (None => native/cap path, no pad). The None
+    #     path leaves `model_input`/`effective_scale` exactly as the cap branch produced -- byte-
+    #     identical on chipset/synthetic.
+    if config.fixed_input_side is not None:
+        model_input, letterbox_scale, content_w, content_h = _fixed_letterbox(
+            capped, config.fixed_input_side
+        )
+        effective_scale = cap_scale * letterbox_scale
+        content_extent: tuple[int, int] | None = (content_w, content_h)
+        logger.info(
+            "dino-dense: letterboxed scene into a fixed {side}x{side} input "
+            "(content {cw}x{ch}, scale x{ls:.4f}); one onnxruntime input shape for every plan",
+            side=config.fixed_input_side,
+            cw=content_w,
+            ch=content_h,
+            ls=letterbox_scale,
+        )
+    else:
+        model_input = capped
+        effective_scale = cap_scale
+        content_extent = None
+
     t_infer = perf_counter()
-    grid, scale_x, scale_y = inferencer.dense_tokens(capped)
+    grid, scale_x, scale_y = inferencer.dense_tokens(model_input)
     inference_ms = (perf_counter() - t_infer) * 1000.0
     gh, gw = grid.shape[0], grid.shape[1]
 
@@ -606,20 +725,35 @@ def search(
     # 5. Bilinearly upsample the MAP (not the tokens) to pixel resolution using the scale factors.
     sim_full = _upsample_similarity(sim_token, scale_x, scale_y)
 
+    # 5b. Fixed-letterbox PADDING MASK. Tokens whose patch centre lands in the padded region are
+    #     excluded from calibration (so the pad cannot drag the cut around), and the padded pixels
+    #     of the upsampled map are set BELOW any threshold so connected components can only fire in
+    #     the real content. On the native/cap path (content_extent is None) nothing is masked --
+    #     `calib_values` is the full token map, byte-identical to before.
+    if content_extent is not None:
+        content_w, content_h = content_extent
+        token_valid = _content_token_mask(gh, gw, content_w, content_h)
+        calib_values = sim_token[token_valid]
+        sim_full[content_h:, :] = _PAD_SENTINEL
+        sim_full[:, content_w:] = _PAD_SENTINEL
+    else:
+        calib_values = sim_token.reshape(-1)
+
     # 6. Calibrate the accept threshold from the token-resolution similarity distribution. A pinned
     #    config.threshold wins; otherwise "contrast" (the default, tuned for this map) is computed
     #    locally, and the classical strategies delegate to the shared calibrator. self_score is 1.0
     #    (the L2-normalized prototype's self-cosine). Each path yields a (strategy, reason) for the
-    #    diagnostics note.
+    #    diagnostics note. `calib_values` is the content-only token distribution under the fixed
+    #    letterbox, else the full token map.
     if config.threshold is not None:
         threshold = config.threshold
         calib_strategy, calib_reason = "fixed", f"caller-pinned threshold {threshold:.4f}"
     elif config.calibration == "contrast":
-        threshold, calib_reason = _contrast_threshold(sim_token)
+        threshold, calib_reason = _contrast_threshold(calib_values)
         calib_strategy = "contrast"
     else:
         calib = calibration.calibrate(
-            sim_token.reshape(-1),
+            calib_values.reshape(-1),
             strategy=config.calibration,
             fixed_threshold=None,
             self_score=_SELF_MATCH_SCORE,
@@ -633,14 +767,16 @@ def search(
     #    shoulder just below the threshold can no longer bridge distinct instances into one
     #    image-spanning blob (the bug that made this method return a single full-frame box).
     #    Area bounds are tied to the exemplar so fragments and merged blobs drop out at any canvas
-    #    scale (both bounds are in capped-inference pixels, hence the cap_scale^2 factor).
-    #    METHOD-12: EVERY component above threshold survives -- no single-best short-circuit, so
-    #    connected components emits as many instances as the image actually contains.
-    exemplar_area_capped = ex.w * ex.h * cap_scale * cap_scale
+    #    scale (both bounds are in model-input pixels, hence the effective_scale^2 factor).
+    #    `effective_scale` is the combined original -> model-input scale: the cap scale on the
+    #    native path, and cap x letterbox on the fixed-input path, so boxes map back through the
+    #    one scale (bottom-right pad => zero offset). METHOD-12: EVERY component above threshold
+    #    survives -- no single-best short-circuit, so components emit as many instances as present.
+    exemplar_area_capped = ex.w * ex.h * effective_scale * effective_scale
     min_area = max(config.min_component_area, round(config.min_area_frac * exemplar_area_capped))
     max_area = config.max_area_frac * exemplar_area_capped
     match_components = _extract_components(
-        sim_full, threshold, min_area, max_area, cap_scale, orig_w, orig_h
+        sim_full, threshold, min_area, max_area, effective_scale, orig_w, orig_h
     )
     accepted = sorted(match_components, key=lambda c: (-c.score, c.box.y, c.box.x))
     matches = _build_matches(accepted, ex)
@@ -651,7 +787,7 @@ def search(
     #    boxes cannot pollute the returned detections.
     candidate_floor = max(-1.0, threshold - config.candidate_margin)
     cand_components = _extract_components(
-        sim_full, candidate_floor, min_area, max_area, cap_scale, orig_w, orig_h
+        sim_full, candidate_floor, min_area, max_area, effective_scale, orig_w, orig_h
     )
     ordered = sorted(cand_components, key=lambda c: (-c.score, c.box.y, c.box.x))
     candidates = tuple(

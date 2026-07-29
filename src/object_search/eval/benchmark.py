@@ -63,9 +63,10 @@ from object_search.eval.metrics import (
     average_precision_coco,
     counting_errors,
     match_predictions,
+    match_predictions_detailed,
     precision_recall_f1,
 )
-from object_search.eval.sampling import sample_exemplars
+from object_search.eval.sampling import ExemplarSelection, sample_exemplars
 from object_search.eval.splits import load_split_manifest, research_image_ids
 from object_search.provenance import current_git_sha, repo_root
 from object_search.schemas.geometry import BBox, ExemplarBox
@@ -94,6 +95,39 @@ _SYNTHETIC_IMAGE_IDS: tuple[str, ...] = ("scatter-scaled", "cluttered-distractor
 # detection per instance rather than counting it k times. Uses the shared deterministic NMS
 # (tie-break `(-score, y, x)`), the same reproducibility guarantee the rest of the harness uses.
 _FUSION_NMS_IOU: float = 0.5
+
+# -- research per-slice analysis (EVAL-10 applied to floor plans) ------------------------------
+# SYMBOL-SIZE buckets cut a GT box by its area as a fraction of the plan area (box.area /
+# (plan_width * plan_height)). Floor-plan door/window symbols are TINY relative to the whole plan,
+# so the interesting spread is at the small end: a 30x30 door on an 800x600 plan is ~0.0019 of the
+# canvas, a chunky 60x40 window ~0.005. The two cuts below split "tiny" from "typical" from
+# "unusually large / merged-annotation" and are area FRACTIONS, not absolute pixels, so they hold
+# across the varied plan resolutions without per-image tuning. Recall is reported per bucket so a
+# method that only finds the big symbols is visibly distinguished from one that finds small ones.
+_SYMBOL_SIZE_SMALL_MAX: float = 0.004
+_SYMBOL_SIZE_MEDIUM_MAX: float = 0.016
+# The fixed bucket order, always emitted (recall None on an empty bucket) so the table is stable.
+_SYMBOL_SIZE_BUCKETS: tuple[str, ...] = ("small", "medium", "large")
+
+# CROWDING buckets group a plan by how many target instances it holds (instances-per-plan): a plan
+# with one door is a different retrieval problem from one wall of twelve. Coarse on purpose.
+# PLAN-RESOLUTION buckets group by the canvas long side, since a method's localisation degrades
+# with plan size independently of crowding. Both are reported at F1 (the operating-point metric).
+
+
+class GtBoxRecord(BaseModel):
+    """One ground-truth box's per-slice record for the research path: its size bucket + matched.
+
+    Additive and JSON-serialisable; :class:`ImageResult` carries a tuple of these only on the
+    research path (default empty everywhere else), so the chipset/CI path is unaffected. The
+    ``matched`` flag comes from :func:`object_search.eval.metrics.match_predictions_detailed`, so a
+    GT box is ``matched`` exactly when some prediction claimed it under the EVAL-16 duplicate rule.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    size_bucket: str
+    matched: bool
 
 
 class BenchmarkConfig(BaseModel):
@@ -199,6 +233,8 @@ class ImageResult(BaseModel):
     ap75: float | None = None
     predicted_count: int | None = None
     true_count: int | None = None
+    # -- research per-slice records (Task 260729-dh6); default empty keeps chipset byte-identical --
+    gt_records: tuple[GtBoxRecord, ...] = ()
 
 
 def _scale_bucket(gt: GroundTruth) -> str:
@@ -213,6 +249,104 @@ def _scale_bucket(gt: GroundTruth) -> str:
     if lo is None or hi is None or lo <= 0.0:
         return "fixed"
     return "varied" if (hi / lo) > 1.5 else "fixed"
+
+
+def _symbol_size_bucket(box_area: int, plan_area: int) -> str:
+    """Bucket a GT box by its area as a fraction of the plan area -- small / medium / large.
+
+    The cuts (:data:`_SYMBOL_SIZE_SMALL_MAX`, :data:`_SYMBOL_SIZE_MEDIUM_MAX`) are area fractions,
+    so a door on a small plan and the same door on a large plan land in the same bucket -- the
+    grouping tracks the symbol's relative footprint, not raw pixels.
+    """
+    frac = box_area / plan_area
+    if frac < _SYMBOL_SIZE_SMALL_MAX:
+        return "small"
+    if frac < _SYMBOL_SIZE_MEDIUM_MAX:
+        return "medium"
+    return "large"
+
+
+def _build_gt_records(gt: GroundTruth, matched: tuple[bool, ...]) -> tuple[GtBoxRecord, ...]:
+    """Pair each GT box with its symbol-size bucket and whether it was matched (research path).
+
+    The plan area is ``gt.width * gt.height``. When either dimension is missing (a sidecar that did
+    not record the canvas) the size fraction is undefined, so **every box is skipped** from the size
+    aggregation rather than defaulting to a fabricated plan area -- an unknown must never read as a
+    concrete bucket. ``matched`` is aligned index-for-index to ``gt.boxes`` (the detailed matcher's
+    contract), so ``zip(..., strict=True)`` is safe and a length mismatch would raise loudly.
+    """
+    if gt.width is None or gt.height is None:
+        return ()
+    plan_area = gt.width * gt.height
+    if plan_area <= 0:
+        return ()
+    return tuple(
+        GtBoxRecord(size_bucket=_symbol_size_bucket(box.area, plan_area), matched=is_matched)
+        for box, is_matched in zip(gt.boxes, matched, strict=True)
+    )
+
+
+def _crowding_bucket(record: ImageResult) -> str | None:
+    """Coarse instances-per-plan bucket, or ``None`` when the count is unknown (skipped from slice).
+
+    ``1`` is the single-symbol plan; ``2-5`` a small room; ``6-15`` a busy plan; ``16+`` a dense
+    wall of repeats. Coarse on purpose so the F1-per-crowding table stays skimmable.
+    """
+    count = record.instance_count
+    if count is None:
+        return None
+    if count <= 1:
+        return "1"
+    if count <= 5:
+        return "2-5"
+    if count <= 15:
+        return "6-15"
+    return "16+"
+
+
+def _plan_resolution_bucket(record: ImageResult) -> str | None:
+    """Coarse canvas-long-side bucket from ``canvas_size`` (``"WxH"``), or ``None`` if unparseable.
+
+    Localisation degrades with plan size independently of crowding, so the report breaks F1 down by
+    the long side: ``<=800`` small, ``<=1600`` medium, ``>1600`` large. A missing or malformed
+    ``canvas_size`` is skipped from the slice rather than bucketed to a guessed resolution.
+    """
+    canvas = record.canvas_size
+    if canvas is None or "x" not in canvas:
+        return None
+    width_str, _, height_str = canvas.partition("x")
+    try:
+        long_side = max(int(width_str), int(height_str))
+    except ValueError:
+        return None
+    if long_side <= 800:
+        return "<=800"
+    if long_side <= 1600:
+        return "<=1600"
+    return ">1600"
+
+
+def _recall_by_size(records: Sequence[GtBoxRecord]) -> dict[str, Any]:
+    """Pool matched/total across every GT record and emit per-symbol-size-bucket RECALL.
+
+    A GT-box-level aggregation (not :func:`_slice_by`, which is per-image): recall is
+    ``sum(matched) / n_gt`` within each bucket, with the abstention convention -- a bucket with
+    **zero** GT boxes reports ``recall = None`` (undefined, never ``0.0``). All three fixed buckets
+    are always present so the table is stable across cells.
+    """
+    totals: dict[str, list[int]] = {bucket: [0, 0] for bucket in _SYMBOL_SIZE_BUCKETS}
+    for record in records:
+        pair = totals.setdefault(record.size_bucket, [0, 0])
+        pair[0] += int(record.matched)
+        pair[1] += 1
+    return {
+        bucket: {
+            "n_gt": total,
+            "n_matched": matched,
+            "recall": (matched / total if total > 0 else None),
+        }
+        for bucket, (matched, total) in totals.items()
+    }
 
 
 def _load_scene(image_id: str) -> npt.NDArray[np.uint8]:
@@ -324,16 +458,23 @@ def _aggregate(records: list[ImageResult]) -> dict[str, Any]:
 
 
 def _slice_by(
-    records: list[ImageResult], key: Callable[[ImageResult], str | int | None]
+    records: list[ImageResult],
+    key: Callable[[ImageResult], str | int | None],
+    aggregate: Callable[[list[ImageResult]], dict[str, Any]] = _aggregate,
 ) -> dict[str, Any]:
-    """Group records by ``key(record)`` (skipping ``None`` keys) and aggregate each group."""
+    """Group records by ``key(record)`` (skipping ``None`` keys) and aggregate each group.
+
+    ``aggregate`` defaults to the chipset :func:`_aggregate` so the existing per-slice reporting is
+    byte-identical; the research path passes :func:`_aggregate_research` to share the same grouping
+    with the literature-metric (P/R/F1 + AP + counting) pooling.
+    """
     groups: dict[str, list[ImageResult]] = {}
     for record in records:
         bucket = key(record)
         if bucket is None:
             continue
         groups.setdefault(str(bucket), []).append(record)
-    return {bucket: _aggregate(group) for bucket, group in sorted(groups.items())}
+    return {bucket: aggregate(group) for bucket, group in sorted(groups.items())}
 
 
 def run_benchmark(config: BenchmarkConfig) -> dict[str, Any]:
@@ -380,7 +521,9 @@ def run_benchmark(config: BenchmarkConfig) -> dict[str, Any]:
                 "by_canvas_size": _slice_by(records, lambda r: r.canvas_size),
                 "by_scale_bucket": _slice_by(records, lambda r: r.scale_bucket),
             },
-            "per_image": [r.model_dump() for r in records],
+            # gt_records is a research-only internal carrier for the per-slice aggregation; it is
+            # excluded from per_image so the chipset output stays byte-identical (and JSON-stable).
+            "per_image": [r.model_dump(exclude={"gt_records"}) for r in records],
         }
 
     results: dict[str, Any] = {
@@ -527,6 +670,7 @@ def _run_one_research(
     exemplar_count: int,
     seed: int = 0,
     config: BaseModel | None = None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
 ) -> ImageResult:
     """Run one method on one research image and score it with the full literature metric set.
 
@@ -548,7 +692,9 @@ def _run_one_research(
         # k-shot LATE FUSION (Task 2): sample `exemplar_count` boxes and run the method once per
         # box, then fuse. The sampled exemplars REMAIN in gt.boxes and are scored like any other
         # instance, so the recall denominator (len(gt.boxes)) is identical at count=1 and count=3.
-        exemplars = sample_exemplars(gt, count=exemplar_count, seed=seed)
+        exemplars = sample_exemplars(
+            gt, count=exemplar_count, seed=seed, exemplar_selection=exemplar_selection
+        )
         run_config = config if config is not None else spec.config_model()
         result = run_multi_exemplar(spec.fn, scene, exemplars, run_config)
     except Exception as exc:
@@ -578,7 +724,10 @@ def _run_one_research(
         )
 
     pred_boxes = [match.box for match in result.matches]
-    tp, fp, fn = match_predictions(pred_boxes, gt.boxes, iou_threshold)
+    # The DETAILED matcher (Task 1) also returns which GT boxes were matched, aligned to gt.boxes,
+    # so the per-symbol-size recall slice can be built without re-running the match. `tp` still
+    # equals sum(matched), so the counts here are identical to the plain match_predictions form.
+    tp, fp, fn, matched = match_predictions_detailed(pred_boxes, gt.boxes, iou_threshold)
     precision, recall, f1 = precision_recall_f1(tp, fp, fn)
     candidate_log: list[tuple[BBox, float]] = [(m.box, m.score) for m in result.matches]
     candidate_log += [(c.box, c.score) for c in result.candidates]
@@ -609,6 +758,7 @@ def _run_one_research(
         ap75=ap75,
         predicted_count=len(result.matches),
         true_count=true_count,
+        gt_records=_build_gt_records(gt, matched),
     )
 
 
@@ -682,6 +832,7 @@ def run_research_benchmark(
     seed: int = 0,
     manifest_root: Path | None = None,
     config: BaseModel | None = None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
 ) -> dict[str, Any]:
     """Run one method over a research dataset split, returning the report block (11-01 tracer).
 
@@ -705,10 +856,14 @@ def run_research_benchmark(
         config: Method config instance to run with; ``None`` uses the method defaults. A tuned
             config (an instance of the method's ``config_model``) is how domain threshold tuning
             evaluates a frozen operating point on val/test.
+        exemplar_selection: Exemplar-ordering mode passed to
+            :func:`object_search.eval.sampling.sample_exemplars`; default ``"seeded-random"``
+            preserves the committed draw, ``"size-representative"`` seeds from the median-area box.
 
     Returns:
         A report block: ``method``/``dataset``/``split``/``exemplar_count``, ``coverage``,
-        ``overall`` (pooled metrics), and ``per_image`` (one row per labelled image).
+        ``overall`` (pooled metrics), ``slices`` (``by_symbol_size`` recall, ``by_crowding`` F1,
+        ``by_plan_resolution`` F1), and ``per_image`` (one row per labelled image).
     """
     if split not in ("train", "val", "test"):
         raise ValueError(f"unknown split {split!r}; expected train/val/test")
@@ -741,8 +896,19 @@ def run_research_benchmark(
                 exemplar_count=exemplar_count,
                 seed=seed,
                 config=config,
+                exemplar_selection=exemplar_selection,
             )
         )
+
+    # Per-slice analysis (EVAL-10 applied to floor plans): symbol-size RECALL is a GT-box-level
+    # pooling over every labelled box; crowding and plan-resolution reuse the per-image _slice_by
+    # with the research aggregator so they carry the full literature-metric column set at F1.
+    all_gt_records = [rec for r in records for rec in r.gt_records]
+    slices = {
+        "by_symbol_size": _recall_by_size(all_gt_records),
+        "by_crowding": _slice_by(records, _crowding_bucket, _aggregate_research),
+        "by_plan_resolution": _slice_by(records, _plan_resolution_bucket, _aggregate_research),
+    }
 
     return {
         "method": method,
@@ -756,7 +922,10 @@ def run_research_benchmark(
             "images_unlabelled": sorted(unlabelled),
         },
         "overall": _aggregate_research(records),
-        "per_image": [r.model_dump() for r in records],
+        "slices": slices,
+        # gt_records feeds `slices` above; it is excluded from per_image so the row shape is
+        # unchanged and JSON-stable (a tuple field would otherwise round-trip to a list).
+        "per_image": [r.model_dump(exclude={"gt_records"}) for r in records],
     }
 
 
@@ -779,8 +948,9 @@ def run_research_sweep(config: BenchmarkConfig) -> dict[str, Any]:
       fetched archives/weights exactly like the full sweep gates on ``fetch-models``.
 
     The per-cell block carries the full literature column set (P/R/F1 + AP/AP50/AP75 + MAE/RMSE/NAE)
-    via ``run_research_benchmark(...)["overall"]``. Results are written to ``config.research_out``
-    (gitignored, environment-dependent) -- distinct from the committed report the render step emits.
+    via ``run_research_benchmark(...)["overall"]``, plus the per-slice ``slices`` block
+    (``by_symbol_size`` recall, ``by_crowding`` F1, ``by_plan_resolution`` F1). Results are written
+    to ``config.research_out`` (gitignored) -- distinct from the committed report the render emits.
 
     Args:
         config: A :class:`BenchmarkConfig` with ``datasets``/``splits``/``exemplar_counts``/``seed``
@@ -827,6 +997,7 @@ def run_research_sweep(config: BenchmarkConfig) -> dict[str, Any]:
                             "exemplar_count": count,
                             "coverage": block["coverage"],
                             "overall": block["overall"],
+                            "slices": block["slices"],
                         }
                     )
 

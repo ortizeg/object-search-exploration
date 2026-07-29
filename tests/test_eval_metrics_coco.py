@@ -19,8 +19,56 @@ from object_search.eval.metrics import (
     average_precision,
     average_precision_coco,
     counting_errors,
+    match_predictions,
+    match_predictions_detailed,
 )
 from object_search.schemas.geometry import BBox
+
+# ------------------------------------------------------------------ matched-GT-index sibling
+
+
+def test_detailed_matcher_projects_to_the_tuple_form_unchanged() -> None:
+    # Two GT, two perfect preds + one spurious: (tp, fp, fn) must equal match_predictions exactly.
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    preds = [
+        BBox(x=0, y=0, w=10, h=10),  # hits gt[0]
+        BBox(x=50, y=50, w=10, h=10),  # hits gt[1]
+        BBox(x=200, y=200, w=10, h=10),  # hits nothing
+    ]
+    tp, fp, fn, matched = match_predictions_detailed(preds, gt)
+    assert (tp, fp, fn) == match_predictions(preds, gt)  # sibling reconciles with the tuple form
+    assert (tp, fp, fn) == (2, 1, 0)  # both GT found, one spurious pred, nothing missed
+    assert matched == (True, True)  # aligned to gt; both GT found
+    assert sum(matched) == tp  # the documented invariant
+
+
+def test_detailed_matcher_reports_which_gt_matched() -> None:
+    # Only the second GT is found; the first is missed -> matched flags pinpoint which.
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    preds = [BBox(x=50, y=50, w=10, h=10)]
+    tp, fp, fn, matched = match_predictions_detailed(preds, gt)
+    assert (tp, fp, fn) == (1, 0, 1)
+    assert matched == (False, True)
+    assert sum(matched) == tp
+
+
+def test_detailed_matcher_duplicate_rule_credits_a_gt_once() -> None:
+    # EVAL-16: two preds on ONE gt -> that gt matched once, the second pred is a false positive.
+    gt = [BBox(x=0, y=0, w=10, h=10)]
+    preds = [BBox(x=0, y=0, w=10, h=10), BBox(x=0, y=0, w=10, h=10)]
+    tp, fp, fn, matched = match_predictions_detailed(preds, gt)
+    assert (tp, fp, fn) == (1, 1, 0)  # 1 TP + 1 duplicate FP, not 2 TP
+    assert matched == (True,)  # the single GT is matched exactly once
+    assert sum(matched) == tp
+
+
+def test_detailed_matcher_empty_predictions_matches_nothing() -> None:
+    gt = [BBox(x=0, y=0, w=10, h=10), BBox(x=50, y=50, w=10, h=10)]
+    tp, fp, fn, matched = match_predictions_detailed([], gt)
+    assert (tp, fp, fn) == (0, 0, 2)
+    assert matched == (False, False)
+    assert sum(matched) == tp
+
 
 # --------------------------------------------------------------------------- COCO AP sweep
 

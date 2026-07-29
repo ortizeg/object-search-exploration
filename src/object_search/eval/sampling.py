@@ -33,10 +33,32 @@ sorted index list.
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 
 from object_search.eval.labels import GroundTruth
 from object_search.schemas.geometry import ExemplarBox
+
+# The exemplar-selection modes. ``seeded-random`` is the committed default (native-first, then a
+# seeded draw of the remainder); ``size-representative`` is an additive, fully deterministic mode
+# that orders boxes by how close their area is to the per-image MEDIAN box area, so the 1-exemplar
+# query seeds from a typical-sized instance rather than a random (possibly outlier) one -- useful
+# on a domain like floor plans where a single oversized/merged annotation would otherwise be a
+# misleading query.
+ExemplarSelection = Literal["seeded-random", "size-representative"]
+
+
+def _size_representative_order(gt: GroundTruth) -> list[int]:
+    """Order GT box indices by ``|area - median_area|`` ascending, tie-broken by index.
+
+    Fully deterministic: the median is a fixed function of the boxes and the tie-break is the box
+    index, so there is **no RNG** here (and the ``seed`` never reaches this path). The first element
+    is the box whose area is closest to the per-image median -- the "size-representative" exemplar.
+    """
+    areas = [box.area for box in gt.boxes]
+    median = float(np.median(areas))
+    return sorted(range(len(gt.boxes)), key=lambda i: (abs(areas[i] - median), i))
 
 
 def _selection_order(gt: GroundTruth, seed: int) -> list[int]:
@@ -61,21 +83,35 @@ def _selection_order(gt: GroundTruth, seed: int) -> list[int]:
     return native + sampled
 
 
-def sample_exemplars(gt: GroundTruth, *, count: int, seed: int) -> tuple[ExemplarBox, ...]:
-    """Draw ``count`` exemplar boxes from ``gt``, native-first then seeded (EVAL-23, D-11).
+def sample_exemplars(
+    gt: GroundTruth,
+    *,
+    count: int,
+    seed: int,
+    exemplar_selection: ExemplarSelection = "seeded-random",
+) -> tuple[ExemplarBox, ...]:
+    """Draw ``count`` exemplar boxes from ``gt`` (EVAL-23, D-11).
 
-    The returned tuple is a prefix-stable selection: ``sample_exemplars(gt, count=1, seed=s)`` is
-    always ``sample_exemplars(gt, count=3, seed=s)[:1]``. Native exemplar boxes (FSCD-* ship three)
-    are honoured at the front in their recorded order; any further boxes needed are drawn distinctly
-    from the rest of ``gt.boxes`` with :func:`numpy.random.default_rng` seeded from ``seed``.
+    Two modes, additive and default-preserving:
+
+    * ``seeded-random`` (default) -- native-first then a seeded draw of the remainder. The returned
+      tuple is prefix-stable: ``sample_exemplars(gt, count=1, seed=s)`` is always
+      ``sample_exemplars(gt, count=3, seed=s)[:1]``. Native exemplar boxes (FSCD-* ship three) are
+      honoured at the front in their recorded order; any further boxes needed are drawn distinctly
+      from the rest of ``gt.boxes`` with :func:`numpy.random.default_rng` seeded from ``seed``. This
+      is byte-for-byte the committed behaviour.
+    * ``size-representative`` -- deterministic: boxes are ordered by ``|area - median_area|``, so
+      the first exemplar is the one closest to the per-image median area. The ``seed`` is unused in
+      this mode (there is no random step).
 
     Args:
         gt: The image's ground truth. Its :attr:`GroundTruth.exemplar_indices` supplies the native
             exemplars (empty for a dataset that ships none, e.g. sampled draws for CARPK's tail).
         count: How many exemplars to return (``1`` = product operating point, ``3`` = literature
             convention). Must be ``>= 1``.
-        seed: Config seed for the permutation of the non-native remainder. Reproducible: the same
-            seed yields the same tail; it never perturbs the native prefix.
+        seed: Config seed for the permutation of the non-native remainder (``seeded-random`` only).
+        exemplar_selection: The ordering mode (see above). Defaults to ``"seeded-random"``, which
+            reproduces the committed behaviour exactly.
 
     Returns:
         A tuple of ``count`` :class:`ExemplarBox` (fewer when ``gt`` has fewer than ``count`` boxes
@@ -93,6 +129,9 @@ def sample_exemplars(gt: GroundTruth, *, count: int, seed: int) -> tuple[Exempla
     """
     if count < 1:
         raise ValueError(f"count={count} must be >= 1; a search needs at least one exemplar")
-    order = _selection_order(gt, seed)
+    if exemplar_selection == "size-representative":
+        order = _size_representative_order(gt)
+    else:
+        order = _selection_order(gt, seed)
     chosen = order[: min(count, len(gt.boxes))]
     return tuple(ExemplarBox(box=gt.boxes[index]) for index in chosen)

@@ -26,10 +26,14 @@ from object_search.schemas import BBox, ExemplarBox, Match, SearchOutcome
 from object_search.search import dino_dense, has_method
 from object_search.search.common import calibration
 from object_search.search.dino_dense import (
+    _LETTERBOX_PAD_VALUE,
+    _PAD_SENTINEL,
     DinoDenseConfig,
+    _content_token_mask,
     _contrast_threshold,
     _crop_token_bank,
     _extract_components,
+    _fixed_letterbox,
     _l2_normalize,
     _maxtoken_similarity_map,
     _prototype_from_grid,
@@ -75,6 +79,8 @@ def test_config_defaults_match_the_locked_decisions() -> None:
     assert cfg.max_area_frac == pytest.approx(8.0)
     assert cfg.max_candidates == 50
     assert cfg.seed == 0
+    # The fixed-size letterbox is OPT-IN: None is the native/cap path (byte-identical default).
+    assert cfg.fixed_input_side is None
 
 
 def test_config_is_frozen_and_schema_drives_the_form() -> None:
@@ -437,6 +443,84 @@ def test_search_empty_when_threshold_clears_nothing(monkeypatch: pytest.MonkeyPa
     assert result.matches == ()
     assert result.threshold_applied == pytest.approx(1.5)
     assert result.diagnostics.notes  # a note explains that nothing cleared the threshold
+
+
+# ------------------------------- model-free: the opt-in fixed-size letterbox (GPU-OOM fix)
+
+
+def test_fixed_input_side_rejects_a_non_multiple_of_14() -> None:
+    """The validator turns a silent stride-14 floor-divide into a load-time error."""
+    with pytest.raises(ValidationError, match="multiple of 14"):
+        DinoDenseConfig(fixed_input_side=100)  # 100 % 14 == 2
+    # A multiple of 14 is accepted; None (the native/cap path) is always valid.
+    assert DinoDenseConfig(fixed_input_side=140).fixed_input_side == 140
+    assert DinoDenseConfig(fixed_input_side=None).fixed_input_side is None
+
+
+def test_fixed_letterbox_uniform_scale_constant_pad_and_box_roundtrip() -> None:
+    """One uniform scale + a top-left placement, so a box maps back by a single division."""
+    image = np.full((60, 120, 3), 200, dtype=np.uint8)  # h=60, w=120 (landscape)
+    canvas, scale, content_w, content_h = _fixed_letterbox(image, side=140)
+
+    assert canvas.shape == (140, 140, 3)
+    assert scale == pytest.approx(140 / 120)  # side / max(h, w), one factor for both axes
+    assert content_w == 140 and content_h == round(60 * (140 / 120))  # 140 x 70
+    # The content is at the top-left; the bottom/right strip is the constant pad.
+    assert (canvas[content_h:, :] == _LETTERBOX_PAD_VALUE).all()
+    assert (canvas[:, content_w:] == _LETTERBOX_PAD_VALUE).all()
+    # Box round-trip: a square pixel divided by the single scale recovers the original pixel
+    # (top-left placement => zero pad offset). Original centre (60, 30) -> square (70, 35) -> back.
+    square_x, square_y = 60 * scale, 30 * scale
+    assert square_x / scale == pytest.approx(60)
+    assert square_y / scale == pytest.approx(30)
+
+
+def test_content_token_mask_flags_padding_tokens() -> None:
+    """A token whose patch centre lands in the pad is False; content tokens are True."""
+    # side 140 -> 10x10 tokens; content 140 wide x 70 tall means the bottom rows are padding.
+    mask = _content_token_mask(gh=10, gw=10, content_w=140, content_h=70)
+    assert mask.shape == (10, 10)
+    # centre_y = gy*14 + 7: rows 0..4 (7..63) are inside 70; row 5 (77) and below are padding.
+    assert mask[:5, :].all()  # content rows
+    assert not mask[5:, :].any()  # padding rows -- excluded from calibration
+    # content_w == 140 spans the full width, so every column is valid.
+    assert mask[:5, :].all()
+
+
+def test_pad_sentinel_is_below_every_possible_threshold_floor() -> None:
+    """Padded pixels must never be foreground: the sentinel sits below the -1.0 candidate floor."""
+    assert _PAD_SENTINEL < -1.0  # below the clamped candidate_floor minimum and the cosine range
+
+
+def _square_stub_grids() -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    """A SQUARE (10x10) scene grid so a fixed 140-side letterbox is geometrically consistent."""
+    crop = np.zeros((3, 3, _STUB_DIM), dtype=np.float32)
+    crop[..., 0] = 1.0
+    scene = np.zeros((10, 10, _STUB_DIM), dtype=np.float32)
+    scene[..., 1] = 1.0
+    for r0, c0 in ((0, 0), (0, 6), (6, 0), (6, 6)):
+        scene[r0 : r0 + 3, c0 : c0 + 3, :] = 0.0
+        scene[r0 : r0 + 3, c0 : c0 + 3, 0] = 1.0
+    return crop, scene
+
+
+def test_search_fixed_input_letterbox_path_finds_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The opt-in fixed_input_side path letterboxes the scene, masks pad, and still finds all four.
+
+    A non-square 130x140 scene is letterboxed into ONE fixed 140x140 input (proving the input shape
+    is fixed regardless of the scene), the empty bottom pad row of tokens is masked, and the four
+    object blocks in the content region are all recovered (METHOD-12).
+    """
+    stub = _StubDinoInferencer(*_square_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    scene = np.zeros((130, 140, 3), dtype=np.uint8)  # non-square -> letterbox must square it up
+    result = search(scene, _STUB_EXEMPLAR, DinoDenseConfig(fixed_input_side=140))
+
+    assert result.outcome is SearchOutcome.OK
+    assert len(result.matches) == 4  # padding masked, all four content blocks survive
+    # The scene forward pass ran on the FIXED 140x140 letterbox canvas, not the 130x140 scene.
+    assert stub.calls[1] == (140, 140)
 
 
 # ================================================== real-model behaviour (skipped in CI)

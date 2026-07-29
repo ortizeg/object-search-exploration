@@ -5,24 +5,29 @@ its **default** config. That answers "how do the methods do out of the box on fl
 "how good is each method once its acceptance threshold is adapted to this domain" -- which is the
 question that actually picks a method to ship. This module answers the second one, honestly:
 
-1. **Tune on val.** For each method, sweep its single acceptance knob over a small explicit grid
+1. **Tune on val.** For each method, sweep a small explicit grid of acceptance knobs
    (:data:`_TUNING_GRIDS`) on the dataset's ``val`` split and pick the config that maximises
    **F1 @ IoU 0.5** -- the operating-point metric the product cares about (find all the doors
-   without junk). Nothing here ever reads ``test``.
+   without junk). The grids are broadened for the floor-plan domain: each method sweeps **two
+   knobs** (a primary acceptance knob crossed with a second recall/precision knob), stated per
+   method in :data:`_TUNING_GRIDS`. Nothing here ever reads ``test``.
 2. **Freeze + evaluate on test.** Run the frozen (tuned) config on ``test`` once. Also run the
    method's **default** config on ``test``. Reporting both side by side is the point: it shows which
    method wins on floor plans *and* how much domain tuning each one needed to get there (a method
    that barely moves is robust; one that jumps was mis-calibrated for this domain).
 
-Why one knob per method, chosen by hand? Each method gates acceptance differently -- a calibrated
-score floor (``ncc``/``mosse``/``dino-dense``/``owlv2`` ``retain_frac``), a geometric inlier count
+Why hand-written grids per method? Each method gates acceptance differently -- a calibrated score
+floor (``ncc``/``mosse``/``dino-dense``/``owlv2`` ``retain_frac``), a geometric inlier count
 (``sparse-geo`` ``min_inliers``), a retrieval cosine floor (``propose-retrieve``
-``similarity_floor``) -- and the knob that trades recall against precision is method-specific. A
-hand-written grid keeps this readable and editable (a practitioner tunes the numbers here), rather
-than hiding the search behind a generic optimiser. The tuned config is always an instance of the
-method's own frozen ``config_model``, so tuning never touches a method file -- it only feeds a
-different config through the additive ``config`` param on
-:func:`object_search.eval.benchmark.run_research_benchmark`.
+``similarity_floor``) -- and the knob(s) that trade recall against precision are method-specific.
+The floor-plan grids pair each method's primary knob with a second one (a symbol-matched
+``scales`` bank and ``nms_iou`` for the correlation methods, ``nms_iou`` for the geometric/retrieval
+methods, ``max_box_area_frac`` + ``query_iou_frac`` for OWLv2), each entry a multi-key override dict
+validated through the method's own frozen ``config_model``. A hand-written grid keeps this readable
+and editable (a practitioner tunes the numbers here), rather than hiding the search behind a generic
+optimiser. The tuned config is always an instance of the method's own frozen ``config_model``, so
+tuning never touches a method file -- it only feeds a different config through the additive
+``config`` param on :func:`object_search.eval.benchmark.run_research_benchmark`.
 
 Reproducibility: the grids are fixed, the exemplar sampler is seeded (D-11), and val/test come from
 the committed split manifest, so the same dataset bytes + seed reproduce the same frozen configs and
@@ -40,6 +45,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from object_search.eval.benchmark import run_research_benchmark
+from object_search.eval.sampling import ExemplarSelection
 from object_search.provenance import current_git_sha, repo_root
 from object_search.search import get_method
 
@@ -54,22 +60,60 @@ _DEFAULT_METHODS: tuple[str, ...] = (
     "owlv2-oneshot",
 )
 
-# Per-method DOMAIN TUNING GRID: the single acceptance knob swept on val, argmax F1 @ IoU 0.5. Each
-# entry is a dict of config overrides applied atop the method's defaults (validated through the
-# method's own frozen config_model). The knob is the one that trades recall against precision for
-# THAT method; edit the numbers here to widen or refine the search.
+# Per-method DOMAIN TUNING GRID: a small, explicit grid of config overrides swept on val, argmax
+# F1 @ IoU 0.5. Each entry is a dict applied atop the method's defaults (validated through the
+# method's own frozen config_model), so a multi-key entry is just a config with several fields set.
+# The grids are broadened for the floor-plan domain: each method now sweeps TWO knobs -- a primary
+# acceptance knob crossed with a second knob that trades recall against precision a different way --
+# stated method by method below. Edit the tuples here to widen or refine the search.
+#
+# ncc / mosse -- three knobs, because a floor-plan symbol is small and near-fixed-scale:
+#   * scales: SYMBOL-MATCHED banks, biased tighter/finer than the method default (0.75-1.3, too
+#     wide for a fixed-scale plan and a source of rotated-template false peaks). (1.0,) is the pure
+#     fixed-scale bank; the fine +/-10% triple tolerates slight symbol-size drift without the wide
+#     default's spurious peaks.
+#   * retain_frac: self-similarity acceptance fraction; lower keeps more of the transformed tail
+#     (recall up, precision down). Widened around the method default.
+#   * nms_iou: overlap ceiling for accepted boxes; tight (0.3) splits touching symbols, loose (0.5)
+#     merges them -- the recall/precision trade at the localisation level.
+_NCC_SCALE_SETS: tuple[tuple[float, ...], ...] = ((1.0,), (0.9, 1.0, 1.1))
+_NCC_MOSSE_RETAIN: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.65)
+_NCC_MOSSE_NMS: tuple[float, ...] = (0.3, 0.5)
+_ncc_mosse_grid: tuple[dict[str, object], ...] = tuple(
+    {"scales": scales, "retain_frac": retain, "nms_iou": nms}
+    for scales in _NCC_SCALE_SETS
+    for retain in _NCC_MOSSE_RETAIN
+    for nms in _NCC_MOSSE_NMS
+)
+
 _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
-    # retain_frac: fraction of the calibrated candidate-score range kept. Lower -> stricter.
-    "ncc": tuple({"retain_frac": v} for v in (0.25, 0.35, 0.45, 0.55, 0.65)),
-    "mosse": tuple({"retain_frac": v} for v in (0.25, 0.35, 0.45, 0.55, 0.65)),
-    # min_inliers: RANSAC inliers required to accept an instance. Higher -> stricter.
-    "sparse-geo": tuple({"min_inliers": v} for v in (3, 4, 5, 6, 8)),
-    # retain_frac: DINO dense-feature score floor (contrast-calibrated). Lower -> stricter.
+    "ncc": _ncc_mosse_grid,
+    "mosse": _ncc_mosse_grid,
+    # sparse-geo -- min_inliers (RANSAC inliers to accept; higher -> stricter, the primary knob,
+    # widened down to 2 and up to 10) crossed with nms_iou (duplicate-instance suppression).
+    "sparse-geo": tuple(
+        {"min_inliers": inliers, "nms_iou": nms}
+        for inliers in (2, 3, 4, 5, 6, 8, 10)
+        for nms in (0.3, 0.5)
+    ),
+    # dino-dense -- retain_frac: DINO dense-feature score floor (contrast-calibrated). Lower ->
+    # stricter. Single knob (the letterbox fix is Task 4; dense-feature acceptance is the trade).
     "dino-dense": tuple({"retain_frac": v} for v in (0.5, 0.6, 0.7, 0.8, 0.9)),
-    # similarity_floor: min cosine to a retrieved proposal embedding. Higher -> stricter.
-    "propose-retrieve": tuple({"similarity_floor": v} for v in (0.5, 0.6, 0.7, 0.8, 0.85)),
-    # retain_frac: OWLv2 score floor (self-similarity-calibrated). Lower -> stricter.
-    "owlv2-oneshot": tuple({"retain_frac": v} for v in (0.85, 0.9, 0.94, 0.97)),
+    # propose-retrieve -- similarity_floor (min cosine to a retrieved proposal embedding; higher ->
+    # stricter, widened from 0.4) crossed with nms_iou (collapses FastSAM over-segmentation).
+    "propose-retrieve": tuple(
+        {"similarity_floor": floor, "nms_iou": nms}
+        for floor in (0.4, 0.5, 0.6, 0.7, 0.8, 0.85)
+        for nms in (0.3, 0.5)
+    ),
+    # owlv2-oneshot -- max_box_area_frac (drop boxes bigger than this fraction of the image; the
+    # whole-frame-box filter) crossed with query_iou_frac (how wide the query-patch set is), the two
+    # knobs that most move floor-plan precision/recall. retain_frac stays at the method default.
+    "owlv2-oneshot": tuple(
+        {"max_box_area_frac": area, "query_iou_frac": query}
+        for area in (0.1, 0.25, 0.5)
+        for query in (0.6, 0.8, 0.9)
+    ),
 }
 
 
@@ -94,6 +138,7 @@ def _evaluate(
     iou_threshold: float,
     seed: int,
     manifest_root: Path | None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
 ) -> dict[str, Any]:
     """Run one (method, config) over a split and return its pooled ``overall`` metric block."""
     block = run_research_benchmark(
@@ -106,6 +151,7 @@ def _evaluate(
         seed=seed,
         manifest_root=manifest_root,
         config=config,
+        exemplar_selection=exemplar_selection,
     )
     overall = block["overall"]
     assert isinstance(overall, dict)  # noqa: S101  -- run_research_benchmark always returns it
@@ -122,6 +168,7 @@ def tune_method(
     seed: int = 0,
     manifest_root: Path | None = None,
     grid: Sequence[dict[str, object]] | None = None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
 ) -> dict[str, Any]:
     """Sweep ``method``'s acceptance knob on ``val``; return the argmax-F1 config plus all trials.
 
@@ -158,6 +205,7 @@ def tune_method(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
+            exemplar_selection=exemplar_selection,
         )
         trials.append(
             {
@@ -189,47 +237,25 @@ def _delta(tuned: float | None, default: float | None) -> float | None:
     return None
 
 
-def run_domain_tuning(
+def _tune_methods_at_count(
     dataset: str,
-    research_root: Path | str,
+    val_root: Path,
+    eval_root: Path,
     *,
-    methods: Sequence[str] = _DEFAULT_METHODS,
-    exemplar_count: int = 1,
-    iou_threshold: float = 0.5,
-    seed: int = 0,
-    tune_split: str = "val",
-    eval_split: str = "test",
-    manifest_root: Path | None = None,
-    out: str | None = "docs/benchmark/floorplans-tuning-results.json",
-) -> dict[str, Any]:
-    """Tune every method on ``tune_split`` and report tuned-vs-default on ``eval_split``.
+    methods: Sequence[str],
+    exemplar_count: int,
+    iou_threshold: float,
+    seed: int,
+    eval_split: str,
+    manifest_root: Path | None,
+    exemplar_selection: ExemplarSelection,
+) -> list[dict[str, Any]]:
+    """The per-method tune-on-val, freeze, report-tuned-vs-default-on-test loop at ONE count.
 
-    For each method: pick the argmax-F1 config on val (:func:`tune_method`), freeze it, then score
-    both the frozen config and the method's defaults on test. The returned report carries, per
-    method, the tuned overrides, the val F1 that selected them, the full tuned and default test
-    metric blocks, and the F1 delta -- the tuned-vs-default table.
-
-    Args:
-        dataset: Dataset key, e.g. ``"floorplans-door"``.
-        research_root: Base dir holding ``<dataset>/<split>/`` converted trees (``datasets/``).
-        methods: Methods to tune (defaults to all six).
-        exemplar_count: Exemplars per query for both tuning and evaluation.
-        iou_threshold: IoU for a TP; the tuning metric is F1 at this IoU.
-        seed: Config seed for the exemplar sampler (D-11).
-        tune_split / eval_split: Split names; tuning never reads ``eval_split``.
-        manifest_root: Optional base dir for the committed split manifests (tests use ``tmp_path``).
-        out: Where to write the JSON report (resolved against the repo root when relative). ``None``
-            skips the write and only returns the report.
-
-    Returns:
-        The report mapping (also written to ``out`` unless ``out`` is ``None``).
+    Factored out so :func:`run_domain_tuning` can call it once (the byte-identical single-count
+    report) or once per requested count (the additive nested multi-count report) without
+    duplicating the loop.
     """
-    base = Path(research_root)
-    if not base.is_absolute():
-        base = repo_root() / base
-    val_root = base / dataset / tune_split
-    eval_root = base / dataset / eval_split
-
     per_method: list[dict[str, Any]] = []
     for method in methods:
         spec = get_method(method)
@@ -241,6 +267,7 @@ def run_domain_tuning(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
+            exemplar_selection=exemplar_selection,
         )
         best = tuned["best"]
         tuned_config = spec.config_model(**best["overrides"]) if best else None
@@ -255,6 +282,7 @@ def run_domain_tuning(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
+            exemplar_selection=exemplar_selection,
         )
         default_test = _evaluate(
             method,
@@ -266,6 +294,7 @@ def run_domain_tuning(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
+            exemplar_selection=exemplar_selection,
         )
         delta = _delta(tuned_test.get("f1"), default_test.get("f1"))
         per_method.append(
@@ -287,18 +316,100 @@ def run_domain_tuning(
             default_test.get("f1"),
             delta,
         )
+    return per_method
+
+
+def run_domain_tuning(
+    dataset: str,
+    research_root: Path | str,
+    *,
+    methods: Sequence[str] = _DEFAULT_METHODS,
+    exemplar_count: int = 1,
+    iou_threshold: float = 0.5,
+    seed: int = 0,
+    tune_split: str = "val",
+    eval_split: str = "test",
+    manifest_root: Path | None = None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
+    exemplar_counts: Sequence[int] | None = None,
+    out: str | None = "docs/benchmark/floorplans-tuning-results.json",
+) -> dict[str, Any]:
+    """Tune every method on ``tune_split`` and report tuned-vs-default on ``eval_split``.
+
+    For each method: pick the argmax-F1 config on val (:func:`tune_method`), freeze it, then score
+    both the frozen config and the method's defaults on test. The returned report carries, per
+    method, the tuned overrides, the val F1 that selected them, the full tuned and default test
+    metric blocks, and the F1 delta -- the tuned-vs-default table.
+
+    Exemplar-count operating points:
+
+    * ``exemplar_counts is None`` (default) -- a single count (``exemplar_count``) is tuned and the
+      report has the committed flat shape (top-level ``exemplar_count`` + ``methods``).
+      Byte-for-byte unchanged from before this option existed.
+    * ``exemplar_counts`` given (e.g. ``(1, 3)``) -- each count is tuned independently and the
+      report nests one ``{"exemplar_count", "methods"}`` block per count under ``per_count`` (with a
+      top-level ``exemplar_counts`` list), so a 1-vs-3 comparison is one report.
+
+    Args:
+        dataset: Dataset key, e.g. ``"floorplans-door"``.
+        research_root: Base dir holding ``<dataset>/<split>/`` converted trees (``datasets/``).
+        methods: Methods to tune (defaults to all six).
+        exemplar_count: Exemplars per query when ``exemplar_counts`` is ``None`` (the flat report).
+        iou_threshold: IoU for a TP; the tuning metric is F1 at this IoU.
+        seed: Config seed for the exemplar sampler (D-11).
+        tune_split / eval_split: Split names; tuning never reads ``eval_split``.
+        manifest_root: Optional base dir for the committed split manifests (tests use ``tmp_path``).
+        exemplar_selection: Exemplar-ordering mode threaded to the sampler (``"seeded-random"``
+            default preserves the committed draw; ``"size-representative"`` seeds from the
+            median-area box).
+        exemplar_counts: Optional sequence of counts to nest per-count blocks for; ``None`` keeps
+            the flat single-count report.
+        out: Where to write the JSON report (resolved against the repo root when relative). ``None``
+            skips the write and only returns the report.
+
+    Returns:
+        The report mapping (also written to ``out`` unless ``out`` is ``None``).
+    """
+    base = Path(research_root)
+    if not base.is_absolute():
+        base = repo_root() / base
+    val_root = base / dataset / tune_split
+    eval_root = base / dataset / eval_split
+
+    def _methods_at(count: int) -> list[dict[str, Any]]:
+        return _tune_methods_at_count(
+            dataset,
+            val_root,
+            eval_root,
+            methods=methods,
+            exemplar_count=count,
+            iou_threshold=iou_threshold,
+            seed=seed,
+            eval_split=eval_split,
+            manifest_root=manifest_root,
+            exemplar_selection=exemplar_selection,
+        )
 
     report: dict[str, Any] = {
         "git_sha": current_git_sha(),
         "dataset": dataset,
         "tune_split": tune_split,
         "eval_split": eval_split,
-        "exemplar_count": exemplar_count,
         "iou_threshold": iou_threshold,
         "seed": seed,
         "selection_metric": "f1@iou0.5",
-        "methods": per_method,
     }
+    if exemplar_counts is None:
+        # Flat, committed single-count shape (byte-identical to before this option existed).
+        report["exemplar_count"] = exemplar_count
+        report["methods"] = _methods_at(exemplar_count)
+    else:
+        # Nested per-count blocks: one tune-freeze-report per operating point.
+        counts = tuple(exemplar_counts)
+        report["exemplar_counts"] = list(counts)
+        report["per_count"] = [
+            {"exemplar_count": count, "methods": _methods_at(count)} for count in counts
+        ]
 
     if out is not None:
         out_path = Path(out)
@@ -306,5 +417,5 @@ def run_domain_tuning(
             out_path = repo_root() / out_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        logger.info("tuning: wrote {} ({} method(s))", out_path, len(per_method))
+        logger.info("tuning: wrote {}", out_path)
     return report

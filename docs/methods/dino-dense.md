@@ -167,6 +167,28 @@ interpolates the position embeddings with `offset=0.1` and antialiasing; HF uses
 graph. This method uses the pinned `onnx-community` fp32 export and does **not** attempt to
 re-derive or "correct" the interpolation — the export in use is recorded and treated as fixed.
 
+### Fixed-size letterbox (opt-in, `fixed_input_side`) — the GPU-OOM fix
+
+`fixed_input_side` is `null` by default, which is the native/cap path above and is **byte-identical**
+on the chipset and synthetic sets. Set it to a **multiple of 14** to run *every* scene through **one
+fixed input resolution**, which is what stops onnxruntime re-allocating its CUDA memory arena for
+each differently-sized plan (the OOM on the varied-resolution floor plans).
+
+- **One uniform letterbox scale.** After the `scene_max_side` cap, the (capped) scene is resized by
+  a single aspect-preserving factor `side / max(h, w)` and placed at the **top-left** of a
+  `fixed_input_side × fixed_input_side` canvas; the bottom/right strip is filled with a **constant
+  pad**. No distortion (one scale for both axes), and a top-left placement means the pad offset is
+  zero.
+- **Padding tokens cannot match.** A token whose patch **centre** lands in the padded region is
+  dropped from the threshold **calibration** (so the flat pad cannot drag the cut around), and the
+  padded **pixels** of the similarity map are set below any threshold, so connected components fire
+  **only** in real content — a padding blob can never become a detection.
+- **Boxes map back through the single scale.** A box in the square maps to original pixels by one
+  division by the combined `cap × letterbox` scale (zero pad offset → no additive term).
+- **The inferencer contract is unchanged.** `side` is a multiple of 14, so `DINOv2Inferencer`'s
+  snap-to-14 resize is a no-op on the letterboxed input and its `scale_x`/`scale_y` come back as
+  `1.0`. Determinism is preserved (fixed interpolation + constant pad).
+
 ## Post-processing (exact)
 
 - **L2-normalize every token before any dot product** (cosine, not a magnitude-dominated dot) —
@@ -201,6 +223,7 @@ cannot drift from the code.
 | `max_candidates` | `50` | How many top components (with raw scores) to keep for the EVAL-08 candidate log. |
 | `seed` | `0` | `random_state` for the gmm calibrator (its only genuinely stochastic step). |
 | `retain_frac` | `0.7` | self-similarity accepts scores above `self_score × retain_frac` (`self_score = 1.0`). |
+| `fixed_input_side` | `null` | Opt-in GPU-OOM fix. `null` = native/cap path (byte-identical on chipset/synthetic). A multiple of 14 letterboxes every scene into one fixed `side × side` input (uniform scale + constant bottom-right pad) so onnxruntime sees a single input resolution; padding tokens are masked and boxes map back through the one letterbox scale. A non-multiple is rejected at construction. |
 
 ## Known failure modes
 
