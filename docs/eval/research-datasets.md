@@ -19,18 +19,19 @@ The rendered numbers live in the [research report](../reports/research-report.ht
 and regenerable, because the numbers depend on the licence-gated archives and, for the learned
 methods, on fetched ONNX weights.
 
-> **Status — offline fixture smoke-run.** The real dataset images are **licence-gated and not
-> fetched in this repo.** Every acceptance check runs on the committed offline fixtures under
-> `tests/fixtures/research/`, so the harness, the metrics, and the report table are all exercised
-> end-to-end without any download. The real report regenerates via `pixi run` once a human accepts
-> each licence and drops the archives (`pixi run fetch-datasets --list` prints where). **No
-> real-dataset numbers are claimed or committed.**
+> **Status — offline fixture smoke-run.** The real dataset images are **manual (licence-gated, or an
+> export drop for floor plans) and not committed to this repo.** Every acceptance check runs on the
+> committed offline fixtures under `tests/fixtures/research/`, so the harness, the metrics, the
+> tuning pass, and the report table are all exercised end-to-end without any download. The real
+> numbers regenerate via `pixi run` once a human supplies each dataset (`pixi run fetch-datasets
+> --list` prints where each drop goes). **No real-dataset numbers are claimed or committed.**
 
 ---
 
-## The four datasets
+## The research datasets
 
-Each does a **distinct** job; none is redundant (D-01).
+Each does a **distinct** job; none is redundant (D-01). The first four are Phase 11's held-out
+surface; floor plans (below) was added later as the **target-domain** set.
 
 ### RPINE — "Repeated Patterns IN Everywhere"
 
@@ -97,6 +98,30 @@ Each does a **distinct** job; none is redundant (D-01).
 - **Weaknesses / biases:** one appearance (cars), one viewpoint regime — narrow; a probe, not a
   primary diversity signal.
 
+### Floor plans (Roboflow floor-plans-500) — the target domain
+
+- **Purpose:** the **target domain**. Architectural floor plans where the product's framing is
+  literal — draw one `door` (or `window`), find every other instance in the *same* plan. This is the
+  one research set whose images look like the intended application, so it is where "which method
+  should we ship" is actually decided.
+- **Source:** Roboflow Universe <https://universe.roboflow.com/university-y9nbi/floor-plans-500>,
+  exported in COCO format.
+- **Annotation type:** per-symbol bounding boxes. The export carries `bathroom` / `door` /
+  `perimeter` / `stairs` / `window`; we use **`door`** and **`window`** — dense repeated stamped
+  symbols present in every plan (door ~9/plan, window ~7–8/plan). `perimeter` / `bathroom` /
+  `stairs` are region-ish or one-per-room and are **not** exemplar-search targets, so they are
+  excluded.
+- **Per-class single-class datasets.** The harness ground truth is single-class, so the multi-class
+  export is converted **once per class** into two datasets — `floorplans-door` and
+  `floorplans-window` — over the same plans. An exemplar door is then scored against exactly the
+  doors: recall's denominator is the door count, never doors + windows.
+- **Splits:** native `train 197 / valid 56 / test 28`. **Train is intentionally not converted** —
+  the exemplar-search methods do no training — so the manifest's train is empty; **val** (native)
+  tunes and **test** is the frozen surface.
+- **Strengths:** real target-domain imagery; dense repeated instances; native val, so no carve.
+- **Weaknesses / biases:** small dataset (28 test plans → watch sample noise); symbols are small
+  relative to the full plan, which stresses the min/max box-area gates of some methods.
+
 | Dataset | Train | Val | Test | Val strategy | Role |
 |---|---|---|---|---|---|
 | FSCD-147 | 3,659 | 1,286 | 1,190 | native (dedup first) | diversity + comparability |
@@ -104,6 +129,8 @@ Each does a **distinct** job; none is redundant (D-01).
 | RPINE | 3,925 | — | 435 | seeded carve from train | single-image all-repeats (task fit) |
 | CARPK | 989 | — | 459 | test-only | cross-domain generalization |
 | PUCPR+ | ~100 | (25) | — | test-only | cross-domain generalization |
+| floorplans-door | — | 56 | 28 | native | **target domain** (doors) |
+| floorplans-window | — | 56 | 28 | native | **target domain** (windows) |
 
 ---
 
@@ -149,6 +176,35 @@ leaderboard-comparable numbers. "Tuning" here is config/threshold sweeps — the
   literature they exist to measure **cross-domain generalization** from whatever was tuned elsewhere
   — exactly the "tune elsewhere, evaluate on a different domain" experiment. The sweep therefore
   emits **zero val cells** for them.
+- **Floor plans ship a native val**, so tuning happens on it directly (no carve, no contamination),
+  and the domain-tuning pass below uses it.
+
+### Domain threshold tuning (`pixi run tune-floorplans`)
+
+The default sweep scores every method at its **default** config — "out of the box on floor plans".
+The tuning pass answers the shipping question: **how good is each method once its acceptance
+threshold is adapted to this domain, and how much adaptation did it need?**
+
+1. **Tune on val.** For each method, sweep its single acceptance knob over a small explicit grid on
+   `floorplans-{door,window}` **val** and pick the config maximizing **F1 @ IoU 0.5** — the
+   operating-point metric the product cares about (find all the doors without junk). Each method
+   gates acceptance differently, so the knob is method-specific and hand-listed in
+   `src/object_search/eval/tuning.py`:
+
+   | Method | Tuned knob |
+   |---|---|
+   | `ncc`, `mosse`, `dino-dense`, `owlv2-oneshot` | `retain_frac` (calibrated score floor) |
+   | `sparse-geo` | `min_inliers` (geometric acceptance) |
+   | `propose-retrieve` | `similarity_floor` (retrieval cosine floor) |
+
+2. **Freeze → report tuned-vs-default on test.** The frozen config and the default config are each
+   scored once on **test**. Reporting both side by side shows which method wins on floor plans *and*
+   how much domain tuning each needed (a method that barely moves is robust; one that jumps was
+   mis-calibrated for this domain). Tuning **never reads test**, and the tuned config is always an
+   instance of the method's own frozen `config_model`, so no method file is touched — the tuned
+   config feeds through the additive `config` param on `run_research_benchmark`.
+
+Output: `docs/benchmark/floorplans-{door,window}-tuning-results.json` (gitignored, regenerable).
 
 ### 1 vs 3 exemplars, and how a method is run at 3 (k-shot late fusion)
 
@@ -225,6 +281,16 @@ at `datasets/_incoming/<carpk|pucpr_plus>/`, then re-run `pixi run fetch-dataset
   + `Images/` layout the converter reads.
 - **Official** — the NTU CARPK/PUCPR+ terms-of-use page linked from https://lafi.github.io/LPN/ (request
   form). This is the native format the converter expects.
+
+### Manual (COCO export drop) — floor plans
+
+`floorplans-door` / `floorplans-window` also stay `requires_manual`, but for a different reason: the
+data is exported from [Roboflow Universe](https://universe.roboflow.com/university-y9nbi/floor-plans-500),
+not licence-gated behind a request form. Export the dataset in **COCO** format, then drop the extracted
+`train/valid/test` tree at `datasets/_incoming/floorplans/` and re-run `pixi run fetch-datasets`. Both
+class keys read the **one** dropped tree (converted once per class). On a GPU box, scp the export up
+first — `scripts/gpu_bench.sh` documents the exact command and then includes floor plans in the sweep
+and the `tune-floorplans` pass automatically.
 
 ## Improving these results
 

@@ -48,6 +48,11 @@ _VAL_STRATEGY: Mapping[str, ValStrategy] = {
     "rpine": "seeded-carve",
     "carpk": "test-only",
     "pucpr_plus": "test-only",
+    # Floor-plans ship a native valid split, so val is native (no carve, no contamination). Train is
+    # intentionally not converted (exemplar methods do no training), so the manifest's train is
+    # empty and only val (tuning) + test (frozen eval) carry ids.
+    "floorplans-door": "native",
+    "floorplans-window": "native",
 }
 
 

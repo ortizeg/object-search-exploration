@@ -56,6 +56,7 @@ from pydantic import BaseModel, ConfigDict
 from object_search import provenance
 from object_search.eval.converters import (
     convert_carpk,
+    convert_floorplans,
     convert_fscd147,
     convert_rpine,
 )
@@ -74,6 +75,16 @@ _CONVERTERS: Mapping[str, Callable[[Path, Path], list[Path]]] = {
     "pucpr_plus": convert_carpk,
     "fscd147": convert_fscd147,
     "rpine": convert_rpine,
+}
+
+# Floor-plan dataset keys -> the COCO category kept for that single-class variant. The Roboflow
+# floor-plans-500 export is multi-class; converting it once per class (door, window) yields two
+# single-class datasets over the same plans, so the harness's single-class GroundTruth is unchanged
+# and an exemplar door is scored only against doors. This is the one manual MULTI-split dataset, so
+# it takes the HF-style normalize path (below) rather than the flat single-split manual branch.
+_FLOORPLANS_CLASS: Mapping[str, str] = {
+    "floorplans-door": "door",
+    "floorplans-window": "window",
 }
 
 _PROVENANCE_FILENAME = "provenance.json"
@@ -238,6 +249,53 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         hf_repo_id="ChipmunkG4/RPINE",
         hf_files=None,
         added_in_phase=11,
+    ),
+    # Roboflow floor-plans-500 (COCO) -- the target domain: real architectural plans, exemplar
+    # search is literal (one door -> all doors). Manual (accept Roboflow terms, drop the COCO export
+    # tree), multi-split (native valid+test), converted PER CLASS into two single-class datasets.
+    # `raw_marker="test"` locates the export root by its test/ split dir; `images_subdir` is unused
+    # (scenes are per-split, so provenance uses the normalizer image_sources map, not a flat walk).
+    "floorplans-door": DatasetSpec(
+        key="floorplans-door",
+        source="manual-download",
+        source_url="https://universe.roboflow.com/university-y9nbi/floor-plans-500",
+        license="Roboflow Universe (see source_url; verify licence before redistribution)",
+        license_note=(
+            "The floor-plans-500 COCO export is produced from Roboflow Universe; its export README "
+            "does not restate a licence, so the licence as shown on the dataset page governs. "
+            "Recorded here and gitignored; the data is never re-hosted. A human exports it in COCO "
+            "format and drops the extracted train/valid/test tree at datasets/_incoming/floorplans."
+        ),
+        requires_manual=True,
+        incoming_subdir="floorplans",
+        default_split="test",
+        raw_marker="test",
+        images_subdir="",
+        archive_sha256=None,
+        hf_repo_id=None,
+        hf_files=None,
+        added_in_phase=12,
+    ),
+    "floorplans-window": DatasetSpec(
+        key="floorplans-window",
+        source="manual-download",
+        source_url="https://universe.roboflow.com/university-y9nbi/floor-plans-500",
+        license="Roboflow Universe (see source_url; verify licence before redistribution)",
+        license_note=(
+            "The floor-plans-500 COCO export is produced from Roboflow Universe; its export README "
+            "does not restate a licence, so the licence as shown on the dataset page governs. "
+            "Recorded here and gitignored; the data is never re-hosted. Shares the one dropped "
+            "train/valid/test tree at datasets/_incoming/floorplans/ with floorplans-door."
+        ),
+        requires_manual=True,
+        incoming_subdir="floorplans",
+        default_split="test",
+        raw_marker="test",
+        images_subdir="",
+        archive_sha256=None,
+        hf_repo_id=None,
+        hf_files=None,
+        added_in_phase=12,
     ),
 }
 
@@ -642,6 +700,44 @@ _NORMALIZERS: Mapping[str, Callable[[Path, Path], NormalizedDataset]] = {
     "fscd_lvis": normalize_fscd_lvis,
 }
 
+# Roboflow floor-plan COCO splits: valid -> our val, test -> our test. Train is intentionally NOT
+# converted -- the exemplar-search methods do no training, so a floor-plan "train" split has no role
+# and the manifest's train is empty (native strategy, val + test only).
+_FLOORPLANS_SPLIT_MAP: Mapping[str, str] = {"valid": "val", "test": "test"}
+
+
+def normalize_floorplans(raw_root: Path, dataset_dir: Path, target_class: str) -> NormalizedDataset:
+    """Convert the dropped Roboflow floor-plan COCO tree into one class's val+test sidecars.
+
+    The floor-plan export is manual (a human accepts Roboflow's terms and drops the export), but
+    unlike the flat CARPK tree its scenes live inside each split dir -- so this reuses the HF path's
+    :class:`NormalizedDataset` + ``image_sources`` provenance rather than the single-subdir flat
+    walk. ``convert_floorplans`` is run once per scored split
+    (``valid`` -> ``val``, ``test``), keeping only ``target_class`` boxes so
+    ``datasets/floorplans-<class>/{val,test}/`` are single-class. Provenance hashes each converted
+    scene at its source path under the raw split dir.
+    """
+    splits: dict[str, Path] = {}
+    sidecars: list[Path] = []
+    image_sources: dict[str, Path] = {}
+    for roboflow_split, our_split in _FLOORPLANS_SPLIT_MAP.items():
+        split_dir = raw_root / roboflow_split
+        if not (split_dir / "_annotations.coco.json").is_file():
+            logger.info(
+                "floorplans: split {!r} absent under {}, skipping", roboflow_split, raw_root
+            )
+            continue
+        out = dataset_dir / our_split
+        written = convert_floorplans(split_dir, out, target_class=target_class)
+        splits[our_split] = out
+        sidecars.extend(written)
+        for sidecar in written:
+            image_id = sidecar.name[: -len(".gt.json")]
+            source = split_dir / f"{image_id}.png"
+            if source.is_file():
+                image_sources[image_id] = source
+    return NormalizedDataset(splits=splits, sidecars=sorted(sidecars), image_sources=image_sources)
+
 
 def _revision_from_cache_path(path: Path) -> str | None:
     """Extract the resolved commit sha from an HF cache path (``.../snapshots/<sha>/...``)."""
@@ -763,6 +859,47 @@ def _fetch_huggingface(spec: DatasetSpec, out: Path, *, root: Path | None = None
     return next(iter(result.splits.values()))
 
 
+def _fetch_floorplans(spec: DatasetSpec, out: Path, *, root: Path | None = None) -> Path | None:
+    """The manual floor-plan branch of :func:`fetch`: resolve the dropped COCO tree, then normalize.
+
+    Mirrors :func:`_fetch_huggingface` (normalize -> convert -> record image_sources provenance) but
+    reads the human-supplied export from ``datasets/_incoming/floorplans/`` with no network, and
+    selects the target class from ``spec.key``. Absent data logs an actionable message and returns
+    ``None`` rather than raising, so a floor-plan miss degrades to "skipped" like other datasets
+    (T-11-05).
+    """
+    dataset_dir = datasets_dir(root) / spec.key
+    incoming = incoming_dir(root) / spec.incoming_subdir
+    raw_root, _ = _resolve_raw_root(incoming, dataset_dir, spec.raw_marker)
+    if raw_root is None:
+        incoming.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "{}: no data found. Export floor-plans-500 in COCO format from {} and place the "
+            "extracted train/valid/test tree at {}, then re-run `pixi run fetch-datasets`.",
+            spec.key,
+            spec.source_url,
+            incoming,
+        )
+        return None
+    result = normalize_floorplans(raw_root, dataset_dir, _FLOORPLANS_CLASS[spec.key])
+    if not result.sidecars:
+        logger.warning("{}: conversion produced no sidecars (see warnings above)", spec.key)
+        return None
+    write_provenance_manifest(
+        spec, raw_root, result.sidecars, root=root, image_sources=result.image_sources
+    )
+    logger.info(
+        "{}: converted {} image(s) across split(s) {} from {}",
+        spec.key,
+        len(result.sidecars),
+        sorted(result.splits),
+        raw_root,
+    )
+    if out.is_dir() and any(out.glob("*.gt.json")):
+        return out
+    return next(iter(result.splits.values()), None)
+
+
 def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -> Path | None:
     """Convert one research dataset into ``datasets/<key>/<split>/``.
 
@@ -790,6 +927,11 @@ def fetch(spec: DatasetSpec, *, force: bool = False, root: Path | None = None) -
     if out.is_dir() and any(out.glob("*.gt.json")) and not force:
         logger.info("{}: already converted at {}, skipping", spec.key, out)
         return out
+
+    # Floor-plans is the one manual MULTI-split dataset: it takes the normalize path (COCO -> per
+    # class -> val+test) rather than the flat single-split manual branch below.
+    if spec.key in _FLOORPLANS_CLASS:
+        return _fetch_floorplans(spec, out, root=root)
 
     if spec.source == "huggingface":
         return _fetch_huggingface(spec, out, root=root)

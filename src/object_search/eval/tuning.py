@@ -1,0 +1,310 @@
+"""Per-method domain threshold tuning: tune on val, freeze, report tuned-vs-default on test.
+
+The research sweep (:func:`object_search.eval.benchmark.run_research_sweep`) scores every method at
+its **default** config. That answers "how do the methods do out of the box on floor plans", but not
+"how good is each method once its acceptance threshold is adapted to this domain" -- which is the
+question that actually picks a method to ship. This module answers the second one, honestly:
+
+1. **Tune on val.** For each method, sweep its single acceptance knob over a small explicit grid
+   (:data:`_TUNING_GRIDS`) on the dataset's ``val`` split and pick the config that maximises
+   **F1 @ IoU 0.5** -- the operating-point metric the product cares about (find all the doors
+   without junk). Nothing here ever reads ``test``.
+2. **Freeze + evaluate on test.** Run the frozen (tuned) config on ``test`` once. Also run the
+   method's **default** config on ``test``. Reporting both side by side is the point: it shows which
+   method wins on floor plans *and* how much domain tuning each one needed to get there (a method
+   that barely moves is robust; one that jumps was mis-calibrated for this domain).
+
+Why one knob per method, chosen by hand? Each method gates acceptance differently -- a calibrated
+score floor (``ncc``/``mosse``/``dino-dense``/``owlv2`` ``retain_frac``), a geometric inlier count
+(``sparse-geo`` ``min_inliers``), a retrieval cosine floor (``propose-retrieve``
+``similarity_floor``) -- and the knob that trades recall against precision is method-specific. A
+hand-written grid keeps this readable and editable (a practitioner tunes the numbers here), rather
+than hiding the search behind a generic optimiser. The tuned config is always an instance of the
+method's own frozen ``config_model``, so tuning never touches a method file -- it only feeds a
+different config through the additive ``config`` param on
+:func:`object_search.eval.benchmark.run_research_benchmark`.
+
+Reproducibility: the grids are fixed, the exemplar sampler is seeded (D-11), and val/test come from
+the committed split manifest, so the same dataset bytes + seed reproduce the same frozen configs and
+the same tuned-vs-default table byte for byte.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from loguru import logger
+from pydantic import BaseModel
+
+from object_search.eval.benchmark import run_research_benchmark
+from object_search.provenance import current_git_sha, repo_root
+from object_search.search import get_method
+
+# The six methods, tuned in registry order. Kept here (not imported from benchmark) so the tuning
+# run set is edited in one obvious place.
+_DEFAULT_METHODS: tuple[str, ...] = (
+    "ncc",
+    "mosse",
+    "sparse-geo",
+    "dino-dense",
+    "propose-retrieve",
+    "owlv2-oneshot",
+)
+
+# Per-method DOMAIN TUNING GRID: the single acceptance knob swept on val, argmax F1 @ IoU 0.5. Each
+# entry is a dict of config overrides applied atop the method's defaults (validated through the
+# method's own frozen config_model). The knob is the one that trades recall against precision for
+# THAT method; edit the numbers here to widen or refine the search.
+_TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
+    # retain_frac: fraction of the calibrated candidate-score range kept. Lower -> stricter.
+    "ncc": tuple({"retain_frac": v} for v in (0.25, 0.35, 0.45, 0.55, 0.65)),
+    "mosse": tuple({"retain_frac": v} for v in (0.25, 0.35, 0.45, 0.55, 0.65)),
+    # min_inliers: RANSAC inliers required to accept an instance. Higher -> stricter.
+    "sparse-geo": tuple({"min_inliers": v} for v in (3, 4, 5, 6, 8)),
+    # retain_frac: DINO dense-feature score floor (contrast-calibrated). Lower -> stricter.
+    "dino-dense": tuple({"retain_frac": v} for v in (0.5, 0.6, 0.7, 0.8, 0.9)),
+    # similarity_floor: min cosine to a retrieved proposal embedding. Higher -> stricter.
+    "propose-retrieve": tuple({"similarity_floor": v} for v in (0.5, 0.6, 0.7, 0.8, 0.85)),
+    # retain_frac: OWLv2 score floor (self-similarity-calibrated). Lower -> stricter.
+    "owlv2-oneshot": tuple({"retain_frac": v} for v in (0.85, 0.9, 0.94, 0.97)),
+}
+
+
+def _f1_sort_key(overall: Mapping[str, Any]) -> float:
+    """F1 as a sortable float: the abstention ``None`` (nothing scored) sorts below any real F1.
+
+    The tuning objective is F1 @ IoU 0.5; a config that returns nothing pools to F1 ``None`` (not
+    ``0``), which must never win a tie against a config that actually found instances.
+    """
+    f1 = overall.get("f1")
+    return float(f1) if isinstance(f1, int | float) else -1.0
+
+
+def _evaluate(
+    method: str,
+    dataset: str,
+    split: str,
+    split_root: Path,
+    *,
+    config: BaseModel | None,
+    exemplar_count: int,
+    iou_threshold: float,
+    seed: int,
+    manifest_root: Path | None,
+) -> dict[str, Any]:
+    """Run one (method, config) over a split and return its pooled ``overall`` metric block."""
+    block = run_research_benchmark(
+        method,
+        dataset,
+        split,
+        split_root,
+        exemplar_count=exemplar_count,
+        iou_threshold=iou_threshold,
+        seed=seed,
+        manifest_root=manifest_root,
+        config=config,
+    )
+    overall = block["overall"]
+    assert isinstance(overall, dict)  # noqa: S101  -- run_research_benchmark always returns it
+    return overall
+
+
+def tune_method(
+    method: str,
+    dataset: str,
+    val_root: Path,
+    *,
+    exemplar_count: int = 1,
+    iou_threshold: float = 0.5,
+    seed: int = 0,
+    manifest_root: Path | None = None,
+    grid: Sequence[dict[str, object]] | None = None,
+) -> dict[str, Any]:
+    """Sweep ``method``'s acceptance knob on ``val``; return the argmax-F1 config plus all trials.
+
+    Args:
+        method: Registry key, e.g. ``"ncc"``.
+        dataset: Dataset key, e.g. ``"floorplans-door"``.
+        val_root: Directory of converted val sidecars + scenes (``datasets/<dataset>/val``).
+        exemplar_count: Exemplars per query (1 = the product operating point).
+        iou_threshold: IoU for a TP; the tuning metric is F1 at this IoU.
+        seed: Config seed for the exemplar sampler (D-11).
+        manifest_root: Optional base dir for the committed split manifest (tests use ``tmp_path``).
+        grid: Override the built-in grid (tests pass a tiny one); defaults to
+            :data:`_TUNING_GRIDS` for ``method``.
+
+    Returns:
+        ``{"method", "trials": [{overrides, f1, precision, recall}], "best": {overrides, f1,
+        val_overall} | None}``. ``best`` is ``None`` only when the grid is empty.
+    """
+    spec = get_method(method)
+    candidates = tuple(grid) if grid is not None else _TUNING_GRIDS.get(method, ())
+
+    trials: list[dict[str, Any]] = []
+    best: dict[str, Any] | None = None
+    best_key = float("-inf")
+    for overrides in candidates:
+        config = spec.config_model(**overrides)
+        overall = _evaluate(
+            method,
+            dataset,
+            "val",
+            val_root,
+            config=config,
+            exemplar_count=exemplar_count,
+            iou_threshold=iou_threshold,
+            seed=seed,
+            manifest_root=manifest_root,
+        )
+        trials.append(
+            {
+                "overrides": dict(overrides),
+                "f1": overall.get("f1"),
+                "precision": overall.get("precision"),
+                "recall": overall.get("recall"),
+            }
+        )
+        key = _f1_sort_key(overall)
+        if key > best_key:
+            best_key = key
+            best = {"overrides": dict(overrides), "f1": overall.get("f1"), "val_overall": overall}
+
+    logger.info(
+        "tuning[{}/{}]: best {} (val F1={})",
+        method,
+        dataset,
+        best["overrides"] if best else "<no grid>",
+        best["f1"] if best else None,
+    )
+    return {"method": method, "trials": trials, "best": best}
+
+
+def _delta(tuned: float | None, default: float | None) -> float | None:
+    """Signed change from default to tuned, or ``None`` if either side is unscored."""
+    if isinstance(tuned, int | float) and isinstance(default, int | float):
+        return float(tuned) - float(default)
+    return None
+
+
+def run_domain_tuning(
+    dataset: str,
+    research_root: Path | str,
+    *,
+    methods: Sequence[str] = _DEFAULT_METHODS,
+    exemplar_count: int = 1,
+    iou_threshold: float = 0.5,
+    seed: int = 0,
+    tune_split: str = "val",
+    eval_split: str = "test",
+    manifest_root: Path | None = None,
+    out: str | None = "docs/benchmark/floorplans-tuning-results.json",
+) -> dict[str, Any]:
+    """Tune every method on ``tune_split`` and report tuned-vs-default on ``eval_split``.
+
+    For each method: pick the argmax-F1 config on val (:func:`tune_method`), freeze it, then score
+    both the frozen config and the method's defaults on test. The returned report carries, per
+    method, the tuned overrides, the val F1 that selected them, the full tuned and default test
+    metric blocks, and the F1 delta -- the tuned-vs-default table.
+
+    Args:
+        dataset: Dataset key, e.g. ``"floorplans-door"``.
+        research_root: Base dir holding ``<dataset>/<split>/`` converted trees (``datasets/``).
+        methods: Methods to tune (defaults to all six).
+        exemplar_count: Exemplars per query for both tuning and evaluation.
+        iou_threshold: IoU for a TP; the tuning metric is F1 at this IoU.
+        seed: Config seed for the exemplar sampler (D-11).
+        tune_split / eval_split: Split names; tuning never reads ``eval_split``.
+        manifest_root: Optional base dir for the committed split manifests (tests use ``tmp_path``).
+        out: Where to write the JSON report (resolved against the repo root when relative). ``None``
+            skips the write and only returns the report.
+
+    Returns:
+        The report mapping (also written to ``out`` unless ``out`` is ``None``).
+    """
+    base = Path(research_root)
+    if not base.is_absolute():
+        base = repo_root() / base
+    val_root = base / dataset / tune_split
+    eval_root = base / dataset / eval_split
+
+    per_method: list[dict[str, Any]] = []
+    for method in methods:
+        spec = get_method(method)
+        tuned = tune_method(
+            method,
+            dataset,
+            val_root,
+            exemplar_count=exemplar_count,
+            iou_threshold=iou_threshold,
+            seed=seed,
+            manifest_root=manifest_root,
+        )
+        best = tuned["best"]
+        tuned_config = spec.config_model(**best["overrides"]) if best else None
+
+        tuned_test = _evaluate(
+            method,
+            dataset,
+            eval_split,
+            eval_root,
+            config=tuned_config,
+            exemplar_count=exemplar_count,
+            iou_threshold=iou_threshold,
+            seed=seed,
+            manifest_root=manifest_root,
+        )
+        default_test = _evaluate(
+            method,
+            dataset,
+            eval_split,
+            eval_root,
+            config=None,
+            exemplar_count=exemplar_count,
+            iou_threshold=iou_threshold,
+            seed=seed,
+            manifest_root=manifest_root,
+        )
+        delta = _delta(tuned_test.get("f1"), default_test.get("f1"))
+        per_method.append(
+            {
+                "method": method,
+                "tuned_overrides": best["overrides"] if best else {},
+                "val_f1": best["f1"] if best else None,
+                "tuned_test": tuned_test,
+                "default_test": default_test,
+                "delta_f1": delta,
+                "trials": tuned["trials"],
+            }
+        )
+        logger.info(
+            "tuning[{}/{}]: test F1 tuned={} default={} (delta={})",
+            method,
+            dataset,
+            tuned_test.get("f1"),
+            default_test.get("f1"),
+            delta,
+        )
+
+    report: dict[str, Any] = {
+        "git_sha": current_git_sha(),
+        "dataset": dataset,
+        "tune_split": tune_split,
+        "eval_split": eval_split,
+        "exemplar_count": exemplar_count,
+        "iou_threshold": iou_threshold,
+        "seed": seed,
+        "selection_metric": "f1@iou0.5",
+        "methods": per_method,
+    }
+
+    if out is not None:
+        out_path = Path(out)
+        if not out_path.is_absolute():
+            out_path = repo_root() / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        logger.info("tuning: wrote {} ({} method(s))", out_path, len(per_method))
+    return report

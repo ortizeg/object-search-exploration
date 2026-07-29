@@ -1,0 +1,166 @@
+{
+  "annotations": [
+    {
+      "area": 88.0,
+      "bbox": [
+        5.0,
+        5.0,
+        11.0,
+        8.0
+      ],
+      "category_id": 2,
+      "id": 1,
+      "image_id": 0,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 88.0,
+      "bbox": [
+        35.0,
+        10.0,
+        11.0,
+        8.0
+      ],
+      "category_id": 2,
+      "id": 2,
+      "image_id": 0,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 168.0,
+      "bbox": [
+        60.0,
+        6.0,
+        14.0,
+        12.0
+      ],
+      "category_id": 4,
+      "id": 3,
+      "image_id": 0,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 48.0,
+      "bbox": [
+        8.0,
+        34.0,
+        8.0,
+        6.0
+      ],
+      "category_id": 5,
+      "id": 4,
+      "image_id": 0,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 48.0,
+      "bbox": [
+        48.0,
+        36.0,
+        8.0,
+        6.0
+      ],
+      "category_id": 5,
+      "id": 5,
+      "image_id": 0,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 108.0,
+      "bbox": [
+        12.0,
+        12.0,
+        12.0,
+        9.0
+      ],
+      "category_id": 2,
+      "id": 6,
+      "image_id": 1,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 48.0,
+      "bbox": [
+        6.0,
+        40.0,
+        8.0,
+        6.0
+      ],
+      "category_id": 5,
+      "id": 7,
+      "image_id": 1,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 48.0,
+      "bbox": [
+        26.0,
+        42.0,
+        8.0,
+        6.0
+      ],
+      "category_id": 5,
+      "id": 8,
+      "image_id": 1,
+      "iscrowd": 0,
+      "segmentation": []
+    },
+    {
+      "area": 48.0,
+      "bbox": [
+        50.0,
+        40.0,
+        8.0,
+        6.0
+      ],
+      "category_id": 5,
+      "id": 9,
+      "image_id": 1,
+      "iscrowd": 0,
+      "segmentation": []
+    }
+  ],
+  "categories": [
+    {
+      "id": 0,
+      "name": "floorplans",
+      "supercategory": "none"
+    },
+    {
+      "id": 2,
+      "name": "door",
+      "supercategory": "floorplans"
+    },
+    {
+      "id": 4,
+      "name": "stairs",
+      "supercategory": "floorplans"
+    },
+    {
+      "id": 5,
+      "name": "window",
+      "supercategory": "floorplans"
+    }
+  ],
+  "images": [
+    {
+      "file_name": "fp-test-1.png",
+      "height": 60,
+      "id": 0,
+      "width": 80
+    },
+    {
+      "file_name": "fp-test-2.png",
+      "height": 60,
+      "id": 1,
+      "width": 80
+    }
+  ]
+}
