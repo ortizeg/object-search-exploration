@@ -37,18 +37,20 @@ from object_search.schemas.geometry import BBox
 _COCO_IOU_THRESHOLDS: tuple[float, ...] = tuple(t / 100 for t in range(50, 100, 5))
 
 
-def match_predictions(
+def match_predictions_detailed(
     pred_boxes: Sequence[BBox],
     gt_boxes: Sequence[BBox],
     iou_threshold: float = 0.5,
-) -> tuple[int, int, int]:
-    """Greedily match predicted boxes to ground truth and count TP / FP / FN (EVAL-16).
+) -> tuple[int, int, int, tuple[bool, ...]]:
+    """Greedily match predictions to ground truth, returning the counts **and which GT matched**.
 
-    Predictions are consumed in the given order; each claims the highest-IoU **still-unmatched**
-    ground-truth box whose IoU meets ``iou_threshold``. A prediction that finds no such box is a
-    false positive, which is what makes a second box on an already-matched instance a duplicate
-    (1 TP + 1 FP) rather than a second true positive. Unmatched ground truth at the end is the
-    false-negative (missed) count.
+    This is the single matching implementation; :func:`match_predictions` projects its result to
+    ``(tp, fp, fn)``, so the two can never disagree on the EVAL-16 duplicate rule. Predictions are
+    consumed in the given order; each claims the highest-IoU **still-unmatched** ground-truth box
+    whose IoU meets ``iou_threshold``. A prediction that finds no such box is a false positive,
+    which is what makes a second box on an already-matched instance a duplicate (1 TP + 1 FP)
+    rather than a second true positive. Unmatched ground truth at the end is the false-negative
+    (missed) count.
 
     Args:
         pred_boxes: The boxes a method claimed. Order is respected but does not change the
@@ -57,7 +59,12 @@ def match_predictions(
         iou_threshold: Minimum IoU for a match. ``0.5`` is the default detection convention.
 
     Returns:
-        ``(tp, fp, fn)``. ``tp + fp == len(pred_boxes)`` and ``tp + fn == len(gt_boxes)`` always.
+        ``(tp, fp, fn, matched)`` where ``matched`` is a ``tuple[bool, ...]`` **aligned index-for-
+        index to** ``gt_boxes``: ``matched[i]`` is ``True`` iff ground-truth box ``i`` was claimed
+        by some prediction. By construction ``sum(matched) == tp``, ``tp + fp == len(pred_boxes)``
+        and ``tp + fn == len(gt_boxes)``. A GT box is matched **at most once** (the duplicate rule),
+        so a second prediction on an already-matched instance leaves ``matched`` unchanged and is
+        counted in ``fp``, never crediting that GT twice.
     """
     matched: list[bool] = [False] * len(gt_boxes)
     tp = 0
@@ -68,6 +75,31 @@ def match_predictions(
             tp += 1
     fp = len(pred_boxes) - tp
     fn = len(gt_boxes) - tp
+    return tp, fp, fn, tuple(matched)
+
+
+def match_predictions(
+    pred_boxes: Sequence[BBox],
+    gt_boxes: Sequence[BBox],
+    iou_threshold: float = 0.5,
+) -> tuple[int, int, int]:
+    """Greedily match predicted boxes to ground truth and count TP / FP / FN (EVAL-16).
+
+    A thin projection of :func:`match_predictions_detailed` to just the counts -- the public
+    contract this function has always had, kept byte-for-byte so every existing caller and test
+    stays green. The greedy highest-IoU, match-each-GT-at-most-once rule lives in the sibling and
+    is written exactly once.
+
+    Args:
+        pred_boxes: The boxes a method claimed. Order is respected but does not change the
+            counts for the non-overlapping benchmark sets this primarily scores.
+        gt_boxes: The exact ground-truth instances.
+        iou_threshold: Minimum IoU for a match. ``0.5`` is the default detection convention.
+
+    Returns:
+        ``(tp, fp, fn)``. ``tp + fp == len(pred_boxes)`` and ``tp + fn == len(gt_boxes)`` always.
+    """
+    tp, fp, fn, _matched = match_predictions_detailed(pred_boxes, gt_boxes, iou_threshold)
     return tp, fp, fn
 
 
