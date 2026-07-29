@@ -66,7 +66,7 @@ from object_search.eval.metrics import (
     match_predictions_detailed,
     precision_recall_f1,
 )
-from object_search.eval.sampling import sample_exemplars
+from object_search.eval.sampling import ExemplarSelection, sample_exemplars
 from object_search.eval.splits import load_split_manifest, research_image_ids
 from object_search.provenance import current_git_sha, repo_root
 from object_search.schemas.geometry import BBox, ExemplarBox
@@ -670,6 +670,7 @@ def _run_one_research(
     exemplar_count: int,
     seed: int = 0,
     config: BaseModel | None = None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
 ) -> ImageResult:
     """Run one method on one research image and score it with the full literature metric set.
 
@@ -691,7 +692,9 @@ def _run_one_research(
         # k-shot LATE FUSION (Task 2): sample `exemplar_count` boxes and run the method once per
         # box, then fuse. The sampled exemplars REMAIN in gt.boxes and are scored like any other
         # instance, so the recall denominator (len(gt.boxes)) is identical at count=1 and count=3.
-        exemplars = sample_exemplars(gt, count=exemplar_count, seed=seed)
+        exemplars = sample_exemplars(
+            gt, count=exemplar_count, seed=seed, exemplar_selection=exemplar_selection
+        )
         run_config = config if config is not None else spec.config_model()
         result = run_multi_exemplar(spec.fn, scene, exemplars, run_config)
     except Exception as exc:
@@ -829,6 +832,7 @@ def run_research_benchmark(
     seed: int = 0,
     manifest_root: Path | None = None,
     config: BaseModel | None = None,
+    exemplar_selection: ExemplarSelection = "seeded-random",
 ) -> dict[str, Any]:
     """Run one method over a research dataset split, returning the report block (11-01 tracer).
 
@@ -852,6 +856,9 @@ def run_research_benchmark(
         config: Method config instance to run with; ``None`` uses the method defaults. A tuned
             config (an instance of the method's ``config_model``) is how domain threshold tuning
             evaluates a frozen operating point on val/test.
+        exemplar_selection: Exemplar-ordering mode passed to
+            :func:`object_search.eval.sampling.sample_exemplars`; default ``"seeded-random"``
+            preserves the committed draw, ``"size-representative"`` seeds from the median-area box.
 
     Returns:
         A report block: ``method``/``dataset``/``split``/``exemplar_count``, ``coverage``,
@@ -889,6 +896,7 @@ def run_research_benchmark(
                 exemplar_count=exemplar_count,
                 seed=seed,
                 config=config,
+                exemplar_selection=exemplar_selection,
             )
         )
 
