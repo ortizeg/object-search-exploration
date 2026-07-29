@@ -173,3 +173,60 @@ def test_ncc_floorplans_door_test_produces_full_metric_rows(tmp_path: Path) -> N
     for key in ("precision", "recall", "f1", "ap", "ap50", "ap75", "mae", "rmse", "nae"):
         assert key in overall, key
     assert overall["n_images"] == len(_DOOR_COUNTS["test"])
+
+
+def test_research_block_carries_the_three_per_slice_groupings(tmp_path: Path) -> None:
+    out_root = _fixture_manifest(tmp_path)
+    report = run_research_benchmark(
+        "ncc", "floorplans-door", "test", out_root, exemplar_count=1, manifest_root=tmp_path
+    )
+
+    slices = report["slices"]
+    # All three groupings present (EVAL-10 applied to floor plans).
+    assert set(slices) == {"by_symbol_size", "by_crowding", "by_plan_resolution"}
+
+    # by_symbol_size is a GT-box-level RECALL per fixed bucket; every value is a recall in [0, 1]
+    # or None (an empty bucket abstains, never fabricates 0).
+    by_size = slices["by_symbol_size"]
+    assert set(by_size) == {"small", "medium", "large"}
+    total_gt = 0
+    for bucket in by_size.values():
+        recall = bucket["recall"]
+        assert recall is None or (0.0 <= recall <= 1.0)
+        assert bucket["n_matched"] <= bucket["n_gt"]
+        total_gt += bucket["n_gt"]
+    # Every labelled door box lands in exactly one size bucket (the fixture records the canvas).
+    assert total_gt == sum(_DOOR_COUNTS["test"].values())
+
+    # by_crowding / by_plan_resolution are per-image F1 slices (may be empty if all keys are None,
+    # but the fixture carries a canvas size and instance counts, so both have at least one bucket).
+    assert slices["by_crowding"]
+    assert slices["by_plan_resolution"]
+    for grouping in (slices["by_crowding"], slices["by_plan_resolution"]):
+        for cell in grouping.values():
+            assert "f1" in cell and "recall" in cell  # the research literature-metric column set
+
+
+def test_sweep_cell_carries_the_slices_block(tmp_path: Path) -> None:
+    # Drive run_research_sweep for one cell (ncc x floorplans-door x test). The sweep reads the
+    # COMMITTED split manifest (it does not take a manifest_root), so its scene ids are the real
+    # floor-plan ids -- absent under tmp_path, hence unlabelled -- but the point here is the
+    # PLUMBING: every sweep cell must carry the additive `slices` block, always with all three
+    # groupings and the three fixed symbol-size buckets, even when no image loaded.
+    from object_search.eval.benchmark import BenchmarkConfig, run_research_sweep
+
+    config = BenchmarkConfig(
+        methods=("ncc",),
+        datasets=("floorplans-door",),
+        splits=("test",),
+        exemplar_counts=(1,),
+        research_root=str(tmp_path),
+        research_out=str(tmp_path / "research-results.json"),
+    )
+    results = run_research_sweep(config)
+
+    (cell,) = results["cells"]
+    assert cell["method"] == "ncc"
+    # The additive per-slice block is carried on every sweep cell, not just the single-cell block.
+    assert set(cell["slices"]) == {"by_symbol_size", "by_crowding", "by_plan_resolution"}
+    assert set(cell["slices"]["by_symbol_size"]) == {"small", "medium", "large"}
