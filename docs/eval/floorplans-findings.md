@@ -17,6 +17,28 @@ letterbox (`fixed_input_side=1120`).
 > letterbox cut `dino-dense`'s failures from 28/28 to 1. Numbers are one run at one operating point;
 > they are directional evidence, not a leaderboard to over-fit.
 
+## Dataset statistics
+
+Both classes are converted from the same 84 plans (56 val + 28 test) — every plan has ≥1 door and
+≥1 window, so the image sets are identical and only the kept boxes differ. Size buckets are
+box-area ÷ plan-area: **small <0.4%, medium <1.6%, large ≥1.6%** (the same cuts the per-slice eval
+uses).
+
+| class / split | plans | instances | small | medium | large | instances/plan (min/med/max) |
+|---|---|---|---|---|---|---|
+| door / val | 56 | 527 | 54% | 43% | 3% | 3 / 8 / 29 |
+| door / test | 28 | 233 | 36% | 58% | 6% | 2 / 8 / 17 |
+| window / val | 56 | 463 | 75% | 25% | 1% | 1 / 6 / 40 |
+| window / test | 28 | 156 | 62% | 35% | 3% | 1 / 4 / 14 |
+
+Two facts shape the results: **almost every symbol is small/medium** (large is <6% everywhere), and
+**windows skew smaller than doors** (62% small vs 36% on test). That is why small-symbol robustness —
+where `dino-dense` fails outright and `ncc` holds up — is the decisive property on this domain.
+
+![symbol area as a fraction of the plan](img/floorplans/size-distribution.png)
+
+![instances by size bucket, and crowding (instances per plan)](img/floorplans/counts.png)
+
 ## Result — winners differ by class
 
 **Doors** (tuned F1 @ IoU 0.5, test):
@@ -75,6 +97,16 @@ doors, 1st on windows, full 28/28 coverage, and (below) uniformly robust to symb
   keypoint matching needs enough texture, which small stamped symbols lack.
 - **`owlv2` biases toward small** (it over-detects everywhere), which is why its recall is inverted
   vs the others.
+
+## Qualitative overlays (local, gitignored)
+
+`pixi run python scripts/build_floorplans_report.py` builds a self-contained
+`docs/benchmark/floorplans-report.html` with **TP/FP/FN overlays per method** on an easy and a hard
+plan for each class — **green** = matched (TP), **yellow** = missed (FN), **red** = spurious (FP),
+**orange** = the query exemplar. It is gitignored because the overlays embed the licensed floor-plan
+images (the aggregate stat charts above carry no plan pixels and are committed). The overlays make it
+visible at a glance: `dino-dense` leaves the small doors yellow (missed), while `ncc` and
+`propose-retrieve` fill them green.
 
 ## Recommendation
 

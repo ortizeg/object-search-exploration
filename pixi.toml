@@ -137,6 +137,7 @@ fetch-datasets = "python -m object_search.cli fetch-datasets"
 # Per-method domain threshold tuning on the floor plans: argmax F1@0.5 on val, freeze, report
 # tuned-vs-default on test. Gated on fetch-datasets having converted floorplans-door/window.
 tune-floorplans = "python -m object_search.cli tune-floorplans"
+report-floorplans = "python scripts/build_floorplans_report.py"
 serve = "uvicorn object_search.api.app:app --reload --port 8000"
 # Documentation site (mkdocs-material). `docs` serves it locally with live-reload at
 # http://127.0.0.1:8001; `docs-build` renders the static site into site/ (what CI publishes).
