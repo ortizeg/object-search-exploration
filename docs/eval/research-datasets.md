@@ -19,12 +19,14 @@ The rendered numbers live in the [research report](../reports/research-report.ht
 and regenerable, because the numbers depend on the licence-gated archives and, for the learned
 methods, on fetched ONNX weights.
 
-> **Status — offline fixture smoke-run.** The real dataset images are **manual (licence-gated, or an
-> export drop for floor plans) and not committed to this repo.** Every acceptance check runs on the
-> committed offline fixtures under `tests/fixtures/research/`, so the harness, the metrics, the
-> tuning pass, and the report table are all exercised end-to-end without any download. The real
-> numbers regenerate via `pixi run` once a human supplies each dataset (`pixi run fetch-datasets
-> --list` prints where each drop goes). **No real-dataset numbers are claimed or committed.**
+> **Status.** The real dataset **images and raw per-image results stay gitignored** (manual /
+> licence-gated, or an export drop for floor plans); every acceptance check runs on the committed
+> offline fixtures under `tests/fixtures/research/`, so the harness, metrics, tuning pass, and report
+> table are exercised end-to-end without any download. Numbers regenerate via `pixi run` once a human
+> supplies each dataset (`pixi run fetch-datasets --list` prints where each drop goes). **Measured
+> findings from a real floor-plan run** (which method wins, per-symbol-size recall, tuning gains) are
+> recorded in prose in [floorplans-findings.md](floorplans-findings.md) — metrics only, no images or
+> raw data.
 
 ---
 
