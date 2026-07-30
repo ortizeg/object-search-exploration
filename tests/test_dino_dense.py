@@ -81,6 +81,9 @@ def test_config_defaults_match_the_locked_decisions() -> None:
     assert cfg.seed == 0
     # The fixed-size letterbox is OPT-IN: None is the native/cap path (byte-identical default).
     assert cfg.fixed_input_side is None
+    # Adaptive resolution is OPT-IN too: None keeps the fixed scene_max_side cap unchanged.
+    assert cfg.adaptive_min_exemplar_tokens is None
+    assert cfg.adaptive_max_side is None
 
 
 def test_config_is_frozen_and_schema_drives_the_form() -> None:
@@ -521,6 +524,63 @@ def test_search_fixed_input_letterbox_path_finds_instances(monkeypatch: pytest.M
     assert len(result.matches) == 4  # padding masked, all four content blocks survive
     # The scene forward pass ran on the FIXED 140x140 letterbox canvas, not the 130x140 scene.
     assert stub.calls[1] == (140, 140)
+
+
+# ------------------------------------------ model-free: adaptive input resolution (opt-in)
+
+
+def test_search_adaptive_resolution_upscales_a_small_exemplar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small exemplar is UPSCALED toward adaptive_min_exemplar_tokens (the starvation fix)."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    scene = _stub_scene()  # 140x210; _STUB_EXEMPLAR is 36x36
+    cfg = DinoDenseConfig(adaptive_min_exemplar_tokens=6)
+    result = search(scene, _STUB_EXEMPLAR, cfg)
+
+    assert result.outcome is SearchOutcome.OK
+    desired_scale = (6 * dino_dense.DINOV2_PATCH) / 36  # exemplar's shorter side, in pixels
+    expected_w = max(1, round(210 * desired_scale))
+    expected_h = max(1, round(140 * desired_scale))
+    assert stub.calls[1] == (expected_h, expected_w)  # the SCENE call was upscaled, not native
+    assert result.diagnostics.metrics["cap_scale"] == pytest.approx(desired_scale)
+    assert result.diagnostics.metrics["cap_engaged"] == 1.0
+
+
+def test_search_adaptive_resolution_clamped_by_scene_max_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A starved exemplar demanding more than scene_max_side allows is clamped, not unbounded."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    scene = _stub_scene()  # 210px long side
+    cfg = DinoDenseConfig(adaptive_min_exemplar_tokens=1000)  # desired scale far exceeds the cap
+    result = search(scene, _STUB_EXEMPLAR, cfg)
+
+    ceiling_scale = 1568 / 210  # scene_max_side / long_side -- the binding constraint here
+    expected_w = max(1, round(210 * ceiling_scale))
+    expected_h = max(1, round(140 * ceiling_scale))
+    assert stub.calls[1] == (expected_h, expected_w)
+    assert result.diagnostics.metrics["cap_scale"] == pytest.approx(ceiling_scale)
+
+
+def test_search_adaptive_max_side_overrides_the_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """adaptive_max_side, when set, replaces scene_max_side as the adaptive-branch ceiling."""
+    stub = _StubDinoInferencer(*_stub_grids())
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: stub)
+
+    scene = _stub_scene()
+    cfg = DinoDenseConfig(adaptive_min_exemplar_tokens=1000, adaptive_max_side=350)
+    result = search(scene, _STUB_EXEMPLAR, cfg)
+
+    ceiling_scale = 350 / 210
+    expected_w = max(1, round(210 * ceiling_scale))
+    expected_h = max(1, round(140 * ceiling_scale))
+    assert stub.calls[1] == (expected_h, expected_w)
+    assert result.diagnostics.metrics["cap_scale"] == pytest.approx(ceiling_scale)
 
 
 # ================================================== real-model behaviour (skipped in CI)

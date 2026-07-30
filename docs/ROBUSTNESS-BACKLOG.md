@@ -64,14 +64,19 @@ weaknesses that shipped a single full-frame box were fixed in 2026-07 (`max-toke
 
 - **Sliding-window backbone inference** for very large scenes, so localisation no longer
   degrades at the resolution cap.
-- **Adaptive input resolution** — size the scene so the exemplar spans ≥ N stride-14 tokens
-  (clamped to a hard maximum), instead of a fixed `scene_max_side`. Measured to ~6× chipset recall
-  (0.077 → 0.554 on a small-chip subset) because the cap otherwise squeezes small chips to 3–5
-  tokens. Deferred: it fixes recall but not the flat-chip precision, costs inference latency, and
-  chipset is NCC's regime. A general small-object win when the priority calls for it.
+- **Adaptive input resolution — LANDED (opt-in) for floorplans-door, still deferred for chipset.**
+  `adaptive_min_exemplar_tokens` + `adaptive_max_side` size the scene so the exemplar spans ≥ N
+  stride-14 tokens, instead of a fixed `scene_max_side`. On chipset it measured ~6× recall
+  (0.077 → 0.554 on a small-chip subset) but remains deferred there: it fixes recall but not the
+  flat-chip precision, costs inference latency, and chipset is NCC's regime. On floorplans-door,
+  paired with a matching `fixed_input_side` letterbox, it lifted test F1 0.117 → 0.144 and shipped
+  as an opt-in domain override — see
+  [`reports/dino-dense-floorplans-improvement.md`](reports/dino-dense-floorplans-improvement.md).
 - **Learned feature upsampling (FeatUp)** to recover sub-patch localisation from the stride-14
   grid without a full high-res forward pass.
-- **SAM-based box refinement** — snap each coarse component box to the nearest segment mask.
+- **SAM-based box refinement** — snap each coarse component box to the nearest segment mask. A
+  cheaper peak/centroid-centred exemplar-shaped-box variant (no SAM) was tried on floorplans-door
+  and regressed F1; a real segmentation-based refinement remains open.
 - **Spatially-structured (not order-free) part matching.** `max-token` already does many-to-many
   token similarity (DONE — it replaced the mean-pooled prototype and lifted textured F1 from ≈ 0.03
   to ≈ 0.70), but it pools the top-k cosines with no geometric constraint on *where* the matching

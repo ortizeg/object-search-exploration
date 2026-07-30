@@ -34,6 +34,15 @@ method's, not the backbone's:
   an uncapped 6000 px scene is 180k+ tokens and OOMs. When a scene's long side exceeds the cap
   it is downscaled *and the cap is logged*, never silently truncated. Scenes at or below the cap
   run at native resolution.
+- **Adaptive input resolution (opt-in, ``adaptive_min_exemplar_tokens``).** ``None`` (default)
+  keeps the cap above as downscale-only. When set, the scene may instead be *upscaled* so the
+  EXEMPLAR spans at least that many stride-14 tokens on its shorter side -- the token-starvation
+  fix for a small exemplar on a large scene -- still bounded by a ceiling (``adaptive_max_side``,
+  or ``scene_max_side`` when that is unset) so a vanishingly small exemplar cannot demand
+  unbounded compute. Measured on floorplans-door test (paired with a matching ``fixed_input_side``
+  letterbox, see below): F1 0.117 -> 0.144, small-symbol recall 0.083 -> 0.143 (val: F1 flat at
+  0.080 -> 0.081, but small/medium recall still up on both splits) -- a real but modest gain, not
+  a fix for the small-symbol regime. See docs/reports/dino-dense-floorplans-improvement.md.
 - **The exemplar crop is taken from the original BGR scene** and embedded on its own. Under the
   default ``max-token`` scoring its patch tokens are kept as a **bank** (one vector per part);
   under ``prototype`` scoring they are mean-pooled into one vector. All tokens are L2-normalized.
@@ -50,7 +59,14 @@ method's, not the backbone's:
   letterbox scale** (top-left placement => zero pad offset => one division by the combined
   cap x letterbox scale, no offset term). The side is a multiple of 14, so
   :class:`DINOv2Inferencer`'s snap-to-multiple(14) resize is a no-op on the letterboxed input and
-  its scale factors come back as 1.0. Determinism is preserved (fixed interpolation + constant pad).
+  its scale factors come back as 1.0. Determinism is preserved (fixed interpolation + constant
+  pad). **Pairs with adaptive resolution above:** if ``fixed_input_side`` is SMALLER than the
+  adaptive ceiling, the letterbox re-downscales the exemplar right back down, undoing the
+  upscale -- set them equal (e.g. both 1568) so the adaptively-upscaled detail survives to the
+  model input. A square canvas also measurably helps on its own (floorplans-door is often a
+  strongly non-square plan, and DINOv2's positional-embedding interpolation is tuned for
+  near-square inputs): letterbox alone at 1120 -> 1568 gained little, but letterbox PAIRED with
+  adaptive resolution at the same 1568 side was the best combination measured.
 
 Post-processing (exact)
 -----------------------
@@ -107,10 +123,17 @@ Deferred deliberately (mirrored in ``docs/methods/dino-dense.md`` and
 
 - **Sliding-window backbone inference** for very large scenes, so localisation no longer
   degrades at the resolution cap.
-- **Adaptive input resolution** -- size the scene so the exemplar spans >= N stride-14 tokens
-  (clamped to a hard max) instead of a fixed ``scene_max_side``. Measured ~6x chipset recall
-  (0.077 -> 0.554 on a small-chip subset); deferred because it costs latency, does not fix the
-  flat-chip precision, and chipset is NCC's regime (see docs/reports/dino-dense-improvement.md).
+- **Adaptive input resolution -- LANDED (opt-in), floor-plans-door.** ``adaptive_min_exemplar_
+  tokens`` + ``adaptive_max_side`` size the scene so the exemplar spans >= N stride-14 tokens,
+  clamped to a ceiling, instead of a fixed ``scene_max_side``. Still deferred as the CHIPSET fix
+  it was originally scoped for (chipset is NCC's regime, ~6x recall lift measured but not worth
+  the latency there, see docs/reports/dino-dense-improvement.md) -- but validated and shipped for
+  floorplans-door, where paired with a matching ``fixed_input_side`` letterbox it lifted test F1
+  0.117 -> 0.144 (val: flat pooled F1, but small/medium recall up on both splits). Two follow-on
+  ideas tried and REVERTED as regressions on the same set (see docs/reports/dino-dense-floorplans-
+  improvement.md): a peak- or centroid-centred exemplar-shaped box in place of the blob's own
+  bounding rect (F1 0.144 -> 0.138 at best), and a 4-orientation (0/90/180/270) union exemplar
+  token bank for rotation robustness (F1 0.144 -> 0.108 -- more false positives, not more recall).
 - **Learned feature upsampling (FeatUp)** to recover sub-patch localisation from the stride-14
   grid without a full high-res forward pass.
 - **SAM-based box refinement** -- snap each coarse component box to the nearest segment mask.
@@ -322,6 +345,36 @@ class DinoDenseConfig(BaseModel):
             )
         return value
 
+    adaptive_min_exemplar_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Opt-in ROBUSTNESS BACKLOG item: size the scene so the EXEMPLAR spans at least this "
+            "many stride-14 tokens on its shorter side, instead of the fixed downscale-only "
+            "`scene_max_side` cap. None (default) keeps the existing cap -- byte-identical to "
+            "before this field existed. When set, the scene may be UPSCALED above native "
+            "resolution for a small exemplar on a large scene (the token-starvation fix), still "
+            "clamped to `scene_max_side` as the ceiling on total compute -- a tiny exemplar with "
+            "no room left under that ceiling gets the best resolution the ceiling allows, not the "
+            "full token count. Composes with `fixed_input_side`: the (possibly upscaled) capped "
+            "scene is still letterboxed into one fixed input shape when that is also set."
+        ),
+    )
+    adaptive_max_side: int | None = Field(
+        default=None,
+        ge=DINOV2_PATCH,
+        description=(
+            "The compute ceiling used INSTEAD of `scene_max_side` while `adaptive_min_exemplar_"
+            "tokens` is resolving a small exemplar upward -- None (default) reuses "
+            "`scene_max_side` itself. A separate, higher ceiling matters because most scenes "
+            "already need `scene_max_side` just to fit a large canvas; giving adaptive "
+            "resolution its OWN higher ceiling means only the images whose exemplar is "
+            "genuinely starved pay the extra compute, instead of raising the cost of every "
+            "image by raising `scene_max_side` itself. Ignored when "
+            "`adaptive_min_exemplar_tokens` is None."
+        ),
+    )
+
 
 @dataclass(frozen=True)
 class _Component:
@@ -520,7 +573,11 @@ def _fixed_letterbox(
     scale = side / max(h, w)
     content_w = min(side, max(1, round(w * scale)))
     content_h = min(side, max(1, round(h * scale)))
-    resized = cv2.resize(image, (content_w, content_h), interpolation=cv2.INTER_AREA)
+    # INTER_AREA degrades to INTER_NEAREST on magnification (OpenCV docs); a `side` bigger than
+    # the (possibly already-capped) scene -- e.g. a small plan, or an adaptive-resolution upscale
+    # feeding into the letterbox -- needs INTER_LINEAR instead.
+    interp = cv2.INTER_AREA if scale <= 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(image, (content_w, content_h), interpolation=interp)
     canvas = np.full((side, side, 3), _LETTERBOX_PAD_VALUE, dtype=np.uint8)
     canvas[:content_h, :content_w] = resized
     return np.ascontiguousarray(canvas), scale, content_w, content_h
@@ -558,6 +615,12 @@ def _extract_components(
     the (capped) inference resolution back to original scene pixels by dividing out ``cap_scale``.
     A component outside ``[min_area, max_area]`` (both in capped-inference pixels) is dropped as a
     fragment or a merged/background blob; ``max_area <= 0`` disables the ceiling.
+
+    A peak-centred / centroid-centred exemplar-shaped box (replacing the blob's own bounding rect)
+    was tried and measurably REGRESSED floorplans-door recall (peak: F1 0.113 -> 0.050; centroid:
+    0.144 -> 0.138) -- the blob's own extent tracks the true instance better than a fixed-size box
+    re-centred on an off-centre peak or centroid. See
+    docs/reports/dino-dense-floorplans-improvement.md.
     """
     mask = (sim_full >= floor).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -655,32 +718,46 @@ def search(
     prototype = _prototype_from_grid(crop_grid)
     token_bank = _crop_token_bank(crop_grid)
 
-    # 3. Run the SCENE at high resolution, capped at scene_max_side. A scene above the cap is
-    #    downscaled and the cap is LOGGED -- never silently truncated. dense_tokens then snaps
-    #    each side to a multiple of 14 and returns the scale factors that invert that snap.
+    # 3. Run the SCENE at high resolution, capped at scene_max_side -- OR, when
+    #    `adaptive_min_exemplar_tokens` is set, sized (even UPSCALED) so the EXEMPLAR spans at
+    #    least that many stride-14 tokens, still clamped to scene_max_side as the compute ceiling
+    #    (the token-starvation fix: a tiny exemplar on a huge scene no longer starves at the grid).
+    #    Either way the resize is LOGGED, never silent, and dense_tokens then snaps each side to a
+    #    multiple of 14 and returns the scale factors that invert that snap.
     long_side = max(orig_h, orig_w)
-    cap_engaged = long_side > config.scene_max_side
+    if config.adaptive_min_exemplar_tokens is not None:
+        ceiling = config.adaptive_max_side or config.scene_max_side
+        exemplar_short_side = min(ex.w, ex.h)
+        desired_scale = (config.adaptive_min_exemplar_tokens * DINOV2_PATCH) / exemplar_short_side
+        cap_scale = min(desired_scale, ceiling / long_side)
+    else:
+        ceiling = config.scene_max_side
+        cap_scale = ceiling / long_side if long_side > ceiling else 1.0
+    cap_engaged = cap_scale != 1.0
     if cap_engaged:
-        cap_scale = config.scene_max_side / long_side
+        # INTER_AREA is for decimation; OpenCV documents it as degrading to INTER_NEAREST on
+        # magnification, so an upscale (adaptive resolution on a small exemplar, or a fixed_input_
+        # side letterbox bigger than the capped scene) needs INTER_LINEAR instead.
+        interp = cv2.INTER_AREA if cap_scale <= 1.0 else cv2.INTER_LINEAR
         capped = np.ascontiguousarray(
             cv2.resize(
                 image,
                 (max(1, round(orig_w * cap_scale)), max(1, round(orig_h * cap_scale))),
-                interpolation=cv2.INTER_AREA,
+                interpolation=interp,
             ),
             dtype=np.uint8,
         )
         logger.info(
-            "dino-dense: scene {}x{} exceeds scene_max_side={}; downscaling by {:.4f} to {}x{}",
+            "dino-dense: scene {}x{} {} ceiling={}; scaling by {:.4f} to {}x{}",
             orig_w,
             orig_h,
-            config.scene_max_side,
+            "exceeds" if cap_scale < 1.0 else "sized up (adaptive) toward",
+            ceiling,
             cap_scale,
             capped.shape[1],
             capped.shape[0],
         )
     else:
-        cap_scale = 1.0
         capped = image
 
     # 3b. OPT-IN fixed-size letterbox (GPU-OOM fix). When `fixed_input_side` is set, letterbox the
