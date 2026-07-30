@@ -61,6 +61,12 @@ docs/benchmark/research-results.json
 # licence/weights-gated raw numbers as research-results.json, so likewise never committed.
 docs/benchmark/*-tuning-results.json
 docs/benchmark/permethod/
+# The local floor-plan report + its TP/FP/FN overlays EMBED the floor-plan images (licensed data),
+# so they are read locally but never committed. The aggregate stat charts under docs/eval/img/ carry
+# no plan pixels and ARE committed. (build via `pixi run python scripts/build_floorplans_report.py`)
+docs/benchmark/floorplans-report.html
+docs/benchmark/floorplans-overlays/
+docs/benchmark/floorplans-results.md
 # Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
 benchmark.log
 
