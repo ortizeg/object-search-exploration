@@ -13,6 +13,7 @@ Two tiers, deliberately (mirroring ``test_propose_retrieve.py``):
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,7 @@ from object_search.search.owlv2_oneshot import (
     reset_inferencer_cache,
     search,
     select_query_embedding,
+    tile_boxes,
 )
 
 _MODEL_PATH: Path = models.models_dir() / models.MODEL_REGISTRY["owlv2-base-patch16"].dest
@@ -54,11 +56,27 @@ def _isolate_cache() -> object:
     reset_inferencer_cache()
 
 
-def _embeddings(embeds: list[list[float]], boxes: list[list[float]]) -> Owlv2Embeddings:
-    """Build an Owlv2Embeddings from plain lists (the shape the inferencer returns)."""
+def _embeddings(
+    embeds: list[list[float]],
+    boxes: list[list[float]],
+    *,
+    logit_shift: list[float] | None = None,
+    logit_scale: list[float] | None = None,
+) -> Owlv2Embeddings:
+    """Build an Owlv2Embeddings from plain lists (the shape the inferencer returns).
+
+    Defaults ``logit_shift=0`` / ``logit_scale=1`` -- identity calibration -- so every existing
+    test that reasons about raw cosine thresholds is unaffected unless it opts into non-identity
+    values to exercise the calibration step itself.
+    """
+    n = len(embeds)
+    shift = logit_shift if logit_shift is not None else [0.0] * n
+    scale = logit_scale if logit_scale is not None else [1.0] * n
     return Owlv2Embeddings(
         class_embeds=np.asarray(embeds, dtype=np.float32),
         boxes_cxcywh=np.asarray(boxes, dtype=np.float32),
+        logit_shift=np.asarray(shift, dtype=np.float32),
+        logit_scale=np.asarray(scale, dtype=np.float32),
     )
 
 
@@ -110,8 +128,8 @@ def _query_stub() -> Owlv2Embeddings:
 def test_config_defaults() -> None:
     cfg = Owlv2OneshotConfig()
     assert cfg.score_threshold is None
-    assert cfg.calibration == "self-similarity"  # gmm degenerates on OWLv2's compressed cosine
-    assert cfg.retain_frac == 0.94  # the robust sweet spot from the retain_frac sweep
+    assert cfg.calibration == "self-similarity"  # gmm degenerates even on the calibrated score
+    assert cfg.retain_frac == 0.85  # robust sweet spot against the calibrated score (re-tuned)
     assert cfg.query_iou_frac == 0.8
     assert cfg.max_box_area_frac == 0.25  # drop the generic whole-frame box
     assert cfg.nms_iou == 0.3  # tight NMS collapses OWLv2's per-object duplicate patches
@@ -230,6 +248,27 @@ def test_boxes_to_pixels_maps_and_drops_degenerate() -> None:
     assert out[1] is None
 
 
+def test_tile_boxes_single_tile_when_the_image_already_fits() -> None:
+    """Below the tile size on both axes, tiling is a strict no-op: one whole-image tile."""
+    tiles = tile_boxes(orig_w=800, orig_h=600, tile_size=960, overlap_frac=0.2)
+    assert tiles == [BBox(x=0, y=0, w=800, h=600)]
+
+
+def test_tile_boxes_covers_a_large_image_with_no_gaps() -> None:
+    """Above the tile size, tiles overlap and their union reaches every edge with no gap."""
+    orig_w, orig_h, tile_size = 2500, 1200, 960
+    tiles = tile_boxes(orig_w, orig_h, tile_size, overlap_frac=0.2)
+    assert len(tiles) > 1  # genuinely tiled, not the single-tile no-op
+    assert all(t.w <= tile_size and t.h <= tile_size for t in tiles)
+    assert all(t.x2 <= orig_w and t.y2 <= orig_h for t in tiles)  # never out of bounds
+    assert max(t.x2 for t in tiles) == orig_w  # the union reaches the far edge...
+    assert max(t.y2 for t in tiles) == orig_h  # ...on both axes
+    xs = sorted({t.x for t in tiles})
+    assert all(b - a <= tile_size for a, b in pairwise(xs))  # no gap in x
+    ys = sorted({t.y for t in tiles})
+    assert all(b - a <= tile_size for a, b in pairwise(ys))  # no gap in y
+
+
 def test_owlv2_preprocess_tensor_shape_and_side() -> None:
     """The preprocessing produces the fixed [1,3,960,960] tensor and reports the square side."""
     image = np.zeros((80, 120, 3), dtype=np.uint8)  # non-square -> side is max(H, W) = 120
@@ -302,6 +341,162 @@ def test_search_drops_the_generic_whole_frame_box(monkeypatch: pytest.MonkeyPatc
     cap = 0.25 * 200 * 200
     assert all(m.box.area <= cap for m in result.matches)  # no whole-frame box survived
     assert all(c.box.area <= cap for c in result.candidates)
+
+
+def test_search_applies_logit_shift_and_scale_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Calibration is NOT a monotonic rescale: it can flip acceptance vs raw cosine ranking.
+
+    A high-raw-cosine patch (0.9) with a strongly negative ``logit_shift`` must be REJECTED, and a
+    low-raw-cosine patch (0.1) with a strongly positive ``logit_shift`` must be ACCEPTED -- proving
+    ``search`` scores on ``(cosine + logit_shift) * logit_scale``, never on raw cosine alone.
+    """
+    query = _query_stub()  # embedding [1, 0, 0, 0]
+    embeds = [
+        [1.0, 0.0, 0.0, 0.0],  # exemplar-overlap patch, raw cosine 1.0, identity calibration
+        [0.9, 0.43589, 0.0, 0.0],  # raw cosine 0.9, but suppressed by a strongly negative shift
+        [0.1, 0.99499, 0.0, 0.0],  # raw cosine 0.1, but boosted by a strongly positive shift
+    ]
+    boxes = [
+        [0.125, 0.125, 0.15, 0.15],  # -> (10,10,30,30): overlaps the exemplar
+        [0.4, 0.125, 0.1, 0.1],  # -> (70,15,20,20): high raw cosine, should be suppressed
+        [0.6, 0.125, 0.1, 0.1],  # -> (110,15,20,20): low raw cosine, should be boosted
+    ]
+    scene = _embeddings(embeds, boxes, logit_shift=[0.0, -10.0, 10.0])
+    stub = _StubInferencer(query, scene)
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub)
+
+    exemplar = ExemplarBox(box=BBox(x=10, y=10, w=30, h=30))
+    result = search(
+        np.zeros((200, 200, 3), dtype=np.uint8), exemplar, Owlv2OneshotConfig(score_threshold=0.5)
+    )
+
+    assert result.outcome is SearchOutcome.OK
+    kept = {(m.box.x, m.box.y) for m in result.matches}
+    assert (10, 10) in kept  # the exemplar's own match, calibration unaffected
+    assert (70, 15) not in kept  # high raw cosine, but calibrated score is deeply negative
+    assert (110, 15) in kept  # low raw cosine, but calibrated score clears the threshold
+
+
+class _RotationAwareStub:
+    """Crop-sized calls return the Nth entry of ``queries`` (one per rotation); scene otherwise.
+
+    Proves ``rotation_invariant`` actually issues one encode per rotation and scores on the
+    per-patch MAX across them, not just the first (unrotated) query embedding.
+    """
+
+    def __init__(self, queries: list[Owlv2Embeddings], scene: Owlv2Embeddings) -> None:
+        self.queries = queries
+        self.scene = scene
+        self.crop_calls = 0
+
+    def embed_image(self, image: npt.NDArray[np.uint8]) -> Owlv2Embeddings:
+        h, w = int(image.shape[0]), int(image.shape[1])
+        if max(h, w) <= 50:
+            q = self.queries[self.crop_calls % len(self.queries)]
+            self.crop_calls += 1
+            return q
+        return self.scene
+
+
+def test_search_rotation_invariant_scores_on_the_max_across_rotations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rotation_invariant finds a match that only a ROTATED query embedding would score highly.
+
+    Rotation 0's query is [1,0,0,0] (matches the exemplar patch only); rotation 1's query is
+    [0,1,0,0] (orthogonal to rotation 0, matches a second scene patch only). With
+    rotation_invariant=False that second patch scores cosine 0 and is rejected; with it True the
+    per-patch MAX across all four rotated query embeddings picks it up.
+    """
+    query_rot0 = _query_stub()  # embedding [1, 0, 0, 0]
+    query_rot1 = _embeddings([[0.0, 1.0, 0.0, 0.0]], [[0.5, 0.5, 1.0, 1.0]])
+    scene = _embeddings(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        [
+            [0.125, 0.125, 0.15, 0.15],  # -> (10,10,30,30): overlaps the exemplar
+            [0.6, 0.125, 0.1, 0.1],  # -> (110,15,20,20): only rotation 1's query matches
+        ],
+    )
+    exemplar = ExemplarBox(box=BBox(x=10, y=10, w=30, h=30))
+    config_off = Owlv2OneshotConfig(score_threshold=0.5, rotation_invariant=False)
+    config_on = Owlv2OneshotConfig(score_threshold=0.5, rotation_invariant=True)
+
+    stub_off = _RotationAwareStub([query_rot0], scene)
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub_off)
+    result_off = search(np.zeros((200, 200, 3), dtype=np.uint8), exemplar, config_off)
+    assert stub_off.crop_calls == 1  # no rotations -> a single query encode
+    assert {(m.box.x, m.box.y) for m in result_off.matches} == {(10, 10)}  # patch1 not found
+
+    stub_on = _RotationAwareStub([query_rot0, query_rot1, query_rot0, query_rot0], scene)
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub_on)
+    result_on = search(np.zeros((200, 200, 3), dtype=np.uint8), exemplar, config_on)
+    assert stub_on.crop_calls == 4  # one query encode per rotation
+    kept_on = {(m.box.x, m.box.y) for m in result_on.matches}
+    assert (10, 10) in kept_on
+    assert (110, 15) in kept_on  # found via rotation 1's query, the whole point of the feature
+
+
+class _TileAwareStub:
+    """Crop-sized calls return ``query``; tile-sized calls return the Nth entry of ``tiles``."""
+
+    def __init__(self, query: Owlv2Embeddings, tiles: list[Owlv2Embeddings]) -> None:
+        self.query = query
+        self.tiles = tiles
+        self.tile_calls = 0
+
+    def embed_image(self, image: npt.NDArray[np.uint8]) -> Owlv2Embeddings:
+        h, w = int(image.shape[0]), int(image.shape[1])
+        if max(h, w) <= 50:
+            return self.query
+        t = self.tiles[self.tile_calls % len(self.tiles)]
+        self.tile_calls += 1
+        return t
+
+
+def test_search_tile_large_scenes_merges_candidates_across_tiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tile_large_scenes finds an instance that lives entirely in a SECOND tile.
+
+    The scene (1500x800) is wider than OWLv2's native 960px tile, so ``tile_boxes`` splits it into
+    two overlapping tiles at x=0 and x=540 (960px wide, 20% overlap). Tile 0's encode carries only
+    the exemplar's own patch; tile 1's carries a second instance tile 0 never saw. Both tiles must
+    be encoded and their candidates merged for both instances to appear in one result. The
+    exemplar box (30x30) is small on purpose -- its crop must stay <=50px so the stub can tell a
+    query-crop encode apart from a 960x800 tile encode by size alone.
+    """
+    query = _query_stub()
+    patch = _embeddings([[1.0, 0.0, 0.0, 0.0]], [[0.1, 0.1, 0.1, 0.1]])  # -> local (48,48,96,96)
+    stub = _TileAwareStub(query, [patch, patch])
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub)
+
+    scene = np.zeros((800, 1500, 3), dtype=np.uint8)
+    exemplar = ExemplarBox(box=BBox(x=48, y=48, w=30, h=30))  # near tile 0's patch, crop <=50px
+    config = Owlv2OneshotConfig(score_threshold=0.5, tile_large_scenes=True)
+    result = search(scene, exemplar, config)
+
+    assert result.outcome is SearchOutcome.OK
+    assert stub.tile_calls == 2  # exactly two scene-sized encodes, one per tile
+    kept = {(m.box.x, m.box.y) for m in result.matches}
+    assert (48, 48) in kept  # tile 0's own patch (the exemplar)
+    assert (588, 48) in kept  # tile 1's patch (48 + tile 1's x-origin 540), a second pass only
+
+
+def test_search_tile_large_scenes_is_a_no_op_below_the_tile_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scene that already fits within 960x960 is encoded once, tiling on or off."""
+    stub = _StubInferencer(_query_stub(), _scene_stub())
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub)
+
+    scene = np.zeros((200, 200, 3), dtype=np.uint8)
+    exemplar = ExemplarBox(box=BBox(x=10, y=10, w=30, h=30))
+    config = Owlv2OneshotConfig(score_threshold=0.5, tile_large_scenes=True)
+    result = search(scene, exemplar, config)
+
+    assert result.outcome is SearchOutcome.OK
+    assert len(result.matches) == 4  # identical to the untiled result (see the first search test)
+    assert stub.calls[1] == (200, 200)  # exactly one scene-sized encode, not one per "tile"
 
 
 # ------------------------------------------------- model-free: the model-absent error path

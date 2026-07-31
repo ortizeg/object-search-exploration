@@ -48,8 +48,8 @@ where `dino-dense` fails outright and `ncc` holds up — is the decisive propert
 | 1 | `propose-retrieve` | **0.459** | 0.459 | 0.55 | 0.39 | 13/14 |
 | 2 | `ncc` | 0.248 | 0.164 | 0.57 | 0.16 | 28/28 |
 | 3 | `sparse-geo` | 0.219 | 0.217 | 0.44 | 0.15 | 28/28 |
-| 4 | `mosse` | 0.213 | 0.201 | 0.74 | 0.12 | 28/28 |
-| 5 | `owlv2-oneshot` | 0.180 | 0.115 | 0.11 | 0.58 | 28/28 |
+| 4 | `owlv2-oneshot` | 0.215 | 0.154 | 0.15 | 0.40 | 28/28 |
+| 5 | `mosse` | 0.213 | 0.201 | 0.74 | 0.12 | 28/28 |
 | 6 | `dino-dense` | 0.147 | 0.092 | 0.13 | 0.17 | 13/14 |
 
 **Windows** (tuned F1 @ IoU 0.5, test):
@@ -61,25 +61,42 @@ where `dino-dense` fails outright and `ncc` holds up — is the decisive propert
 | 3 | `mosse` | 0.148 | 0.077 | 0.23 | 0.11 | 28/28 |
 | 4 | `propose-retrieve` | 0.048 | 0.048 | 0.07 | 0.04 | 13/14 |
 | 5 | `dino-dense` | 0.047 | 0.048 | 0.03 | 0.11 | 13/14 |
-| 6 | `owlv2-oneshot` | 0.023 | 0.022 | 0.01 | 0.24 | 28/28 |
+| 6 | `owlv2-oneshot` | 0.025 | 0.025 | 0.01 | 0.21 | 28/28 |
 
 **`propose-retrieve` wins doors; `ncc` wins windows** — and `propose-retrieve` *collapses* on windows
 (0.048), so the best method is class-dependent. **`ncc` is the most reliable all-rounder**: 2nd on
 doors, 1st on windows, full 28/28 coverage, and (below) uniformly robust to symbol size.
 
+> **`owlv2-oneshot`'s row above reflects a later, dedicated improvement pass**
+> ([`docs/reports/owlv2-floorplans-improvement.md`](../reports/owlv2-floorplans-improvement.md)) that
+> exported and applied OWLv2's own learned score-calibration terms — `owlv2-oneshot` moved from #5 to
+> #4 on doors (F1 0.180 → 0.215) and improved marginally on windows (0.023 → 0.025), still last there.
+> The other five methods' rows are unchanged from the original sweep, not re-run in that pass.
+
 ## What the tuning + fixes bought
 
 - **Domain tuning matters most for `ncc`/`mosse`:** `ncc` window F1 nearly doubled vs default
-  (0.226 → 0.403); door 0.164 → 0.248. `owlv2` door 0.115 → 0.180.
+  (0.226 → 0.403); door 0.164 → 0.248. `owlv2` door 0.154 → 0.215 (post-calibration; the tuning
+  grid here is `max_box_area_frac` × `query_iou_frac`, layered on top of the score-calibration fix
+  described next, not a substitute for it).
 - **`ncc`'s selected scale set is a single scale `[1.0]`.** Floor-plan symbols are drawn at a fixed
   size, so the default multi-scale search (0.75–1.3) manufactured false positives; tightening it is
   the single biggest domain-specific lever. `mosse` reached **0.74 precision** on doors the same way.
-- **`owlv2` over-detects** (recall high, precision ~0.01–0.11, counting error MAE 38–107); capping
-  `max_box_area_frac=0.1` helped but did not fix it. Not usable here without heavier calibration.
+- **`owlv2` over-detects, but genuinely less than before a dedicated calibration pass.** Exporting
+  and applying OWLv2's own learned `logit_shift`/`logit_scale` (query-independent, per-patch score
+  recalibration) roughly halved false-positive counts on the worst plans and improved F1 on doors
+  by +20% (tuned) — capping `max_box_area_frac=0.1` alone, tried earlier, did not fix this; the
+  root cause was a scoring/ranking problem, not a box-geometry filter gap. Full account in
+  [`docs/reports/owlv2-floorplans-improvement.md`](../reports/owlv2-floorplans-improvement.md).
+  Windows barely move — still the harder class for every method here, `owlv2` included.
 - **The `dino-dense` letterbox works:** coverage 0/28 → 13/14 (OOM failures 28 → 1). Still not
   competitive, but no longer broken.
 
 ## Where each method fails — recall by symbol size (doors, test, 1 exemplar)
+
+> `owlv2-oneshot`'s row below predates its calibration pass (see the note above) and has not been
+> recomputed at the new default — treat it as directional for the other five methods, not current
+> for `owlv2-oneshot`.
 
 | method | small | medium | large |
 |---|---|---|---|
@@ -114,8 +131,13 @@ visible at a glance: `dino-dense` leaves the small doors yellow (missed), while 
   classes and all symbol sizes, full coverage, and it benefits most from the (cheap) domain tuning.
 - **Prefer `propose-retrieve` specifically for doors** if a door-only workflow justifies loading the
   proposal + retrieval models.
-- **Deprioritise `dino-dense` and `owlv2` here** — the former is blind to small symbols, the latter
-  floods false positives.
+- **`owlv2-oneshot` improved but does not change the recommendation.** Post-calibration it is now
+  competitive with `sparse-geo`/`mosse` on doors (still well behind `propose-retrieve`/`ncc`) and
+  remains last on windows. Still not recommended over `ncc` here, but no longer the clearest
+  "avoid" — it is the best all-rounder on the four non-floor-plan regimes measured elsewhere (see
+  `docs/reports/owlv2-floorplans-improvement.md`), so it is a real option outside this specific
+  target domain.
+- **Deprioritise `dino-dense` here** — blind to small symbols (recall 0.00 on small doors).
 
 ## Reproducing
 

@@ -100,13 +100,17 @@ Captured here and in the `owlv2_oneshot.py` docstring (mirrored verbatim so the 
 This realizes the previously-deferred source-research Method 4 (exemplar-conditioned detectors) with
 a permissive, ONNX-exportable model after T-Rex2 / Rex-Omni were rejected on licensing.
 
-- **Tiled / multi-scale inference** to lift small-object recall on large canvases past the fixed
-  960 input. **This is the primary remaining weakness**: the EASY (chipset) regime downscales chips
-  in a 6000×4000 scene below OWLv2's effective resolution, so precision stays ~0.08 there while the
-  textured regimes reach F1 0.78–0.83.
-- **Export OWLv2's learned `logit_scale` / `logit_shift`** and apply them before thresholding, so
-  scene scores are the model's calibrated logits rather than raw (compressed) cosine — may make the
-  distribution genuinely bimodal and remove the need for self-similarity anchoring.
+- **`tile_large_scenes` — BUILT AND MEASURED, off by default, not recommended.** Splitting a large
+  scene into overlapping 960px tiles was hypothesized to fix the fixed-960-input recall ceiling on
+  large canvases (the EASY/chipset regime's known weakness). Measured across six regimes (see
+  `docs/reports/owlv2-floorplans-improvement.md`): it regressed 5 of 6, INCLUDING EASY itself
+  (F1 -20%, recall completely unchanged — every extra tile added false positives, not one new true
+  positive). Kept as a documented opt-in for further investigation, not as a recommendation.
+- **`rotation_invariant` — BUILT AND MEASURED, off by default, not recommended.** Scoring on the max
+  cosine across 0/90/180/270-degree query rotations was hypothesized to help mirrored/rotated
+  floor-plan symbols. Measured: helped VARIED (+5%) and WINDOW (+12%, still near-zero absolute) but
+  regressed DOOR badly (-26%, one of the two floor-plan target-domain regimes) and EASY (-20%). Kept
+  as a documented opt-in, not as a recommendation.
 - **Text-prompt fusion** — OWLv2 also takes text queries; combining the drawn exemplar with an
   optional label would use both modalities (the exploration's Milestone 2 seam).
 - **Query embedding from multiple exemplars** — average several drawn boxes for a more robust query.
@@ -114,9 +118,15 @@ a permissive, ONNX-exportable model after T-Rex2 / Rex-Omni were rejected on lic
 - **Runtime-verify the OWLv2 contract in `.planning/research/MODELS.md`** (the sha256 is now pinned
   from the first verified export).
 
-> Implemented in the improvement pass (`docs/reports/owlv2-improvement.md`): the HF
+> Implemented in the first improvement pass (`docs/reports/owlv2-improvement.md`): the HF
 > `embed_image_query` distinctiveness selection (was a correctness bug), the whole-frame-box filter,
 > and self-similarity calibration.
+>
+> Implemented in the floor-plans improvement pass (`docs/reports/owlv2-floorplans-improvement.md`):
+> exporting and applying OWLv2's own learned `logit_shift`/`logit_scale` (a genuine, robust win
+> across every regime measured, not just the floor-plan target domain) and re-tuning `retain_frac`
+> for the new score scale (0.94 → 0.85). `rotation_invariant` and `tile_large_scenes` were also
+> built and measured in that pass but are NOT recommended (see above).
 
 ## `marker-conditioned` (Exploration 2 — marker → pointed-at object, Milestone 2)
 
