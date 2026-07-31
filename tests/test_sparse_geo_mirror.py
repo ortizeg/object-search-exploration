@@ -167,14 +167,37 @@ def test_mirrored_instance_is_absent_with_the_flag_off() -> None:
     assert not _found_mirror(result.matches), "the default must not accept a reflected fit"
 
 
-def test_mirrored_instance_is_recovered_with_the_flag_on() -> None:
+def test_mirrored_instance_is_recovered_under_pairwise_4dof() -> None:
+    scene = _mirrored_scene()
+    exemplar = ExemplarBox(box=BBox(x=20, y=20, w=64, h=64))
+    result = search(
+        scene,
+        exemplar,
+        SparseGeoConfig(min_inliers=4, voting_mode="pairwise-4dof", allow_mirror=True),
+    )
+    assert _found_mirror(result.matches), "the reflected instance must be recovered end to end"
+
+
+def test_mirror_handling_is_inert_under_single_4dof() -> None:
+    """The measured limit of ``allow_mirror``, pinned so it is not mistaken for a bug.
+
+    ``single-4dof`` derives a pose from ONE correspondence's keypoint frame, so it needs the
+    scene keypoint's orientation to be a predictable function of the crop keypoint's. Under a
+    reflection that relation would be ``alpha = scene_angle + crop_angle`` -- but SIFT assigns
+    orientation from the dominant gradient-histogram peak, and on a mirrored patch that
+    assignment is **not** mirror-consistent. Measured on this scene: of the correspondences
+    landing inside the mirrored copy only ~17% are geometrically correct (vs ~35% for the
+    orientation-preserving copy), and their reflected ``alpha`` values scatter across ~80-280
+    degrees instead of clustering. So the reflected votes never accumulate into a peak and the
+    flag cannot help this voting mode.
+
+    ``pairwise-4dof`` (the test above) fits a pose from two point pairs and never reads an
+    orientation, which is exactly why it is the mode where mirror handling works.
+    """
     scene = _mirrored_scene()
     exemplar = ExemplarBox(box=BBox(x=20, y=20, w=64, h=64))
     result = search(scene, exemplar, SparseGeoConfig(min_inliers=4, allow_mirror=True))
-    assert _found_mirror(result.matches), (
-        "with allow_mirror the reflected instance must be recovered end to end -- if this fails, "
-        "the loss is upstream of _is_degenerate (descriptors or voting), which is the finding"
-    )
+    assert not _found_mirror(result.matches)
 
 
 # ------------------------------------------------------------------------ config contracts

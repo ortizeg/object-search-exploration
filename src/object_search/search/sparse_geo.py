@@ -59,7 +59,10 @@ Post-processing (exact)
 - Votes are cast in 4-DoF pose space ``(centre_x, centre_y, log_scale, theta)`` with **soft
   binning** -- each vote lands in the 2 nearest bins per dimension (16 bins in 4-DoF, Lowe's
   boundary fix) -- and **theta wraps circularly** so a vote near 0/360 degrees reaches the
-  adjacent bin rather than the opposite end of the histogram.
+  adjacent bin rather than the opposite end of the histogram. A 5th **chirality** bin dimension
+  separates reflected from proper hypotheses; it is a hard split (never soft-binned, never
+  stepped by the peak de-duplication neighbourhood) because a mirrored pose is a different
+  transform, not an adjacent one.
 - Bin widths are Lowe's verified §7.3 values: **30 degrees** orientation, **factor 2** scale,
   **0.25 x the max projected crop dimension** location. The location bin width is
   **scale-dependent**, which is why votes live in a **dict keyed by the bin tuple**, not a
@@ -71,6 +74,11 @@ Post-processing (exact)
 - Degeneracy rejection uses **scale plausibility** and **mirror rejection** (a negative
   determinant of the fitted 2x2 linear part). Shear and aspect distortion are deliberately NOT
   tested: a 4-DoF similarity has neither by construction, so those tests are vacuous.
+- **Mirror acceptance is opt-in** (``allow_mirror``, default off) for symbols drawn as genuine
+  mirror images -- a door's opposite hinge hand. It is deliberately an *end-to-end* switch, not
+  just a relaxed gate: voting also casts a reflected pose hypothesis per correspondence, because
+  otherwise a mirrored instance's correspondences predict a wrong pose, never form a peak, and
+  never reach the degeneracy gate at all. The scale bound and ``min_inliers`` still gate it.
 - **Duplicate suppression (post-verification).** Hough de-duplicates in *pose* space (the 3^4
   neighbourhood), but two peaks in genuinely different pose bins can still map the exemplar to
   nearly the **same scene box** -- a duplicate the benchmark scores as 1 TP + 1 FP (EVAL-16). A
@@ -266,6 +274,19 @@ class SparseGeoConfig(BaseModel):
             "stronger box by MORE than this IoU are dropped, keeping the higher-inlier one. Set "
             "high (0.5) so only true duplicates are merged and legitimately adjacent/touching "
             "instances survive."
+        ),
+    )
+    allow_mirror: bool = Field(
+        default=False,
+        description=(
+            "Accept MIRRORED instances (a reflected fit, negative determinant) as real. Off by "
+            "default. When on, voting casts an additional reflected pose hypothesis per "
+            "correspondence AND the degeneracy gate stops rejecting a negative determinant -- "
+            "both are needed, because a mirrored instance's correspondences otherwise vote at a "
+            "wrong pose and never reach the gate. The scale-plausibility bound and the "
+            "min_inliers floor are untouched and remain the gates. Aimed at symbols drawn as "
+            "genuine mirror images (a door's opposite hinge hand); the cost is admitting "
+            "false positives from bad reflected fits, so pair it with a tighter min_inliers."
         ),
     )
     min_scale: float = Field(
@@ -636,6 +657,11 @@ class _Vote:
     indices of the correspondences that produced this vote -- one for the single/translation
     modes, two for a pairwise vote -- so the winning peak knows exactly which correspondences to
     hand to RANSAC.
+
+    ``reflect`` is the vote's **chirality**: False for the orientation-preserving hypothesis,
+    True for the mirrored one (only ever cast when ``allow_mirror`` is set). It is part of the
+    histogram bin key, so a reflected pose and a proper pose at the same location/scale/angle are
+    genuinely different hypotheses that accumulate separately rather than pooling into one bin.
     """
 
     px: float
@@ -643,6 +669,7 @@ class _Vote:
     log_scale: float
     theta_deg: float
     members: tuple[int, ...]
+    reflect: bool = False
 
 
 def _proper_similarity_2pt(
@@ -657,7 +684,8 @@ def _proper_similarity_2pt(
     ``a = s*e^{i*theta}`` carries scale and rotation, ``b`` the translation. Two point pairs
     determine it exactly: ``a = (q2 - q1) / (p2 - p1)``, ``b = q1 - a*p1``. Returns ``None`` when
     the two source points coincide (an undetermined transform). This is the *proper* branch only;
-    the reflection branch lives in the RANSAC layer, where the mirror check needs it.
+    :func:`_reflected_similarity_2pt` is its mirrored sibling, cast alongside it when
+    ``allow_mirror`` is set.
     """
     dp = complex(p2[0] - p1[0], p2[1] - p1[1])
     if abs(dp) < 1e-12:
@@ -665,6 +693,29 @@ def _proper_similarity_2pt(
     dq = complex(q2[0] - q1[0], q2[1] - q1[1])
     a = dq / dp
     b = complex(q1[0], q1[1]) - a * complex(p1[0], p1[1])
+    return a, b
+
+
+def _reflected_similarity_2pt(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    q1: tuple[float, float],
+    q2: tuple[float, float],
+) -> tuple[complex, complex] | None:
+    """Solve the REFLECTED 4-DoF similarity ``q = a*conj(p) + b`` from two point pairs.
+
+    The mirrored twin of :func:`_proper_similarity_2pt`. Conjugating the source flips handedness,
+    so ``a = (q2 - q1) / conj(p2 - p1)`` and ``b = q1 - a*conj(p1)``. Written out here rather than
+    reached for from ``_two_point_models`` (which returns 2x3 matrices for the RANSAC layer)
+    because voting needs the complex coefficients and this file favours a readable repeat over an
+    indirection -- the two branches now sit side by side, which is exactly the point.
+    """
+    dp = complex(p2[0] - p1[0], p2[1] - p1[1])
+    if abs(dp) < 1e-12:
+        return None
+    dq = complex(q2[0] - q1[0], q2[1] - q1[1])
+    a = dq / dp.conjugate()
+    b = complex(q1[0], q1[1]) - a * complex(p1[0], p1[1]).conjugate()
     return a, b
 
 
@@ -692,6 +743,36 @@ def _vote_single_4dof(corr: _Correspondence, centre: tuple[float, float]) -> _Vo
     px = corr.scene_xy[0] + s * (cos_t * dxl - sin_t * dyl)
     py = corr.scene_xy[1] + s * (sin_t * dxl + cos_t * dyl)
     return _Vote(px, py, float(np.log(s)), theta, (corr.index,))
+
+
+def _vote_single_4dof_reflected(corr: _Correspondence, centre: tuple[float, float]) -> _Vote | None:
+    """The MIRRORED twin of :func:`_vote_single_4dof` -- one correspondence, reflected pose.
+
+    Under a reflection ``q = a*conj(p) + b`` a local frame direction ``phi`` maps to
+    ``alpha - phi``, so matching the crop keypoint's orientation to the scene keypoint's gives
+    ``alpha = scene_angle + crop_angle`` (a SUM, where the proper branch takes the difference).
+    The offset from the keypoint to the object centre is likewise conjugated before being scaled
+    and rotated: ``predicted = scene_xy + a * conj(centre - crop_xy)``.
+
+    Without this branch a mirrored instance's correspondences each predict a *wrong* centre, so
+    they scatter instead of accumulating and no peak is ever hypothesized for that instance --
+    which is why relaxing the ``det < 0`` gate downstream cannot recover it on its own.
+    """
+    if corr.crop_scale is None or corr.crop_angle is None:
+        raise ValueError("single-4dof voting requires framed keypoints (scale + orientation)")
+    if corr.scene_scale is None or corr.scene_angle is None:
+        raise ValueError("single-4dof voting requires framed keypoints (scale + orientation)")
+    if corr.crop_scale <= 0.0 or corr.scene_scale <= 0.0:
+        return None
+    s = corr.scene_scale / corr.crop_scale
+    alpha = corr.scene_angle + corr.crop_angle
+    rad = np.radians(alpha)
+    cos_a, sin_a = float(np.cos(rad)), float(np.sin(rad))
+    dxl = centre[0] - corr.crop_xy[0]
+    dyl = centre[1] - corr.crop_xy[1]
+    px = corr.scene_xy[0] + s * (cos_a * dxl + sin_a * dyl)
+    py = corr.scene_xy[1] + s * (sin_a * dxl - cos_a * dyl)
+    return _Vote(px, py, float(np.log(s)), alpha, (corr.index,), reflect=True)
 
 
 def _vote_translation_2dof(corr: _Correspondence, centre: tuple[float, float]) -> _Vote:
@@ -723,6 +804,7 @@ def _cast_votes(
     has_frame: bool,
     pairwise_cap: int,
     rng: np.random.Generator,
+    allow_mirror: bool = False,
 ) -> _VoteCast:
     """Turn correspondences into pose votes under the selected voting mode (METHOD-04a).
 
@@ -731,6 +813,11 @@ def _cast_votes(
     ``translation-2dof`` and ``pairwise-4dof`` work for any backend; ``pairwise-4dof`` samples
     correspondence pairs up to ``pairwise_cap`` (it is O(n^2)) and records the cap so a slow run
     is explained rather than mysterious.
+
+    ``allow_mirror`` casts an **additional** reflected pose hypothesis alongside each proper one,
+    doubling the vote count for ``single-4dof`` and ``pairwise-4dof``. It is a deliberate no-op for
+    ``translation-2dof``, which pins rotation AND chirality at the identity: there is no reflected
+    translation-only pose, and emitting a duplicate would only inflate the vote weight.
     """
     if mode == "single-4dof":
         if not has_frame:
@@ -740,6 +827,8 @@ def _cast_votes(
                 "'pairwise-4dof' instead."
             )
         single = [_vote_single_4dof(corr, centre) for corr in correspondences]
+        if allow_mirror:
+            single += [_vote_single_4dof_reflected(corr, centre) for corr in correspondences]
         return _VoteCast(tuple(v for v in single if v is not None), 0, False)
 
     if mode == "translation-2dof":
@@ -762,16 +851,31 @@ def _cast_votes(
         pairs = sorted(sampled)  # sort for determinism regardless of set iteration order
         capped = True
 
+    centre_c = complex(centre[0], centre[1])
     votes: list[_Vote] = []
     for i, j in pairs:
         ci, cj = correspondences[i], correspondences[j]
         model = _proper_similarity_2pt(ci.crop_xy, cj.crop_xy, ci.scene_xy, cj.scene_xy)
-        if model is None:
+        if model is not None and abs(model[0]) > 0.0:
+            a, b = model
+            predicted = a * centre_c + b
+            votes.append(
+                _Vote(
+                    predicted.real,
+                    predicted.imag,
+                    float(np.log(abs(a))),
+                    float(np.degrees(np.angle(a))),
+                    (ci.index, cj.index),
+                )
+            )
+        if not allow_mirror:
             continue
-        a, b = model
-        if abs(a) <= 0.0:
+        # The mirrored twin: q = a*conj(p) + b, so the centre is conjugated before mapping.
+        reflected = _reflected_similarity_2pt(ci.crop_xy, cj.crop_xy, ci.scene_xy, cj.scene_xy)
+        if reflected is None or abs(reflected[0]) <= 0.0:
             continue
-        predicted = a * complex(centre[0], centre[1]) + b
+        a, b = reflected
+        predicted = a * centre_c.conjugate() + b
         votes.append(
             _Vote(
                 predicted.real,
@@ -779,6 +883,7 @@ def _cast_votes(
                 float(np.log(abs(a))),
                 float(np.degrees(np.angle(a))),
                 (ci.index, cj.index),
+                reflect=True,
             )
         )
     return _VoteCast(tuple(votes), len(pairs), capped)
@@ -799,21 +904,30 @@ def _soft_neighbours(value: float, width: float) -> tuple[tuple[int, float], tup
 
 def _accumulate_votes(
     votes: tuple[_Vote, ...], base_location_width: float
-) -> tuple[dict[tuple[int, int, int, int], float], dict[tuple[int, int, int, int], list[int]]]:
+) -> tuple[
+    dict[tuple[int, int, int, int, int], float], dict[tuple[int, int, int, int, int], list[int]]
+]:
     """Accumulate votes into a hash-table pose histogram with soft binning and circular theta.
 
     Bins are Lowe's §7.3 widths: 30 degrees orientation, a factor of 2 in scale (so log-scale is
     binned by ``log 2``), and ``0.25 x max projected crop dimension`` location. The location bin
     width is **scale-dependent** -- ``base_location_width * 2**scale_bin`` -- which is exactly why
-    votes live in a **dict keyed by ``(x, y, scale, theta)``**, not a dense array. Each vote is
-    soft-assigned into the 2 nearest bins per dimension (16 bins in 4-DoF), and **theta wraps
-    circularly** modulo the 12 orientation bins so a vote near 0/360 reaches the adjacent bin.
+    votes live in a **dict keyed by ``(x, y, scale, theta, chirality)``**, not a dense array. Each
+    vote is soft-assigned into the 2 nearest bins per dimension (16 bins in 4-DoF), and **theta
+    wraps circularly** modulo the 12 orientation bins so a vote near 0/360 reaches the adjacent
+    bin.
+
+    **Chirality is a hard 5th bin dimension, never soft-binned** -- a pose is either reflected or
+    it is not, and pooling the two would let two half-clusters describing different transforms
+    jointly clear ``min_votes``. With ``allow_mirror`` off every vote is proper, so the partition
+    (and therefore the whole default output) is exactly what it was before the dimension existed.
     """
     log_two = float(np.log(_SCALE_BIN_FACTOR))
-    weight: dict[tuple[int, int, int, int], float] = {}
-    members: dict[tuple[int, int, int, int], list[int]] = {}
+    weight: dict[tuple[int, int, int, int, int], float] = {}
+    members: dict[tuple[int, int, int, int, int], list[int]] = {}
 
     for vote in votes:
+        chirality = 1 if vote.reflect else 0
         # theta: circular, modulo _N_THETA_BINS bins of _THETA_BIN_DEG each.
         theta = vote.theta_deg % 360.0
         t_coord = theta / _THETA_BIN_DEG
@@ -837,26 +951,27 @@ def _accumulate_votes(
                         w = s_w * t_w * x_w * y_w
                         if w <= 0.0:
                             continue
-                        key = (x_idx, y_idx, s_idx, t_idx)
+                        key = (x_idx, y_idx, s_idx, t_idx, chirality)
                         weight[key] = weight.get(key, 0.0) + w
                         members.setdefault(key, []).extend(vote.members)
     return weight, members
 
 
-def _neighbourhood(key: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+def _neighbourhood(key: tuple[int, int, int, int, int]) -> list[tuple[int, int, int, int, int]]:
     """The 3^4 bins adjacent to ``key`` (inclusive), with theta wrapping circularly.
 
     Used to de-duplicate peaks: adjacent bins describe the same cluster and must not both be
     reported. Location and scale simply step +/-1; theta steps +/-1 modulo the 12 orientation
-    bins so the neighbourhood of bin 0 includes bin 11.
+    bins so the neighbourhood of bin 0 includes bin 11. **Chirality does not step**: a reflected
+    pose is not "adjacent" to a proper one, so the two never suppress each other.
     """
-    x, y, s, t = key
-    out: list[tuple[int, int, int, int]] = []
+    x, y, s, t, r = key
+    out: list[tuple[int, int, int, int, int]] = []
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
             for ds in (-1, 0, 1):
                 for dt in (-1, 0, 1):
-                    out.append((x + dx, y + dy, s + ds, (t + dt) % _N_THETA_BINS))
+                    out.append((x + dx, y + dy, s + ds, (t + dt) % _N_THETA_BINS, r))
     return out
 
 
@@ -873,8 +988,8 @@ class _Peak:
 
 
 def _enumerate_peaks(
-    weight: dict[tuple[int, int, int, int], float],
-    members: dict[tuple[int, int, int, int], list[int]],
+    weight: dict[tuple[int, int, int, int, int], float],
+    members: dict[tuple[int, int, int, int, int], list[int]],
     min_votes: int,
     base_location_width: float,
 ) -> tuple[_Peak, ...]:
@@ -890,13 +1005,13 @@ def _enumerate_peaks(
         key=lambda key: (-weight[key], key),
     )
     accepted: list[_Peak] = []
-    accepted_keys: set[tuple[int, int, int, int]] = set()
+    accepted_keys: set[tuple[int, int, int, int, int]] = set()
     log_two = float(np.log(_SCALE_BIN_FACTOR))
     for key in candidates:
         if any(neighbour in accepted_keys for neighbour in _neighbourhood(key)):
             continue
         accepted_keys.add(key)
-        x_idx, y_idx, s_idx, t_idx = key
+        x_idx, y_idx, s_idx, t_idx, _chirality = key
         loc_w = base_location_width * (_SCALE_BIN_FACTOR**s_idx)
         unique_members = tuple(sorted(set(members[key])))
         accepted.append(
@@ -1038,7 +1153,12 @@ def _ransac_similarity(
     return _RansacResult(best_model, best_mask, max(best_count, 0), tuple(sample_log))
 
 
-def _is_degenerate(model: _SimilarityModel, min_scale: float, max_scale: float) -> tuple[bool, str]:
+def _is_degenerate(
+    model: _SimilarityModel,
+    min_scale: float,
+    max_scale: float,
+    allow_mirror: bool = False,
+) -> tuple[bool, str]:
     """Reject implausible fits: **scale plausibility** and **mirror** (negative determinant).
 
     Shear and aspect distortion are DELIBERATELY not tested. A 4-DoF similarity has neither by
@@ -1046,8 +1166,12 @@ def _is_degenerate(model: _SimilarityModel, min_scale: float, max_scale: float) 
     shear or aspect test could only ever pass and would be a vacuous control. Those tests would
     become meaningful only if a full affine model were ever added as a config option; until then
     the two checks that can actually fire are the determinant sign and the scale bound.
+
+    ``allow_mirror`` disables **only** the determinant check. The scale bound is independent and
+    still fires on a reflected model, so a mirrored fit at an implausible scale is still rejected
+    -- relaxing chirality must not become a way to smuggle a bad fit past the scale gate.
     """
-    if model.det < 0.0:
+    if model.det < 0.0 and not allow_mirror:
         return True, "mirror/reflection (negative determinant of the linear part)"
     if not (min_scale <= model.scale <= max_scale):
         return True, f"implausible scale {model.scale:.3f} outside [{min_scale}, {max_scale}]"
@@ -1123,7 +1247,9 @@ def _verify_peaks(
         degenerate, reason = (
             (True, "no model")
             if result.model is None
-            else _is_degenerate(result.model, config.min_scale, config.max_scale)
+            else _is_degenerate(
+                result.model, config.min_scale, config.max_scale, config.allow_mirror
+            )
         )
         diag_peaks.append(
             HoughPeak(
@@ -1175,7 +1301,9 @@ def _verify_sequential_ransac(
         )
         if result.model is None or result.n_inliers < config.min_inliers:
             break
-        degenerate, _ = _is_degenerate(result.model, config.min_scale, config.max_scale)
+        degenerate, _ = _is_degenerate(
+            result.model, config.min_scale, config.max_scale, config.allow_mirror
+        )
         inlier_global = remaining[result.inlier_mask]
         remaining = remaining[~result.inlier_mask]  # remove this model's inliers and continue
         box = _model_to_box(result.model, exemplar, width, height)
@@ -1347,6 +1475,7 @@ def search(
         has_frame=backend.has_frame,
         pairwise_cap=config.pairwise_cap,
         rng=rng,
+        allow_mirror=config.allow_mirror,
     )
 
     # 6. Decompose the correspondences into instance hypotheses -- generalized Hough voting

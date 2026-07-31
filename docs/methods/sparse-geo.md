@@ -146,6 +146,7 @@ defaults, ranges, and help text):
 | `ransac_iters` | int ≥ 1 | 200 | RANSAC iterations per peak (2-point samples) |
 | `ransac_thresh_px` | f > 0 | 3.0 | inlier reprojection-error threshold in scene pixels |
 | `nms_iou` | 0 < f ≤ 1 | 0.4 | duplicate-instance suppression: drop a box overlapping a stronger one by more than this IoU |
+| `allow_mirror` | bool | `false` | accept MIRRORED instances: voting also casts a reflected pose hypothesis AND the `det < 0` gate stops rejecting. Measured **inert under `single-4dof`** (SIFT orientations are not mirror-consistent); effective only with `pairwise-4dof` |
 | `min_scale` / `max_scale` | f > 0 | 0.2 / 5.0 | scale-plausibility bounds for degeneracy rejection |
 | `seed` | int ≥ 0 | 0 | the REAL seed for `np.random.default_rng` (NOT `cv2.setRNGSeed`) |
 
