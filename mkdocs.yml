@@ -94,6 +94,8 @@ nav:
       - Benchmark results: benchmark/results.md
       - Limitations: LIMITATIONS.md
       - Datasets: DATASETS.md
+      - Research datasets: eval/research-datasets.md
+      - "Floor plans — findings": eval/floorplans-findings.md
   - Explorations:
       - Marker-conditioned: explorations/marker-conditioned.md
       - Milestone 2: MILESTONE-2.md
