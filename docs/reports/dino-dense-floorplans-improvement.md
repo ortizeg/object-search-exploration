@@ -123,6 +123,52 @@ config trade a practitioner should make deliberately, not a new default).
 `adaptive_max_side`), default `None` — byte-identical elsewhere. The recommended floor-plan-door
 override is `fixed_input_side=1568, adaptive_min_exemplar_tokens=6, adaptive_max_side=1568`.
 
+### Pass 4 — sliding-window / tiled inference — tried, REGRESSED at every tile size tested
+
+The next lever the task brief scoped, "try only if (a)/(b) insufficient" — and given Pass 3's gain
+is real but modest (val pooled F1 flat), it was worth escalating to. Implemented a genuine
+opt-in resolution policy, structurally separate from the single-resize path above: split the
+scene into overlapping `tile_side` × `tile_side` windows (`tile_overlap_frac`, default 0.2),
+run DINOv2 on **each tile at native pixel resolution** (never resized — the point being that
+resolution stops being a shared, capped budget at all), and merge every tile's upsampled
+similarity map into one scene-resolution canvas by **per-pixel max** (so an instance seen by
+more than one overlapping tile keeps its best-scoring read, and — since the merge is a
+continuous array, not a stitched mosaic — coalesces into one connected blob rather than
+fragmenting at a tile seam). Threshold calibration pooled every tile's token-resolution values.
+Config-validated as mutually exclusive with `fixed_input_side`/`adaptive_min_exemplar_tokens`
+(a separate resolution policy, not a modifier on the single-resize one). Fully implemented,
+unit-tested (pure-geometry tests for the tile-origin math plus a stub-driven end-to-end test),
+and green on `pixi run quality` before being measured.
+
+| `tile_side` | test F1 | small | medium | large | wall-clock (28 imgs) |
+|---|---|---|---|---|---|
+| letterbox 1120 (production baseline, for reference) | 0.113 | 0.083 | 0.193 | 0.214 | 90s |
+| **letterbox 1568 + adaptive(6, ceil 1568) (the winner, for reference)** | **0.144** | **0.143** | **0.215** | **0.357** | 421s |
+| 784px tiles | 0.053 | 0.071 | 0.089 | 0.071 | 60s |
+| 1120px tiles | 0.078 | 0.119 | 0.119 | 0.071 | 78s |
+| 1568px tiles | 0.072 | 0.083 | 0.119 | 0.071 | 99s |
+
+Every tile size REGRESSED relative to the winner, and two of the three (784, 1120) even
+underperform the plain 1120 letterbox baseline that Pass 3 was meant to beat. Non-monotonic in
+tile size (1120 beats both its smaller and larger neighbours) — not a "just tune the tile size"
+problem. **Working hypothesis:** DINOv2's self-attention lets every token attend to the *entire*
+input in one forward pass; single-resize, however coarse, gives the model one coherent whole-
+scene view. A tile, however native its resolution, only ever sees its own crop — floor-plan
+symbols read partly from surrounding structural context (walls, adjacent symbols, room layout),
+and fragmenting that context into independent per-tile forward passes apparently costs the
+method more than the native-resolution gain buys back, at every tile size tried. This matches a
+known failure mode of tiled ViT inference generally (per-tile context starvation), not something
+specific to a tuning miss here.
+
+**Reverted — not shipped** (`git checkout HEAD` on `dino_dense.py`/`tests/test_dino_dense.py`
+cleanly discarded the tile fields, the `_tile_origins`/`_tiled_similarity` helpers, and the
+tests, back to the Pass 3 committed state). A more promising follow-on, **not attempted this
+session**: a coarse-to-fine two-stage cascade — one full-scene low-res forward pass to propose
+candidate regions (à la `propose-retrieve`'s architecture), then a second, high-res forward pass
+on *only* the small number of candidate crops, each still large enough to carry real surrounding
+context. That would buy native-resolution detail for the interesting regions without ever
+asking DINOv2 to make a decision from a context-starved tile.
+
 ## Box-shaping / over-prediction — tried, REVERTED (two variants)
 
 The qualitative symptom reported going into this session: a visually clean, similarly-sized match

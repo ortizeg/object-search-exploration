@@ -247,8 +247,16 @@ cannot drift from the code.
 Deferred deliberately (mirrored verbatim from the module docstring and
 `docs/ROBUSTNESS-BACKLOG.md`); none is built in this phase:
 
-- **Sliding-window backbone inference** for very large scenes, so localisation no longer degrades
-  at the resolution cap.
+- **Sliding-window backbone inference — tried on floorplans-door, REGRESSED at every tile size
+  tested.** Overlapping NATIVE-resolution tiles, merged by per-pixel max, were implemented and
+  measured against the adaptive+letterbox winner (test F1 0.144): 784px tiles → F1 0.053, 1120px
+  → 0.078, 1568px → 0.072 — all worse, two of three even worse than the plain 1120px letterbox
+  baseline (0.113–0.117) it was meant to beat. Working hypothesis: DINOv2's self-attention needs
+  the WHOLE input in one forward pass; a tile only sees its own crop, so tiling trades resolution
+  for a real loss of global context that costs more than the resolution buys on this domain.
+  Reverted (not shipped) — see
+  [`../reports/dino-dense-floorplans-improvement.md`](../reports/dino-dense-floorplans-improvement.md)
+  for the full log and a coarse-to-fine two-stage alternative that would not fragment context.
 - **Adaptive input resolution — LANDED (opt-in), floor-plans-door.** `adaptive_min_exemplar_tokens`
   + `adaptive_max_side` size the scene so the exemplar spans ≥ N stride-14 tokens, clamped to a
   ceiling, instead of a fixed `scene_max_side`. Still deferred as the CHIPSET fix it was originally

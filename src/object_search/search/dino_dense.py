@@ -121,8 +121,18 @@ ROBUSTNESS BACKLOG
 Deferred deliberately (mirrored in ``docs/methods/dino-dense.md`` and
 ``docs/ROBUSTNESS-BACKLOG.md``); none is built in this phase:
 
-- **Sliding-window backbone inference** for very large scenes, so localisation no longer
-  degrades at the resolution cap.
+- **Sliding-window backbone inference -- tried on floorplans-door, REGRESSED at every tile
+  size tested.** Tiling the scene into overlapping windows and running DINOv2 on each at NATIVE
+  pixel resolution (never resized), merging similarity maps by per-pixel max, was implemented and
+  measured against the adaptive+letterbox winner (test F1 0.144): tile_side 784px -> F1 0.053,
+  1120px -> 0.078, 1568px -> 0.072 -- all clearly worse, and 784/1120 even worse than the plain
+  1120 letterbox baseline (0.113-0.117) it was meant to beat. Working hypothesis: DINOv2's self-
+  attention lets every token see the WHOLE input in one forward pass; a tile only ever sees its
+  own crop, so splitting the scene trades resolution for a REAL loss of global context, and on
+  this domain the context loss costs more than the resolution buys. Reverted (not shipped) --
+  see docs/reports/dino-dense-floorplans-improvement.md for the full log and a coarse-to-fine
+  two-stage alternative (propose candidates at low res, re-embed only those crops at high res)
+  that would not fragment DINOv2's context and is a more promising next attempt.
 - **Adaptive input resolution -- LANDED (opt-in), floor-plans-door.** ``adaptive_min_exemplar_
   tokens`` + ``adaptive_max_side`` size the scene so the exemplar spans >= N stride-14 tokens,
   clamped to a ceiling, instead of a fixed ``scene_max_side``. Still deferred as the CHIPSET fix
