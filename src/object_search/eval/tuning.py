@@ -50,8 +50,9 @@ from object_search.provenance import current_git_sha, repo_root
 from object_search.search import get_method
 
 # The six methods, tuned in registry order. Kept here (not imported from benchmark) so the tuning
-# run set is edited in one obvious place.
-_DEFAULT_METHODS: tuple[str, ...] = (
+# run set is edited in one obvious place. Public because the CLI's ``--methods`` option needs the
+# same default to fall back to, and a private cross-module import would be worse than exporting it.
+DEFAULT_TUNING_METHODS: tuple[str, ...] = (
     "ncc",
     "mosse",
     "sparse-geo",
@@ -323,7 +324,7 @@ def run_domain_tuning(
     dataset: str,
     research_root: Path | str,
     *,
-    methods: Sequence[str] = _DEFAULT_METHODS,
+    methods: Sequence[str] = DEFAULT_TUNING_METHODS,
     exemplar_count: int = 1,
     iou_threshold: float = 0.5,
     seed: int = 0,

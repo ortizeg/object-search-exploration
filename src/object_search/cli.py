@@ -114,6 +114,31 @@ def fetch_datasets(
     dataset_registry.fetch_all(force=force)
 
 
+def _parse_methods(raw: str | None) -> tuple[str, ...]:
+    """Parse ``--methods a,b`` into a validated key tuple; ``None`` -> the full default set.
+
+    Every key is validated through :func:`object_search.search.get_method` **at the CLI boundary**,
+    so a typo exits non-zero here rather than producing a tuning report with an empty ``methods``
+    list that looks like a successful run of nothing.
+    """
+    from object_search.eval.tuning import DEFAULT_TUNING_METHODS
+    from object_search.search import UnknownMethodError, get_method
+
+    if raw is None:
+        return DEFAULT_TUNING_METHODS
+    keys = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if not keys:
+        typer.echo("--methods was empty; give at least one registry key", err=True)
+        raise typer.Exit(code=1)
+    for key in keys:
+        try:
+            get_method(key)
+        except UnknownMethodError as exc:
+            typer.echo(str(exc.args[0]), err=True)
+            raise typer.Exit(code=1) from exc
+    return keys
+
+
 @app.command("tune-floorplans")
 def tune_floorplans(
     dataset: Annotated[
@@ -123,19 +148,34 @@ def tune_floorplans(
         Path, typer.Option("--research-root", help="Base dir of converted datasets.")
     ] = Path("datasets"),
     exemplars: Annotated[int, typer.Option("--exemplars", help="Exemplars per query.")] = 1,
+    methods: Annotated[
+        str | None,
+        typer.Option(
+            "--methods",
+            help="Comma-separated registry keys to tune (default: all six).",
+        ),
+    ] = None,
 ) -> None:
     """Tune each method's acceptance threshold on the floor-plan val split, freeze, report on test.
 
     Selects the argmax-F1 @ IoU 0.5 config per method on ``val``, freezes it, and scores both the
     frozen and the default config on ``test`` -- the tuned-vs-default table. Requires
     ``fetch-datasets`` to have converted the floor-plan tree first.
+
+    ``--methods`` narrows the run set to a subset (e.g. ``--methods sparse-geo``). Tuning all six
+    on CPU is prohibitive -- OWLv2/DINOv2/FastSAM dominate the wall-clock -- so a single-method
+    sweep is what makes an iterate/measure loop on one method practical. Omitting the option keeps
+    the full six-method default, so the committed report shape is unchanged.
     """
     from object_search.eval.tuning import run_domain_tuning
 
     keys = ("floorplans-door", "floorplans-window") if dataset == "both" else (dataset,)
+    selected = _parse_methods(methods)
     for key in keys:
         out = f"docs/benchmark/{key}-tuning-results.json"
-        report = run_domain_tuning(key, research_root, exemplar_count=exemplars, out=out)
+        report = run_domain_tuning(
+            key, research_root, methods=selected, exemplar_count=exemplars, out=out
+        )
         typer.echo(f"{key}: tuned {len(report['methods'])} method(s) -> {out}")
         for entry in report["methods"]:
             typer.echo(
