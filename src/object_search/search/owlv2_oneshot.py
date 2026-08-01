@@ -128,16 +128,19 @@ Mirrored in ``docs/methods/owlv2-oneshot.md`` and ``docs/ROBUSTNESS-BACKLOG.md``
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from object_search.inference import models, resolve_providers
-from object_search.inference.owlv2 import OWLV2_IMAGE_SIZE, OWLv2Inferencer
+from object_search.inference.owlv2 import OWLV2_IMAGE_SIZE, OWLV2_PATCH, OWLv2Inferencer
 from object_search.schemas import (
     BBox,
     Candidate,
@@ -149,7 +152,7 @@ from object_search.schemas import (
     SearchOutcome,
     SearchResult,
 )
-from object_search.search.common import calibration, nms
+from object_search.search.common import calibration, nms, viz
 from object_search.search.registry import register_method
 
 # -- Method-level constants (properties of the METHOD, not of a query, so not config fields) --
@@ -161,6 +164,7 @@ _EXEMPLAR_IOU = 0.5  # a match overlapping the exemplar by >= this is the exempl
 _EXEMPLAR_SELF_IOU = 0.3  # looser overlap used to read off the exemplar's own self-match score
 _TILE_SIZE = OWLV2_IMAGE_SIZE  # tile side matches OWLv2's native input -- no extra downscaling
 _TILE_OVERLAP_FRAC = 0.2  # stride = _TILE_SIZE * (1 - this); keeps a symbol near a seam intact
+_PATCH_GRID = OWLV2_IMAGE_SIZE // OWLV2_PATCH  # 60 -- every tile is always resized to 960x960
 _EPS = 1e-12  # guards a zero-norm division; a genuinely zero embedding is background, not a match
 
 
@@ -266,6 +270,16 @@ class Owlv2OneshotConfig(BaseModel):
         default=0,
         ge=0,
         description="random_state for the gmm calibrator (its only genuinely stochastic step).",
+    )
+    debug_dir: str | None = Field(
+        default=None,
+        description=(
+            "Local debugging aid, not a search parameter: when set, dump one PNG per algorithm "
+            "step (exemplar crop, per-tile raw-cosine/logit_shift/logit_scale/calibrated-score "
+            "heatmaps, valid/accepted/final box overlays) into this directory, so a practitioner "
+            "can see WHY a query behaved the way it did rather than just the final matches. "
+            "None ⇒ zero extra cost (the default, always)."
+        ),
     )
 
 
@@ -430,6 +444,42 @@ def tile_boxes(orig_w: int, orig_h: int, tile_size: int, overlap_frac: float) ->
     ]
 
 
+# -- debug-dump helpers (config.debug_dir only; zero cost, zero call sites, when it is None) -----
+
+
+def _debug_write_heatmap(out_dir: Path, name: str, values: npt.NDArray[np.float32]) -> None:
+    """Reshape one tile's flat per-patch ``values`` to the ``_PATCH_GRID`` square and write a PNG.
+
+    Uses ``common.viz``'s shared viridis colormap (one source of truth for "how heatmaps are
+    coloured"), so this is a thin disk-writing wrapper, not a second colormap implementation.
+    """
+    grid = values.reshape(_PATCH_GRID, _PATCH_GRID).astype(np.float64)
+    payload = viz.heatmap_png_b64(grid)
+    (out_dir / f"{name}.png").write_bytes(base64.b64decode(payload.png_b64))
+
+
+def _debug_write_boxes(
+    out_dir: Path,
+    name: str,
+    scene: npt.NDArray[np.uint8],
+    boxes: list[BBox],
+    scores: list[float],
+    exemplar: BBox,
+) -> None:
+    """Overlay ``boxes`` (scored) on ``scene``; write a PNG. Reuses ``viz.draw_matches``."""
+    matches = tuple(
+        Match(box=b, score=s, is_exemplar=b.iou(exemplar) >= _EXEMPLAR_IOU)
+        for b, s in zip(boxes, scores, strict=True)
+    )
+    canvas = viz.draw_matches(scene, matches, exemplar=ExemplarBox(box=exemplar))
+    cv2.imwrite(str(out_dir / f"{name}.png"), canvas)
+
+
+def _debug_write_text(out_dir: Path, name: str, lines: tuple[str, ...]) -> None:
+    """Write one small text summary alongside the images -- numbers a heatmap can't carry."""
+    (out_dir / f"{name}.txt").write_text("\n".join(lines) + "\n")
+
+
 def _empty_or_error(
     outcome: SearchOutcome,
     note: str,
@@ -496,6 +546,10 @@ def search(
         )
 
     orig_h, orig_w = int(image.shape[0]), int(image.shape[1])
+    debug_dir: Path | None = None
+    if config.debug_dir is not None:
+        debug_dir = Path(config.debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Encode the exemplar crop as a query image (same vision graph as the scene). If
     #    config.rotation_invariant, also encode the crop rotated 90/180/270 degrees -- OWLv2 patch
@@ -510,6 +564,13 @@ def search(
         if config.rotation_invariant
         else (crop,)
     )
+    if debug_dir is not None:
+        for i, rotated_crop in enumerate(rotated_crops):
+            angle = i * 90
+            cv2.imwrite(
+                str(debug_dir / f"01_exemplar_crop_rot{angle:03d}.png"),
+                np.ascontiguousarray(rotated_crop, dtype=np.uint8),
+            )
 
     # 2. Select one query embedding PER rotation: the most-distinctive covering patch (HF
     #    heuristic) run independently on each rotated crop.
@@ -543,12 +604,20 @@ def search(
     tile_logit_scale: list[npt.NDArray[np.float32]] = []
     pixel_boxes: list[BBox | None] = []
     tile_area: list[float] = []
-    for tile in scene_tiles:
+    for tile_index, tile in enumerate(scene_tiles):
         tile_image = np.ascontiguousarray(image[tile.y : tile.y2, tile.x : tile.x2], dtype=np.uint8)
         tile_embed = inferencer.embed_image(tile_image)
         tile_class_embeds.append(tile_embed.class_embeds)
         tile_logit_shift.append(tile_embed.logit_shift)
         tile_logit_scale.append(tile_embed.logit_scale)
+        if debug_dir is not None:
+            # logit_shift/logit_scale are query-independent -- dumped here, at the scene encode,
+            # rather than step 4, so they read as "what THIS tile's own content looks like to the
+            # model" independent of any query.
+            shift_name = f"02_tile{tile_index}_logit_shift"
+            scale_name = f"02_tile{tile_index}_logit_scale"
+            _debug_write_heatmap(debug_dir, shift_name, tile_embed.logit_shift)
+            _debug_write_heatmap(debug_dir, scale_name, tile_embed.logit_scale)
         for local_box in boxes_to_pixels(tile_embed.boxes_cxcywh, tile.w, tile.h):
             global_box = (
                 None
@@ -579,6 +648,14 @@ def search(
     ]
     cosine_all = np.maximum.reduce(per_rotation_cosine).astype(np.float32)
     scores_all = np.asarray((cosine_all + logit_shift_all) * logit_scale_all, dtype=np.float32)
+    if debug_dir is not None:
+        patches_per_tile = _PATCH_GRID * _PATCH_GRID
+        for tile_index in range(len(scene_tiles)):
+            lo, hi = tile_index * patches_per_tile, (tile_index + 1) * patches_per_tile
+            _debug_write_heatmap(debug_dir, f"03_tile{tile_index}_raw_cosine", cosine_all[lo:hi])
+            _debug_write_heatmap(
+                debug_dir, f"04_tile{tile_index}_calibrated_score", scores_all[lo:hi]
+            )
 
     # 5. Drop degenerate boxes AND the generic whole-frame boxes (area > max_box_area_frac of the
     #    box's SOURCE TILE, not the whole scene -- OWLv2 emits one whole-frame box per forward pass,
@@ -600,6 +677,8 @@ def search(
             metrics={"n_patches": float(scores_all.size), "n_valid": 0.0},
         )
     scores = np.asarray(kept_scores, dtype=np.float32)
+    if debug_dir is not None:
+        _debug_write_boxes(debug_dir, "05_valid_boxes", image, boxes, kept_scores, exemplar.box)
 
     # 6. Calibrate/threshold. self-similarity anchors the cut to the exemplar's OWN self-match
     #    score (self_score * retain_frac): OWLv2 cosine is compressed near 1.0 and not bimodal, so
@@ -623,6 +702,20 @@ def search(
         seed=config.seed,
     )
     threshold = calib.threshold
+    if debug_dir is not None:
+        _debug_write_text(
+            debug_dir,
+            "06_threshold_summary",
+            (
+                f"strategy: {strategy}",
+                f"reason: {calib.reason}",
+                f"self_score: {self_score:.4f}",
+                f"threshold: {threshold:.4f}",
+                f"score_max: {float(scores.max()):.4f}",
+                f"score_mean: {float(scores.mean()):.4f}",
+                f"n_valid_boxes: {len(boxes)}",
+            ),
+        )
 
     # 7. Split into accepted (matches) and sub-threshold candidates (EVAL-08), then NMS the accepted
     #    set to collapse the several neighbouring patches OWLv2 fires on one object. METHOD-12:
@@ -646,6 +739,23 @@ def search(
         [float(scores[i]) for i in kept],
         exemplar.box,
     )
+    if debug_dir is not None:
+        _debug_write_boxes(
+            debug_dir,
+            "07_accepted_prenms",
+            image,
+            [boxes[i] for i in accepted],
+            [float(scores[i]) for i in accepted],
+            exemplar.box,
+        )
+        _debug_write_boxes(
+            debug_dir,
+            "08_matches_final",
+            image,
+            [m.box for m in matches],
+            [m.score for m in matches],
+            exemplar.box,
+        )
 
     # 8. Diagnostics carry the top candidate boxes (the UI's debug overlay) and the pre-NMS accepted
     #    count; latency attributes the query encode vs the scene encode SEPARATELY (EVAL-11).

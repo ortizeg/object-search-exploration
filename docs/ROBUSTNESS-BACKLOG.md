@@ -127,6 +127,14 @@ a permissive, ONNX-exportable model after T-Rex2 / Rex-Omni were rejected on lic
 > across every regime measured, not just the floor-plan target domain) and re-tuning `retain_frac`
 > for the new score scale (0.94 → 0.85). `rotation_invariant` and `tile_large_scenes` were also
 > built and measured in that pass but are NOT recommended (see above).
+>
+> A follow-up in the same pass added `config.debug_dir` (per-algorithm-step debug image/heatmap
+> dumps, off by default) and, using it, found the residual floor-plan false positives are large
+> room/wall-sized rectangles rather than symbol-sized boxes -- widening the `tune-floorplans`
+> `max_box_area_frac` grid down to CAD-symbol scale (0.005-0.5) fixed windows cleanly (+91% tuned
+> F1) but exposed val-selection noise on doors with only 56 validation plans (tuned F1 moved from
+> 0.215 to 0.171 -- not a regression to revert, the honestly-reported result of a wider, more
+> correct search space). Full trial tables in the report.
 
 ## `marker-conditioned` (Exploration 2 — marker → pointed-at object, Milestone 2)
 

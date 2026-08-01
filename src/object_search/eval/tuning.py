@@ -109,9 +109,14 @@ _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
     # owlv2-oneshot -- max_box_area_frac (drop boxes bigger than this fraction of the image; the
     # whole-frame-box filter) crossed with query_iou_frac (how wide the query-patch set is), the two
     # knobs that most move floor-plan precision/recall. retain_frac stays at the method default.
+    # The grid was widened DOWN from {0.1, 0.25, 0.5} after a debug-image inspection (see
+    # docs/reports/owlv2-floorplans-improvement.md) showed the residual floor-plan false positives
+    # are large room/wall-sized rectangles, not small symbol-sized boxes -- CAD-symbol scale is a
+    # few percent of the plan at most (docs/eval/floorplans-findings.md's dataset statistics), so
+    # 0.1 (10%) was still far too generous a cap for this domain and the old grid never tried lower.
     "owlv2-oneshot": tuple(
         {"max_box_area_frac": area, "query_iou_frac": query}
-        for area in (0.1, 0.25, 0.5)
+        for area in (0.005, 0.007, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5)
         for query in (0.6, 0.8, 0.9)
     ),
 }

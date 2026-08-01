@@ -162,6 +162,7 @@ cannot drift from the code.
 | `nms_iou` | `0.3` | Post-detection NMS IoU. OWLv2 fires several overlapping patches on one object, so a tight `0.3` collapses those duplicates (a big precision win) while distinct instances, which rarely overlap that much, survive. |
 | `max_candidates` | `50` | How many top-scoring patches (with raw scores) to keep as sub-threshold candidates for an offline PR sweep (EVAL-08), regardless of the threshold. |
 | `seed` | `0` | `random_state` for the gmm calibrator (only used if `calibration="gmm"`). |
+| `debug_dir` | `null` | Local debugging aid, not a search parameter. When set, dump one PNG/txt per algorithm step (exemplar crop, per-tile `logit_shift`/`logit_scale`/raw-cosine/calibrated-score heatmaps, valid/pre-NMS/final box overlays, threshold summary) into this directory. `null` (the default) costs nothing. |
 
 ## Licence — OWLv2 is Apache-2.0 (the whole point of choosing it)
 

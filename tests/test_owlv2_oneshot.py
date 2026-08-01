@@ -31,6 +31,7 @@ from object_search.schemas import BBox, ExemplarBox, SearchOutcome
 from object_search.search import has_method, owlv2_oneshot
 from object_search.search.ncc import NCCConfig
 from object_search.search.owlv2_oneshot import (
+    _PATCH_GRID,
     Owlv2OneshotConfig,
     _iou_with_unit_box,
     _l2_normalize,
@@ -497,6 +498,64 @@ def test_search_tile_large_scenes_is_a_no_op_below_the_tile_size(
     assert result.outcome is SearchOutcome.OK
     assert len(result.matches) == 4  # identical to the untiled result (see the first search test)
     assert stub.calls[1] == (200, 200)  # exactly one scene-sized encode, not one per "tile"
+
+
+def test_search_debug_dir_writes_one_artifact_per_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config.debug_dir dumps a PNG/txt per algorithm step -- real OWLv2's 3600-patch grid.
+
+    Uses a full 60x60-patch synthetic scene (not the 8-patch stubs above) because
+    ``_debug_write_heatmap`` reshapes to ``_PATCH_GRID`` square -- the same architectural
+    constant every real OWLv2 tile actually produces (see the module's ``_PATCH_GRID`` docstring).
+    """
+    rng = np.random.default_rng(0)
+    n = _PATCH_GRID * _PATCH_GRID
+    embeds = rng.normal(size=(n, 4)).astype(np.float32)
+    embeds[0] = [1.0, 0.0, 0.0, 0.0]  # the exemplar's own patch: exact cosine match to the query
+    boxes = rng.uniform(0.05, 0.95, size=(n, 4)).astype(np.float32)
+    boxes[:, 2:] = 0.05  # small w/h -> well under the whole-frame area cap
+    boxes[0] = [0.125, 0.125, 0.15, 0.15]  # -> (10,10,30,30) at side 200, overlaps the exemplar
+    scene_embed = _embeddings(embeds.tolist(), boxes.tolist())
+    stub = _StubInferencer(_query_stub(), scene_embed)
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub)
+
+    debug_dir = tmp_path / "debug"
+    exemplar = ExemplarBox(box=BBox(x=10, y=10, w=30, h=30))
+    config = Owlv2OneshotConfig(score_threshold=0.5, debug_dir=str(debug_dir))
+    result = search(np.zeros((200, 200, 3), dtype=np.uint8), exemplar, config)
+
+    assert result.outcome is SearchOutcome.OK
+    written = {p.name for p in debug_dir.iterdir()}
+    assert written == {
+        "01_exemplar_crop_rot000.png",
+        "02_tile0_logit_shift.png",
+        "02_tile0_logit_scale.png",
+        "03_tile0_raw_cosine.png",
+        "04_tile0_calibrated_score.png",
+        "05_valid_boxes.png",
+        "06_threshold_summary.txt",
+        "07_accepted_prenms.png",
+        "08_matches_final.png",
+    }
+    summary = (debug_dir / "06_threshold_summary.txt").read_text()
+    assert "self_score: 1.0000" in summary  # the exemplar's own patch, cosine 1.0 to itself
+
+
+def test_search_debug_dir_off_by_default_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``debug_dir=None`` (the default) never touches the filesystem for debug artifacts."""
+    stub = _StubInferencer(_query_stub(), _scene_stub())
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub)
+
+    exemplar = ExemplarBox(box=BBox(x=10, y=10, w=30, h=30))
+    result = search(
+        np.zeros((200, 200, 3), dtype=np.uint8), exemplar, Owlv2OneshotConfig(score_threshold=0.5)
+    )
+
+    assert result.outcome is SearchOutcome.OK
+    assert not any(tmp_path.iterdir())  # nothing written anywhere
 
 
 # ------------------------------------------------- model-free: the model-absent error path
