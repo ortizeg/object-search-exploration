@@ -31,6 +31,13 @@ Pre-processing (exact)
   the returned floats and shifts the peak value (PITFALLS.md 1.8), so a cropped search would
   silently break "same input => identical results". A search restriction, if ever added,
   must join the config (and therefore the config hash).
+- Template bank: the exemplar crop is rotated by every angle in ``angles_deg`` (each rotated
+  variant carrying its own eroded mask, see :func:`_rotated_bank`) and, when ``mirror=True``
+  (**off** by default), each of those is also horizontally flipped with ``cv2.flip(..., 1)`` --
+  template and mask flipped together, after the rotation. Mirroring is a separate knob from the
+  bank width on purpose: a reflection is not in the rotation group, so a mirrored instance (the
+  archetype: a floor-plan door drawn with the opposite swing hand) is unreachable by *any* bank
+  width and only an explicitly flipped template can find it.
 
 Post-processing (exact)
 -----------------------
@@ -176,6 +183,17 @@ class NCCConfig(BaseModel):
             "9 over-samples (adds false peaks, no recall gain), 5 leaves gaps."
         ),
     )
+    mirror: bool = Field(
+        default=False,
+        description=(
+            "Also correlate the horizontally MIRRORED template at every angle in the bank. Off by "
+            "default. A mirror is not a rotation, so no rotation bank -- however wide -- can ever "
+            "cover it; turn this on for domains whose instances come in bilaterally symmetric "
+            "pairs, the archetype being a floor-plan door drawn with the opposite swing hand. It "
+            "doubles the correlation count (and so roughly the latency) and doubles the number of "
+            "candidate templates that can throw a false peak, so it is a per-domain choice."
+        ),
+    )
     threshold: float | None = Field(
         default=None,
         description="Fixed accept threshold on the raw NCC score. None => use the calibrator.",
@@ -248,13 +266,16 @@ class _LevelPeak:
     z_score: float
     level: float
     angle: float
+    mirrored: bool = False
 
 
 def _rotated_bank(
     template: npt.NDArray[np.uint8],
     angles_deg: tuple[float, ...],
-) -> Iterator[tuple[float, npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]:
-    """Yield ``(angle, template, mask)`` for each requested angle.
+    *,
+    mirror: bool = False,
+) -> Iterator[tuple[float, bool, npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]:
+    """Yield ``(angle, mirrored, template, mask)`` for each requested angle.
 
     At 0 degrees the template is passed through untouched with ``mask=None``. For a non-zero
     angle the crop is warped into its axis-aligned bounding box, whose corners are then
@@ -263,26 +284,53 @@ def _rotated_bank(
     **mask** is warped alongside and eroded to kill the interpolated fringe, and passed to
     ``matchTemplate`` so only the real pixels count. (Chosen over inscribing an axis-aligned
     rectangle, which would throw away real template pixels near the corners.)
+
+    With ``mirror=True`` every one of those variants also yields a horizontally flipped sibling
+    (``cv2.flip(..., 1)``), template and mask flipped **together**, after the rotation. A
+    reflection is not in the rotation group, so a mirrored instance -- a floor-plan door drawn
+    with the opposite swing hand -- is unreachable by any bank width; only an explicitly flipped
+    template can correlate with it. Flipping the already-eroded mask is valid because a flip is a
+    pure reflection on the pixel lattice: it permutes pixels without resampling, so the mask still
+    marks exactly the real (non-fabricated) template pixels and the corner-honesty invariant of
+    PITFALLS.md 1.6 carries over unchanged. The flag is yielded alongside the angle so callers can
+    tell a mirrored variant apart (the diagnostics heatmap must not pick one).
     """
     h, w = template.shape[:2]
     for angle in angles_deg:
         if angle == 0.0:
-            yield 0.0, template, None
-            continue
-        rot = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
-        cos, sin = abs(float(rot[0, 0])), abs(float(rot[0, 1]))
-        new_w = int(h * sin + w * cos)
-        new_h = int(h * cos + w * sin)
-        rot[0, 2] += new_w / 2.0 - w / 2.0
-        rot[1, 2] += new_h / 2.0 - h / 2.0
-        warped = cv2.warpAffine(
-            template, rot, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=0
-        )
-        mask = cv2.warpAffine(
-            np.full((h, w), 255, np.uint8), rot, (new_w, new_h), flags=cv2.INTER_NEAREST
-        )
-        mask = cv2.erode(mask, np.ones((3, 3), np.uint8))
-        yield angle, np.ascontiguousarray(warped, dtype=np.uint8), np.asarray(mask, dtype=np.uint8)
+            warped: npt.NDArray[np.uint8] = template
+            mask: npt.NDArray[np.uint8] | None = None
+        else:
+            rot = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+            cos, sin = abs(float(rot[0, 0])), abs(float(rot[0, 1]))
+            new_w = int(h * sin + w * cos)
+            new_h = int(h * cos + w * sin)
+            rot[0, 2] += new_w / 2.0 - w / 2.0
+            rot[1, 2] += new_h / 2.0 - h / 2.0
+            warped = np.ascontiguousarray(
+                cv2.warpAffine(
+                    template, rot, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=0
+                ),
+                dtype=np.uint8,
+            )
+            eroded = cv2.erode(
+                cv2.warpAffine(
+                    np.full((h, w), 255, np.uint8), rot, (new_w, new_h), flags=cv2.INTER_NEAREST
+                ),
+                np.ones((3, 3), np.uint8),
+            )
+            mask = np.asarray(eroded, dtype=np.uint8)
+        yield angle, False, warped, mask
+        if mirror:
+            flipped_mask: npt.NDArray[np.uint8] | None = None
+            if mask is not None:
+                flipped_mask = np.ascontiguousarray(cv2.flip(mask, 1), dtype=np.uint8)
+            yield (
+                angle,
+                True,
+                np.ascontiguousarray(cv2.flip(warped, 1), dtype=np.uint8),
+                flipped_mask,
+            )
 
 
 def _correlate(
@@ -407,7 +455,11 @@ def search(
         level_count = 0
         # 3. Build the rotated-template bank (default: 7 angles over +/-35 deg). This is what
         #    recovers rotated repeats; a caller who knows the scene is axis-aligned sets (0.0,).
-        for angle, template, mask in _rotated_bank(base_template, config.angles_deg):
+        #    With mirror=True (off by default) each angle also yields a horizontally flipped
+        #    sibling -- a reflection no rotation can reach (e.g. the opposite door swing hand).
+        for angle, mirrored, template, mask in _rotated_bank(
+            base_template, config.angles_deg, mirror=config.mirror
+        ):
             tmpl_h, tmpl_w = template.shape[:2]
             if level_img.shape[0] < tmpl_h or level_img.shape[1] < tmpl_w:
                 continue
@@ -417,8 +469,8 @@ def search(
             response = _correlate(level_img, template, mask)
             inference_ms += (perf_counter() - t_corr) * 1000.0
 
-            # Keep the raw response nearest scale 1.0 (unrotated) for the diagnostics heatmap.
-            if angle == 0.0 and abs(scale - 1.0) < heatmap_gap:
+            # Keep the raw response nearest scale 1.0 (unrotated, unmirrored) for the heatmap.
+            if angle == 0.0 and not mirrored and abs(scale - 1.0) < heatmap_gap:
                 heatmap_gap = abs(scale - 1.0)
                 heatmap_response = response
 
@@ -456,7 +508,7 @@ def search(
                 except ValueError:
                     continue  # a rounded box that fell entirely off-image; drop it
                 raw = float(response[peak.y, peak.x])
-                records.append(_LevelPeak(box, raw, float(peak.score), scale, angle))
+                records.append(_LevelPeak(box, raw, float(peak.score), scale, angle, mirrored))
                 level_count += 1
 
         per_level_counts[f"peaks@{scale:g}"] = float(level_count)

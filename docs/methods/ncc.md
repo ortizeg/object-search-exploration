@@ -56,6 +56,16 @@ correlate with any uniform region. The fix is a **warped mask** passed to `match
 by one pixel to kill the interpolated fringe — chosen over inscribing an axis-aligned rectangle
 because that would throw away real template pixels near the corners (PITFALLS §1.6).
 
+**`mirror` (default `False`) — a separate knob, not a wider bank.** With `mirror=True` every
+variant above also yields a horizontally flipped sibling (`cv2.flip(…, 1)`), template and mask
+flipped **together**, after the rotation. A reflection is not in the rotation group, so a mirrored
+instance is unreachable by *any* bank width — the archetype is a floor-plan door drawn with the
+opposite swing hand. Flipping the already-eroded mask is valid because a flip is a pure reflection
+on the pixel lattice: it permutes pixels without resampling, so the mask still marks exactly the
+real (non-fabricated) pixels and the §1.6 corner-honesty invariant carries over unchanged. It
+doubles the correlation count (≈ doubles latency) *and* doubles how many candidate templates can
+throw a false peak, so it is a per-domain choice rather than a default.
+
 ### 4. Correlate over the FULL scene at every level
 
 `cv2.matchTemplate(scene_level, template_level, cv2.TM_CCOEFF_NORMED)`. **Never** crop the
@@ -138,6 +148,10 @@ around preprocess / matchTemplate / postprocess (EVAL-11).
   mean and divides by its L2 norm internally, so a separate mean/std normalization would be
   double-counting. There are no ImageNet-style constants anywhere in this method.
 - **Search extent:** the **full** scene, always (see step 4).
+- **Template bank:** the crop is rotated by every angle in `angles_deg` (each rotated variant
+  carrying its own eroded mask) and, when `mirror=True` (**off** by default), each of those is also
+  horizontally flipped with `cv2.flip(…, 1)` — template and mask flipped together, after the
+  rotation (see step 3).
 
 ## Post-processing (exact)
 
@@ -158,6 +172,7 @@ cannot drift from the code.
 | --- | --- | --- |
 | `scales` | `[0.75, 0.875, 1.0, 1.15, 1.3]` | Pyramid scale factors. The scene is resized by each factor and the template cropped from that resized scene, which keeps the self-match at 1.0. |
 | `angles_deg` | `[-35, -23.3, -11.7, 0, 11.7, 23.3, 35]` | Rotation bank in degrees — a 7-step bank over ±35° (~11.7° spacing) that recovers rotated repeats. 7 measured best (9 over-samples, 5 leaves gaps). A large constant-factor cost; set `(0.0,)` for a known axis-aligned scene. |
+| `mirror` | `false` | Also correlate the horizontally **mirrored** template at every angle in the bank. A mirror is not a rotation, so no bank width can substitute for it; turn it on for domains whose instances come in bilaterally symmetric pairs (a floor-plan door drawn with the opposite swing hand). Doubles the correlation count and the number of templates that can throw a false peak. |
 | `threshold` | `null` | Fixed accept threshold on the raw NCC score. `null` ⇒ use the calibrator. |
 | `calibration` | `"repeat-aware"` | How the accept threshold is chosen when `threshold` is `null`. repeat-aware reads the score distribution — strict cut (`self × 0.85`) when ≥2 distinct locations sit near the self-match (near-identical repeats; rejects rotation false peaks), else the permissive `self × retain_frac` tail (transformed instances). self-similarity / ratio / gmm are the controls. |
 | `peaks` | `"local-max"` | Peak-extraction strategy. local-max (default) separates touching instances that plain nms merges; nms is the control; watershed uses a distance transform. |
@@ -179,6 +194,10 @@ cannot drift from the code.
   instance whose resampled correlation falls below `self × retain_frac` is missed. Recall in the
   scale/pose regimes is genuinely partial (VARIED ~0.36) — an inherent ceiling of raw-intensity
   correlation, which is exactly where `dino-dense` and `sparse-geo` win.
+- **Mirrored instances, with `mirror=False` (the default).** A reflected instance is not reachable
+  by *any* rotation angle, so widening `angles_deg` cannot help — `mirror=True` is the only path,
+  at ~2× latency. See the floor-plan follow-up in
+  [`../reports/ncc-improvement.md`](../reports/ncc-improvement.md) for what that measured.
 - **Lighting / pose change.** NCC correlates raw intensities, so an instance under different
   lighting scores low even when a human sees the same object.
 - **Cross-level noise-floor bias.** Mitigated by the per-level z-score (step 5); called out so
@@ -228,6 +247,7 @@ comments in `search()` (METHOD-11); read `src/object_search/search/ncc.py` for t
 
 3. build a rotated-template bank              # default: 7 angles over +/-35 deg
    (each rotated crop carries a warped mask, eroded 1 px, passed to matchTemplate)
+   if mirror:  also yield cv2.flip(template, 1) + cv2.flip(mask, 1) per angle  # default: off
 
 4. for each level:
        resp <- matchTemplate(scene_s, template_s, TM_CCOEFF_NORMED)  # FULL scene, never cropped

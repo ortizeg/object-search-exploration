@@ -79,16 +79,71 @@ _DEFAULT_METHODS: tuple[str, ...] = (
 _NCC_SCALE_SETS: tuple[tuple[float, ...], ...] = ((1.0,), (0.9, 1.0, 1.1))
 _NCC_MOSSE_RETAIN: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.65)
 _NCC_MOSSE_NMS: tuple[float, ...] = (0.3, 0.5)
-_ncc_mosse_grid: tuple[dict[str, object], ...] = tuple(
-    {"scales": scales, "retain_frac": retain, "nms_iou": nms}
-    for scales in _NCC_SCALE_SETS
-    for retain in _NCC_MOSSE_RETAIN
-    for nms in _NCC_MOSSE_NMS
-)
+
+
+def _correlation_grid() -> tuple[dict[str, object], ...]:
+    """Build a FRESH scales x retain_frac x nms_iou grid for one correlation method.
+
+    ``ncc`` and ``mosse`` start from the same three knobs but must NOT share one grid object.
+    Both config models are ``extra="forbid"``, so the moment either method grows a method-only
+    knob (an ``ncc`` rotation-bank variant, a ``mosse`` filter knob) a shared grid would feed
+    that key into the *other* method's validator and raise. Each call returns independent
+    tuples and dicts, so the two grids below can diverge freely.
+    """
+    return tuple(
+        {"scales": scales, "retain_frac": retain, "nms_iou": nms}
+        for scales in _NCC_SCALE_SETS
+        for retain in _NCC_MOSSE_RETAIN
+        for nms in _NCC_MOSSE_NMS
+    )
+
+
+# ``ncc``-only ADDITIVE block from the floor-plan domain investigation (quick task 260730-vx4,
+# see EXPERIMENTS.md in that quick task's directory). A floor-plan door/window symbol sits on
+# whichever wall it is drawn on, so an instance on a perpendicular wall can be ~90 deg off the
+# exemplar -- outside the shipped +/-35 deg bank (`NCCConfig.angles_deg`'s default). A pure
+# 4-angle CARDINAL bank (0/90/180/270) measured a clear win over both the shipped bank and wider
+# continuous banks (a 28-angle cardinal-x-fine sub-bank, a uniform 30 deg spacing) on this domain:
+# floorplans-door test F1 0.164 -> 0.355, floorplans-window 0.222 -> 0.272 -- floor-plan walls are
+# discretely orthogonal, not continuously rotated, so a small precise cardinal set beats a dense
+# sweep. `mirror` (a horizontally-flipped template sibling, for domains with bilateral symmetry
+# like door swing direction) is included as its own axis rather than a fixed choice because its
+# effect measured genuinely mixed: a statistical tie for doors (test F1 0.357 vs 0.355, trading
+# precision for recall) and a net-negative for windows (val F1 0.276 vs 0.299) -- argmax-on-val
+# lets each dataset pick honestly instead of hand-picking one global default. Fixed at a single
+# scale (the floor-plan symbols are near-fixed-scale, matched by the existing (1.0,) scale option)
+# and the tighter nms_iou (0.3), since the investigation swept those two independently of scale/nms
+# and widening this block's own scale x nms cross would balloon the grid for no measured benefit.
+_NCC_CARDINAL_BANK: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0)
+_NCC_MIRROR_OPTIONS: tuple[bool, ...] = (False, True)
+
+
+def _ncc_grid() -> tuple[dict[str, object], ...]:
+    """``ncc``'s grid: the original scales x retain_frac x nms_iou sweep, PLUS an additive
+    cardinal-rotation-bank x mirror block (see the module comment above `_NCC_CARDINAL_BANK`).
+
+    Additive, not a replacement: the shipped angle bank (mirror off) stays available as before, so
+    this can only match or beat the pre-existing grid on any dataset, never regress it.
+    """
+    return _correlation_grid() + tuple(
+        {
+            "scales": (1.0,),
+            "retain_frac": retain,
+            "nms_iou": 0.3,
+            "angles_deg": _NCC_CARDINAL_BANK,
+            "mirror": mirror,
+        }
+        for retain in _NCC_MOSSE_RETAIN
+        for mirror in _NCC_MIRROR_OPTIONS
+    )
+
+
+_NCC_GRID: tuple[dict[str, object], ...] = _ncc_grid()
+_MOSSE_GRID: tuple[dict[str, object], ...] = _correlation_grid()
 
 _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
-    "ncc": _ncc_mosse_grid,
-    "mosse": _ncc_mosse_grid,
+    "ncc": _NCC_GRID,
+    "mosse": _MOSSE_GRID,
     # sparse-geo -- min_inliers (RANSAC inliers to accept; higher -> stricter, the primary knob,
     # widened down to 2 and up to 10) crossed with nms_iou (duplicate-instance suppression).
     "sparse-geo": tuple(
@@ -249,12 +304,17 @@ def _tune_methods_at_count(
     eval_split: str,
     manifest_root: Path | None,
     exemplar_selection: ExemplarSelection,
+    grids: Mapping[str, Sequence[dict[str, object]]] | None = None,
 ) -> list[dict[str, Any]]:
     """The per-method tune-on-val, freeze, report-tuned-vs-default-on-test loop at ONE count.
 
     Factored out so :func:`run_domain_tuning` can call it once (the byte-identical single-count
     report) or once per requested count (the additive nested multi-count report) without
     duplicating the loop.
+
+    ``grids`` maps a method to a caller-supplied grid that REPLACES :data:`_TUNING_GRIDS` for that
+    method; a method absent from the mapping (or ``grids=None``) falls back to the committed grid,
+    which is what keeps the default report byte-identical.
     """
     per_method: list[dict[str, Any]] = []
     for method in methods:
@@ -267,6 +327,7 @@ def _tune_methods_at_count(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
+            grid=grids.get(method) if grids is not None else None,
             exemplar_selection=exemplar_selection,
         )
         best = tuned["best"]
@@ -332,6 +393,7 @@ def run_domain_tuning(
     manifest_root: Path | None = None,
     exemplar_selection: ExemplarSelection = "seeded-random",
     exemplar_counts: Sequence[int] | None = None,
+    grids: Mapping[str, Sequence[dict[str, object]]] | None = None,
     out: str | None = "docs/benchmark/floorplans-tuning-results.json",
 ) -> dict[str, Any]:
     """Tune every method on ``tune_split`` and report tuned-vs-default on ``eval_split``.
@@ -364,6 +426,12 @@ def run_domain_tuning(
             median-area box).
         exemplar_counts: Optional sequence of counts to nest per-count blocks for; ``None`` keeps
             the flat single-count report.
+        grids: Optional per-method grid override, e.g. ``{"ncc": ({"angles_deg": (...)}, ...)}``.
+            A method present here is tuned over the supplied grid INSTEAD of its
+            :data:`_TUNING_GRIDS` entry; a method absent from the mapping (and the ``None``
+            default) keeps the committed grid, so omitting this argument reproduces the previous
+            report byte for byte. This is the seam an offline experiment script uses to sweep a
+            candidate knob without editing the committed grids.
         out: Where to write the JSON report (resolved against the repo root when relative). ``None``
             skips the write and only returns the report.
 
@@ -388,6 +456,7 @@ def run_domain_tuning(
             eval_split=eval_split,
             manifest_root=manifest_root,
             exemplar_selection=exemplar_selection,
+            grids=grids,
         )
 
     report: dict[str, Any] = {
