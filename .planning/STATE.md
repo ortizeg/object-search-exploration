@@ -33,11 +33,15 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-07-29 — Quick task 260729-dh6: floor-plan eval enrichment — per-slice research
-metrics (recall by symbol-size, F1 by crowding, F1 by plan-resolution via a matched-GT-index sibling
-of match_predictions), broadened aggressive tuning grids (+ size-representative exemplar, exemplar
-{1,3}), and an opt-in dino-dense fixed-size letterbox (GPU-OOM fix). Full suite green (714 passed,
-93.60% coverage). Aggressive GPU re-run is the pending manual vast.ai step.
+Last activity: 2026-08-01 — Quick task 260730-vx4: ncc floor-plan orientation/mirror follow-up —
+confirmed the rotation-bank-too-narrow hypothesis for doors (test F1 0.164 -> 0.358 via a cardinal
+0/90/180/270 bank + optional mirror, additive _TUNING_GRIDS entry, no NCCConfig default touched);
+windows show a disclosed val/test generalization gap (0.401 -> 0.350), not reverted. Two further
+recall levers (lower retain_frac, wider scale pyramid) tested and both net-negative -- ncc's real
+ceiling on this domain (true/false-positive scores overlap, unlike synthetic's clean separation).
+Zero synthetic-regime regression. New scripts/ncc_debug_visualize.py debug tool. Full suite green
+(705 passed, 92.34% coverage). Committed on quick/260730-vx4-ncc-floorplan, PR not yet opened.
+Sibling quick task 260730-w9s (mosse, same hypothesis) in progress next.
 
 Progress: [█████████░] 88%
 
@@ -48,6 +52,7 @@ Progress: [█████████░] 88%
 | 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
+| 260730-vx4 | ncc floor-plan orientation/mirror follow-up: cardinal bank + mirror, doors F1 0.164->0.358 | 2026-08-01 | 357abe3 | [260730-vx4](./quick/260730-vx4-improve-ncc-on-floor-plan-door-window-do/) |
 
 ## Performance Metrics
 
