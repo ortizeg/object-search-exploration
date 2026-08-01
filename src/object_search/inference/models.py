@@ -252,12 +252,15 @@ _OWLV2_OPSET = 17
 
 
 def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (export env only)
-    """Export OWLv2's image-guided vision graph (class_embeds + pred_boxes), or explain how to.
+    """Export OWLv2's image-guided vision graph (class_embeds/pred_boxes/logit_shift/logit_scale).
 
     Wraps ``Owlv2ForObjectDetection`` so the ONNX graph takes a single ``pixel_values`` input and
-    returns the two tensors the method needs: projected per-patch ``class_embeds`` and normalized
-    per-patch ``pred_boxes``. The query-embedding selection and cosine scoring stay in NumPy in the
-    method module -- the graph is deliberately just the shared image encoder.
+    returns four per-patch tensors: projected ``class_embeds``, normalized ``pred_boxes``, and the
+    model's own learned ``logit_shift``/``logit_scale`` (``Owlv2ClassPredictionHead``'s calibration
+    linears, applied to the *pre-projection* 768-dim vision features -- a scene-content-only
+    recalibration, computed with no query, so exporting it needs no second image input). The
+    query-embedding selection and cosine scoring stay in NumPy in the method module -- the graph is
+    deliberately just the shared image encoder.
     """
     try:
         import torch  # export env only (Apache-2.0); never imported by the runtime package
@@ -274,20 +277,31 @@ def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (exp
     model.eval()
 
     class _VisionGraph(torch.nn.Module):  # type: ignore[misc]  # torch is untyped (Any) in this env
-        """Single-input wrapper: pixel_values -> (class_embeds, pred_boxes), per patch."""
+        """Single-input wrapper: pixel_values -> per-patch (class_embeds, pred_boxes, shift, scale).
+
+        ``logit_shift``/``logit_scale`` are ``Owlv2ClassPredictionHead``'s own learned Linear(1)
+        layers applied to ``image_feats`` (the pre-``dense0`` 768-dim vision features) -- the exact
+        tensor HF's own ``class_head.forward`` feeds them when a query IS present. Computing them
+        here needs no query, so they are query-independent, scene-only recalibration terms.
+        """
 
         def __init__(self, owlv2: Owlv2ForObjectDetection) -> None:
             super().__init__()
             self.owlv2 = owlv2
 
-        def forward(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def forward(
+            self, pixel_values: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             # Mirrors transformers' Owlv2ForObjectDetection.image_guided_detection encode path.
             feature_map = self.owlv2.image_embedder(pixel_values=pixel_values)[0]
             batch, grid_h, grid_w, hidden = feature_map.shape
             image_feats = feature_map.reshape(batch, grid_h * grid_w, hidden)
             pred_boxes = self.owlv2.box_predictor(image_feats, feature_map)
             _, class_embeds = self.owlv2.class_predictor(image_feats)
-            return class_embeds, pred_boxes
+            class_head = self.owlv2.class_head
+            logit_shift = class_head.logit_shift(image_feats)
+            logit_scale = class_head.elu(class_head.logit_scale(image_feats)) + 1
+            return class_embeds, pred_boxes, logit_shift, logit_scale
 
     example = torch.zeros((1, 3, _OWLV2_IMAGE_SIZE, _OWLV2_IMAGE_SIZE), dtype=torch.float32)
     part = dest.with_suffix(dest.suffix + ".part")
@@ -296,11 +310,13 @@ def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (exp
         (example,),
         str(part),
         input_names=["pixel_values"],
-        output_names=["class_embeds", "pred_boxes"],
+        output_names=["class_embeds", "pred_boxes", "logit_shift", "logit_scale"],
         dynamic_axes={
             "pixel_values": {0: "batch"},
             "class_embeds": {0: "batch", 1: "num_patches"},
             "pred_boxes": {0: "batch", 1: "num_patches"},
+            "logit_shift": {0: "batch", 1: "num_patches"},
+            "logit_scale": {0: "batch", 1: "num_patches"},
         },
         opset_version=_OWLV2_OPSET,
         do_constant_folding=True,
