@@ -67,6 +67,12 @@ docs/benchmark/permethod/
 docs/benchmark/floorplans-report.html
 docs/benchmark/floorplans-overlays/
 docs/benchmark/floorplans-results.md
+# OWLv2 fine-tuning arms (quick task 260801-8zy): the per-arm x per-class tuning dumps produced on
+# a rented GPU box and pulled back. Regenerable, environment-dependent, and weights-gated exactly
+# like the tuning dumps above; the COMMITTED deliverable is docs/reports/owlv2-floorplans-finetune.md.
+# (The checkpoints and .onnx artifacts themselves are already covered by the models/ rule.)
+docs/benchmark/owlv2-finetune-*.json
+docs/benchmark/owlv2-finetune/
 # Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
 benchmark.log
 

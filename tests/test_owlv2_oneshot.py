@@ -321,6 +321,59 @@ def test_search_returns_model_unavailable_when_weight_absent(
     assert result.matches == ()
 
 
+# --------------------------------------- model-free: which weight file the method resolves (8zy)
+
+
+def test_resolve_model_path_without_the_env_var_is_the_shipped_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset OS_OWLV2_MODEL => exactly the path this method resolved before the override existed.
+
+    This is the whole promise of the opt-in: with no env var set, the shipped pretrained graph is
+    what loads, so every previously reported owlv2-oneshot number stays comparable.
+    """
+    monkeypatch.delenv("OS_OWLV2_MODEL", raising=False)
+    expected = models.models_dir() / models.MODEL_REGISTRY["owlv2-base-patch16"].dest
+    assert owlv2_oneshot._resolve_model_path() == expected
+
+    # An empty / whitespace value is treated as unset, not as a path to "".
+    monkeypatch.setenv("OS_OWLV2_MODEL", "   ")
+    assert owlv2_oneshot._resolve_model_path() == expected
+
+
+def test_resolve_model_path_relative_lands_in_models_dir_absolute_is_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(owlv2_oneshot.models, "models_dir", lambda: tmp_path)
+
+    monkeypatch.setenv("OS_OWLV2_MODEL", "owlv2_base_patch16_floorplans_ft.onnx")
+    assert owlv2_oneshot._resolve_model_path() == (
+        tmp_path / "owlv2_base_patch16_floorplans_ft.onnx"
+    )
+
+    absolute = tmp_path / "elsewhere" / "arm_b.onnx"
+    monkeypatch.setenv("OS_OWLV2_MODEL", str(absolute))
+    assert owlv2_oneshot._resolve_model_path() == absolute
+
+
+def test_method_version_and_config_defaults_are_unchanged_by_the_weight_override() -> None:
+    """The override points the SAME method at a different file; it is not a new method (8zy).
+
+    If `_METHOD_VERSION` or any config default moved, an A/B across weights would no longer be
+    attributable to the weights alone -- which is the only reason the override exists.
+    """
+    assert owlv2_oneshot._METHOD_VERSION == "1.0.0"
+    config = Owlv2OneshotConfig()
+    assert config.calibration == "self-similarity"
+    assert config.retain_frac == 0.94
+    assert config.query_iou_frac == 0.8
+    assert config.max_box_area_frac == 0.25
+    assert config.nms_iou == 0.3
+    assert config.max_candidates == 50
+    assert config.score_threshold is None
+    assert config.seed == 0
+
+
 def test_search_rejects_a_foreign_config() -> None:
     scene = np.full((60, 60, 3), 50, dtype=np.uint8)
     with pytest.raises(TypeError, match="requires an Owlv2OneshotConfig"):

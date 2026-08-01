@@ -85,6 +85,21 @@ Known failure modes
   ``pixi run -e export export-owlv2``. Absent, the method returns ``outcome=error`` with a
   ``model_unavailable`` note rather than raising, so the renderer and API degrade honestly.
 
+Which weight file is loaded (``OS_OWLV2_MODEL``) -- an opt-in whose absence changes nothing
+---------------------------------------------------------------------------------------------
+Exactly like ``OS_ONNX_PROVIDERS`` (which opts a run into a GPU execution provider), the
+``OS_OWLV2_MODEL`` environment variable opts **one run** into a different OWLv2 ``.onnx``: a bare
+filename resolves under ``models/``, an absolute path is used verbatim, and **unset -- the normal
+case -- resolves the shipped ``owlv2_base_patch16.onnx`` and behaves identically to not having the
+variable at all**. See :func:`_resolve_model_path`.
+
+It exists so a fine-tuned export can be measured against the pretrained one on the identical
+method, method version, and config -- making the delta attributable to the weights alone rather
+than to a forked method. The loaded filename is logged at INFO for the same reason: a recorded run
+must never be ambiguous about which graph produced its numbers. Nothing about the algorithm, the
+config defaults, or ``_METHOD_VERSION`` changes with it, which is why the version is NOT bumped:
+the method is the same method, pointed at a different file by an explicit human action.
+
 Licence
 -------
 OWLv2 is **Apache-2.0** (Google) -- the same permissive tier as DINOv2 and SuperPoint's code, with
@@ -111,6 +126,8 @@ Deferred deliberately (mirrored in ``docs/methods/owlv2-oneshot.md`` and
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
@@ -140,6 +157,7 @@ from object_search.search.registry import register_method
 _METHOD_VERSION = "1.0.0"
 _OWLV2_KEY = "owlv2-base-patch16"  # the MODEL_REGISTRY key for the OWLv2 vision graph
 _PROVIDERS = resolve_providers()  # CPU by default (bit-identical); OS_ONNX_PROVIDERS opts into GPU
+_OWLV2_MODEL_ENV = "OS_OWLV2_MODEL"  # explicit per-run weight opt-in; absent => the shipped default
 _EXEMPLAR_IOU = 0.5  # a match overlapping the exemplar by >= this is the exemplar's own region
 _EXEMPLAR_SELF_IOU = 0.3  # looser overlap used to read off the exemplar's own self-match score
 _EPS = 1e-12  # guards a zero-norm division; a genuinely zero embedding is background, not a match
@@ -233,6 +251,30 @@ _inferencer: OWLv2Inferencer | None = None
 _inferencer_loaded = False
 
 
+def _resolve_model_path() -> Path:
+    """Which OWLv2 ``.onnx`` this method loads: the shipped default unless ``OS_OWLV2_MODEL`` says.
+
+    Pure path arithmetic (no disk read, no session), so CI gates it with no weight present.
+
+    * ``OS_OWLV2_MODEL`` unset or empty -> ``models_dir() / MODEL_REGISTRY[_OWLV2_KEY].dest``, the
+      shipped pretrained graph. **This is the only behaviour that exists unless a human sets the
+      variable**, so the default method is provably unchanged.
+    * set to a relative name (``owlv2_base_patch16_floorplans_ft.onnx``) -> resolved under
+      ``models_dir()``, where every weight in this repo lives.
+    * set to an absolute path -> used verbatim.
+
+    The absence of the variable changes nothing -- deliberately the same contract as
+    ``OS_ONNX_PROVIDERS``. It exists so one evaluation run can be pointed at an alternative OWLv2
+    graph (e.g. a fine-tuned export) with the method's algorithm, version, and config defaults all
+    held fixed, which is what makes an A/B attributable to the weights alone.
+    """
+    override = os.environ.get(_OWLV2_MODEL_ENV, "").strip()
+    if not override:
+        return models.models_dir() / models.MODEL_REGISTRY[_OWLV2_KEY].dest
+    candidate = Path(override).expanduser()
+    return candidate if candidate.is_absolute() else models.models_dir() / candidate
+
+
 def _get_inferencer() -> OWLv2Inferencer | None:
     """Return the shared OWLv2 inferencer, or ``None`` when its weight is absent.
 
@@ -244,7 +286,7 @@ def _get_inferencer() -> OWLv2Inferencer | None:
     if _inferencer_loaded:
         return _inferencer
     _inferencer_loaded = True
-    path = models.models_dir() / models.MODEL_REGISTRY[_OWLV2_KEY].dest
+    path = _resolve_model_path()
     if not path.is_file():
         logger.info(
             "owlv2-oneshot: {!r} weight absent at {}; returning model_unavailable "
@@ -254,6 +296,9 @@ def _get_inferencer() -> OWLv2Inferencer | None:
         )
         _inferencer = None
         return None
+    # Log WHICH weight file produced this session's results, so a recorded run is never ambiguous
+    # about the graph behind its numbers -- the one thing an opt-in weight override could obscure.
+    logger.info("owlv2-oneshot: loading OWLv2 graph {}", path.name)
     _inferencer = OWLv2Inferencer(path, providers=_PROVIDERS)
     return _inferencer
 

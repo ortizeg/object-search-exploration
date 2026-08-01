@@ -113,6 +113,10 @@ capture = { features = ["capture"] }
 [feature.export.tasks]
 export-fastsam = { cmd = "python scripts/export_fastsam.py" }
 export-owlv2 = { cmd = "python scripts/export_owlv2.py" }
+# Fine-tune OWLv2 on the floor-plans train split (needs torch, so export-env only). Writes a
+# HuggingFace checkpoint dir under the gitignored models/; `export-owlv2 --checkpoint <dir>` then
+# turns it into a SEPARATE .onnx. See scripts/finetune_owlv2.py and src/object_search/train/.
+finetune-owlv2 = { cmd = "python scripts/finetune_owlv2.py" }
 
 # Capture-only tasks, runnable ONLY in the `capture` environment (Playwright + Chromium).
 # `playwright-install` fetches the browser binary once; `capture-ui` drives a running server

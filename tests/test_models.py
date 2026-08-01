@@ -57,6 +57,7 @@ def test_registry_has_the_expected_models() -> None:
         "superpoint",
         "fastsam-s",
         "owlv2-base-patch16",
+        "owlv2-base-patch16-floorplans-ft",
     }
 
 
@@ -84,7 +85,78 @@ def test_each_spec_names_the_phase_that_adds_it() -> None:
         "superpoint": 5,
         "fastsam-s": 7,
         "owlv2-base-patch16": 8,
+        "owlv2-base-patch16-floorplans-ft": 8,
     }
+
+
+# --------------------------------------------------------- the fine-tuned OWLv2 artifact (8zy)
+#
+# These guard the one promise the fine-tuning task makes to everything downstream: the SHIPPED
+# pretrained entry is untouched, and the fine-tuned graph is a genuinely separate artifact.
+
+
+def test_shipped_owlv2_spec_is_byte_identical_to_before_the_finetune_task() -> None:
+    """The shipped OWLv2 entry is asserted field-by-field, not eyeballed.
+
+    Adding a fine-tuned sibling must not perturb the artifact every existing run resolves. If any
+    of these drift, `owlv2-oneshot`'s default behaviour has silently changed and every previously
+    reported OWLv2 number is no longer comparable.
+    """
+    spec = models.MODEL_REGISTRY["owlv2-base-patch16"]
+    assert spec.repo_id == "google/owlv2-base-patch16-ensemble"
+    assert spec.revision == "main"
+    assert spec.dest == "owlv2_base_patch16.onnx"
+    assert spec.sha256 == "2271d85b1467cbedb07bd5b63cf1b0d9d06dc4574e0cd6e2a450ad431a050728"
+
+
+def test_finetuned_owlv2_is_a_separate_artifact_with_an_honest_unpinned_hash() -> None:
+    """A separate dest, and sha256=None BY DESIGN -- a local run's hash is not an integrity gate."""
+    finetuned = models.MODEL_REGISTRY["owlv2-base-patch16-floorplans-ft"]
+    shipped = models.MODEL_REGISTRY["owlv2-base-patch16"]
+
+    assert finetuned.dest == "owlv2_base_patch16_floorplans_ft.onnx"
+    assert finetuned.dest != shipped.dest
+    assert finetuned.sha256 is None
+    assert finetuned.license == "Apache-2.0"  # inherited from the base weights
+    # The source_note must say how to PRODUCE it and that fetch-models does not.
+    assert "finetune-owlv2" in finetuned.source_note
+    assert "--checkpoint" in finetuned.source_note
+    assert "NOT fetched" in finetuned.source_note
+
+
+def test_finetune_checkpoint_path_defaults_and_honours_its_env_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Default under models/; a relative override lands there too; an absolute one is verbatim."""
+    monkeypatch.setattr("object_search.provenance.repo_root", lambda: tmp_path)
+
+    monkeypatch.delenv("OS_OWLV2_FT_CHECKPOINT", raising=False)
+    assert models.owlv2_finetune_checkpoint() == (
+        tmp_path / "models" / "finetune" / "owlv2-floorplans-headonly"
+    )
+
+    monkeypatch.setenv("OS_OWLV2_FT_CHECKPOINT", "finetune/arm-b")
+    assert models.owlv2_finetune_checkpoint() == tmp_path / "models" / "finetune" / "arm-b"
+
+    monkeypatch.setenv("OS_OWLV2_FT_CHECKPOINT", str(tmp_path / "elsewhere"))
+    assert models.owlv2_finetune_checkpoint() == tmp_path / "elsewhere"
+
+
+def test_fetch_finetuned_owlv2_without_a_checkpoint_returns_the_absent_dest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On a clean box the checkpoint dir is absent: log the how-to and return, never raise.
+
+    This is what keeps `pixi run fetch-models` / `fetch_all()` green on a machine that has never
+    fine-tuned anything -- the same contract the torch-absent export guard already honours.
+    """
+    monkeypatch.setattr("object_search.provenance.repo_root", lambda: tmp_path)
+    monkeypatch.delenv("OS_OWLV2_FT_CHECKPOINT", raising=False)
+
+    spec = models.MODEL_REGISTRY["owlv2-base-patch16-floorplans-ft"]
+    dest = models.fetch(spec)
+    assert dest == tmp_path / "models" / "owlv2_base_patch16_floorplans_ft.onnx"
+    assert not dest.exists()
 
 
 def test_github_release_url_is_built_from_repo_and_revision() -> None:
@@ -107,6 +179,7 @@ def test_models_dir_and_verify_all(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         "superpoint": False,
         "fastsam-s": False,
         "owlv2-base-patch16": False,
+        "owlv2-base-patch16-floorplans-ft": False,
     }
 
 
