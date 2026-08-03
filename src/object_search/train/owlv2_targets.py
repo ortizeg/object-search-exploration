@@ -41,6 +41,7 @@ data surgery.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -123,6 +124,15 @@ class FinetuneConfig(BaseModel):
         description=(
             "Unfreeze the whole vision tower at lr_backbone (arm B, the stretch comparison). The "
             "text tower stays frozen in EVERY arm -- it is not part of the exported graph."
+        ),
+    )
+    warmup_frac: float = Field(
+        default=0.1,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Fraction of the total optimizer steps spent linearly warming the learning rate up "
+            "before the cosine decay begins. 0 = no warmup (straight into the cosine)."
         ),
     )
     weight_decay: float = Field(default=1e-4, ge=0.0, description="AdamW weight decay.")
@@ -325,3 +335,64 @@ def deterministic_batches(
     order = rng.permutation(count)
     for start in range(0, count, batch_size):
         yield [int(index) for index in order[start : start + batch_size]]
+
+
+def cosine_warmup_factor(
+    step: int,
+    total_steps: int,
+    warmup_steps: int,
+    *,
+    min_factor: float = 0.0,
+) -> float:
+    """Learning-rate multiplier at 0-based optimizer ``step``: linear warmup, then cosine decay.
+
+    Torch-free and pure, so the shape of the schedule is gated by ``pixi run test`` rather than
+    only observable as a column in a training log. ``scripts/finetune_owlv2.py`` hands this straight
+    to ``torch.optim.lr_scheduler.LambdaLR``, which multiplies each param group's base ``lr`` by the
+    returned factor -- so the two-group (head / backbone) split keeps its ratio at every step.
+
+    Warmup counts from 1, not 0: at ``step == 0`` with ``warmup_steps == 4`` the factor is ``0.25``,
+    not ``0.0``. Starting at exactly zero would make the first optimizer step a guaranteed no-op,
+    which on a short fine-tune (a few hundred steps) is a measurable waste rather than a rounding
+    detail. The two branches meet continuously at ``step == warmup_steps`` (both give ``1.0``).
+
+    Args:
+        step: 0-based optimizer step.
+        total_steps: Total optimizer steps in the run; the cosine reaches ``min_factor`` at the end.
+        warmup_steps: Steps of linear warmup. 0 disables warmup.
+        min_factor: Floor the cosine decays to, as a fraction of the base learning rate.
+
+    Returns:
+        A multiplier in ``[min_factor, 1.0]``.
+
+    Raises:
+        ValueError: If ``step`` is negative, ``total_steps`` is not positive, ``warmup_steps`` is
+            negative or not below ``total_steps``, or ``min_factor`` is outside ``[0, 1]``.
+    """
+    if step < 0:
+        raise ValueError(f"step must be >= 0, got {step}")
+    if total_steps <= 0:
+        raise ValueError(f"total_steps must be >= 1, got {total_steps}")
+    if warmup_steps < 0 or warmup_steps >= total_steps:
+        raise ValueError(f"warmup_steps must be in [0, {total_steps}), got {warmup_steps}")
+    if not 0.0 <= min_factor <= 1.0:
+        raise ValueError(f"min_factor must be in [0, 1], got {min_factor}")
+
+    if warmup_steps > 0 and step < warmup_steps:
+        return (step + 1) / warmup_steps
+
+    progress = (step - warmup_steps) / (total_steps - warmup_steps)
+    progress = min(max(progress, 0.0), 1.0)
+    return min_factor + (1.0 - min_factor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def warmup_steps_for(total_steps: int, warmup_frac: float) -> int:
+    """Resolve ``warmup_frac`` to a step count :func:`cosine_warmup_factor` will accept.
+
+    Rounds to the nearest step and clamps into ``[0, total_steps - 1]``, so a smoke run with a
+    handful of steps cannot end up spending its whole budget in warmup (which would make the
+    schedule silently constant) and cannot produce an out-of-range value the schedule rejects.
+    """
+    if total_steps <= 0:
+        raise ValueError(f"total_steps must be >= 1, got {total_steps}")
+    return max(0, min(total_steps - 1, round(warmup_frac * total_steps)))

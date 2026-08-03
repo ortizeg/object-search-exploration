@@ -2,7 +2,11 @@
 
 Run this ONLY in the ``export`` pixi environment, which carries ``torch`` and ``transformers``::
 
+    # arm A (primary): heads only, frozen vision tower
     pixi run -e export finetune-owlv2 --out models/finetune/owlv2-floorplans-headonly
+
+    # arm B (stretch): the whole exported vision path unfrozen
+    pixi run -e export finetune-owlv2 --unfreeze-all --out models/finetune/owlv2-floorplans-full
 
 Why this exists
 ---------------
@@ -26,14 +30,40 @@ matcher -- the open upstream gap huggingface/transformers#33664), so the matchin
 supplied here, reusing ``transformers.loss.loss_for_object_detection`` rather than hand-writing
 Hungarian matching or GIoU.
 
+Exactly which parameters reach the exported graph
+-------------------------------------------------
+This decides the freeze strategy, so it is written down rather than assumed. ``_VisionGraph``
+(``inference/models.py``) is ``image_embedder -> box_predictor + class_predictor(query_embeds=None)``,
+so the exported weights are precisely:
+
+* ``owlv2.vision_model``      -- the ViT-B/16 tower and its ``post_layernorm``;
+* ``layer_norm``              -- the class-token merge norm inside ``image_embedder``;
+* ``box_head``                -- all of it;
+* ``class_head.dense0``       -- the projection that produces ``class_embeds``.
+
+Everything else is trained-but-not-exported, or not trained at all:
+
+* ``class_head.logit_shift`` / ``logit_scale`` are trained (they sit in the ``pred_logits`` path the
+  loss reads) but are **not** exported -- the method does its own cosine scoring in NumPy. They are
+  kept trainable so the classification loss can absorb calibration drift there instead of distorting
+  ``dense0``, which is the part that does transfer.
+* ``objectness_head`` is **not** exported *and* receives no gradient (this loss has no objectness
+  term), so it is left frozen. Unfreezing it would advertise a trainable head that is inert --
+  worse than no knob at all.
+* the text tower (``owlv2.text_model``, ``owlv2.text_projection``) is frozen in **every** arm. It is
+  not exported, and leaving it trainable would let the loss fall by moving the five text queries
+  toward the current image features rather than by improving the image features themselves -- a
+  reduction in training loss that provably cannot transfer to the image-guided path.
+
 The split against ``src/object_search/train/``
 ----------------------------------------------
 All torch lives here, in one top-to-bottom readable file, because this is the artifact an ML
 practitioner reads and edits. The torch-free glue that decides *what the model is trained on* --
 the config schema, the class-index mapping, the COCO -> OWLv2 target conversion, the deterministic
-batch order -- lives in :mod:`object_search.train.owlv2_targets`, where ``pixi run test`` gates it
-with no torch, no weights, and no GPU. ``pixi run lint`` / ``typecheck`` cover ``src/`` and
-``tests/`` only, which is the existing precedent set by ``scripts/export_owlv2.py``.
+batch order, the learning-rate schedule -- lives in :mod:`object_search.train.owlv2_targets`, where
+``pixi run test`` gates it with no torch, no weights, and no GPU. ``pixi run lint`` / ``typecheck``
+cover ``src/`` and ``tests/`` only, which is the existing precedent set by
+``scripts/export_owlv2.py``.
 
 Pre-processing (exact, and shared with inference)
 -------------------------------------------------
@@ -43,6 +73,13 @@ BGR->RGB, rescale ``1/255``, **pad bottom-right** to a square of side ``max(H, W
 ``0.5``, resize to ``960x960`` bilinear, CLIP mean/std. Targets are normalized over that **same
 padded-square side** (see the ``owlv2_targets`` module docstring for why per-axis ``(W, H)``
 normalization would be a silent, plausible-looking bug).
+
+Reproducibility
+---------------
+Same seed => identical per-epoch losses, which the task's verify step asserts by diffing two runs'
+``train_log.json``. One ``--seed`` drives ``torch.manual_seed`` and the ``np.random.default_rng``
+epoch shuffler; the epoch record holds numbers only (never a duration or a timestamp), so the log
+files of two same-seed runs compare equal.
 """
 
 from __future__ import annotations
@@ -50,6 +87,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -74,11 +112,16 @@ from object_search.train.owlv2_targets import (  # noqa: E402
     FinetuneConfig,
     ImageTargets,
     coco_to_owlv2_targets,
+    cosine_warmup_factor,
+    deterministic_batches,
+    warmup_steps_for,
 )
 
 _BASE_MODEL = "google/owlv2-base-patch16-ensemble"
 _DEFAULT_TRAIN_COCO = "datasets/_incoming/floorplans/train/_annotations.coco.json"
+_DEFAULT_VAL_COCO = "datasets/_incoming/floorplans/valid/_annotations.coco.json"
 _DEFAULT_OUT = "models/finetune/owlv2-floorplans-headonly"
+_LOSS_KEYS = ("loss_ce", "loss_bbox", "loss_giou")
 
 
 # ---------------------------------------------------------------- 1. matching and the losses
@@ -231,25 +274,187 @@ def _tokenize_class_names(processor: Owlv2Processor, device: torch.device):
     return encoded["input_ids"].to(device), encoded["attention_mask"].to(device)
 
 
-# ------------------------------------------------------------------------ 3. the training step
+def _load_split(
+    coco_path: Path, limit_images: int | None, label: str
+) -> tuple[list[ImageTargets], Path]:
+    """Read one COCO split into targets (optionally truncated), plus its image directory."""
+    if not coco_path.is_file():
+        raise SystemExit(
+            f"no {label} COCO annotations at {coco_path}. The floor plans are a MANUAL dataset: "
+            f"drop the Roboflow export at datasets/_incoming/floorplans/{{train,valid,test}} first."
+        )
+    targets = coco_to_owlv2_targets(json.loads(coco_path.read_text()))
+    if limit_images is not None:
+        # The list is sorted by file_name, so the truncation picks the SAME images every run.
+        targets = targets[:limit_images]
+    if not targets:
+        raise SystemExit(f"{coco_path} produced no usable targets")
+    logger.info(f"{label}: {len(targets)} image(s) from {coco_path}")
+    return targets, coco_path.parent
 
 
-def _forward_batch(
-    model: Owlv2ForObjectDetection,
-    pixel_values: torch.Tensor,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-):
-    """One text-conditioned forward pass over a batch of images.
+# ------------------------------------------------------- 3. the freeze arms and the param groups
+
+
+@dataclass(frozen=True)
+class FreezePlan:
+    """Which parameters train, at which learning rate, and under which arm name."""
+
+    arm: str
+    head_params: list[torch.nn.Parameter]
+    backbone_params: list[torch.nn.Parameter]
+    backbone_frozen: bool
+    trainable_params: int
+    total_params: int
+
+    @property
+    def all_trainable(self) -> list[torch.nn.Parameter]:
+        return [*self.head_params, *self.backbone_params]
+
+
+def _apply_freeze_strategy(model: Owlv2ForObjectDetection, config: FinetuneConfig) -> FreezePlan:
+    """Freeze everything, then unfreeze exactly the arm's parameters. Returns the two LR groups.
+
+    Three arms, all of which keep the text tower frozen (see the module docstring for why that is
+    a correctness requirement and not a thrift measure):
+
+    * ``headonly``  (default)          -- ``box_head`` + ``class_head`` only;
+    * ``last{N}``   (--unfreeze-last-n)-- plus the last N vision-encoder blocks at ``lr_backbone``;
+    * ``full``      (--unfreeze-all)   -- plus the whole vision tower and the class-token
+      ``layer_norm``, still at ``lr_backbone``.
+
+    ``--unfreeze-all`` is deliberately "the whole **exported** vision path" rather than a literal
+    ``requires_grad_(True)`` over every parameter: the text tower and ``objectness_head`` are
+    excluded because neither reaches the ONNX graph (the head additionally receives no gradient
+    from this loss). Optimizing weights that cannot transfer only buys a prettier training curve.
+    """
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+
+    # Always trainable: the two heads that ARE in the exported graph. `class_head.dense0` is the
+    # projection the method's cosine scoring runs on; `class_head.logit_shift`/`logit_scale` also
+    # train (they are in the pred_logits path) but are not exported.
+    head_params: list[torch.nn.Parameter] = []
+    for head in (model.box_head, model.class_head):
+        for parameter in head.parameters():
+            parameter.requires_grad_(True)
+            head_params.append(parameter)
+
+    backbone_params: list[torch.nn.Parameter] = []
+    encoder_layers = model.owlv2.vision_model.encoder.layers
+    if config.unfreeze_all:
+        arm = "full"
+        backbone_modules = [model.owlv2.vision_model, model.layer_norm]
+    elif config.unfreeze_last_n > 0:
+        last_n = min(config.unfreeze_last_n, len(encoder_layers))
+        arm = f"last{last_n}"
+        backbone_modules = list(encoder_layers[-last_n:])
+    else:
+        arm = "headonly"
+        backbone_modules = []
+
+    for module in backbone_modules:
+        for parameter in module.parameters():
+            if parameter.requires_grad:  # already claimed by the head group; never list it twice
+                continue
+            parameter.requires_grad_(True)
+            backbone_params.append(parameter)
+
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(parameter.numel() for parameter in head_params + backbone_params)
+    return FreezePlan(
+        arm=arm,
+        head_params=head_params,
+        backbone_params=backbone_params,
+        backbone_frozen=not backbone_params,
+        trainable_params=trainable,
+        total_params=total,
+    )
+
+
+# --------------------------------------------------------- 4. the forward pass, an epoch, and val
+
+
+@dataclass(frozen=True)
+class Runtime:
+    """Everything a forward pass needs, bundled so the epoch functions stay readable."""
+
+    model: Owlv2ForObjectDetection
+    criterion: Owlv2ImageLoss
+    config: FinetuneConfig
+    device: torch.device
+    input_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    plan: FreezePlan
+    use_bf16: bool
+
+
+def _forward_batch(runtime: Runtime, pixel_values: torch.Tensor):
+    """One text-conditioned forward pass -> ``(logits, pred_boxes)``.
+
+    Two paths, and the difference is memory, not maths:
+
+    * **backbone unfrozen** -- plain ``model(...)``, gradients flow through the ViT.
+    * **backbone frozen** (the primary arm) -- ``image_text_embedder`` runs under
+      ``torch.no_grad()`` and only the heads are re-implemented here, mirroring
+      ``Owlv2ForObjectDetection.forward`` line for line. The ViT's per-layer activations are then
+      never retained, which is most of the memory and a good part of the wall-clock of a 3600-patch
+      backward pass. The next available speedup -- caching each image's frozen ``feature_map`` once
+      and reusing it every epoch -- was deliberately NOT taken: it turns a readable loop into a
+      cache-invalidation problem, and the GPU arms that matter (``last{N}``, ``full``) cannot use it
+      anyway.
 
     ``forward`` expects ``input_ids`` shaped ``[batch * num_text_queries, seq]`` (it reshapes them
     internally), so the single tokenized query block is repeated once per image in the batch.
     """
     batch_size = pixel_values.shape[0]
-    return model(
-        input_ids=input_ids.repeat(batch_size, 1),
-        pixel_values=pixel_values,
-        attention_mask=attention_mask.repeat(batch_size, 1),
+    input_ids = runtime.input_ids.repeat(batch_size, 1)
+    attention_mask = runtime.attention_mask.repeat(batch_size, 1)
+
+    if not runtime.plan.backbone_frozen:
+        outputs = runtime.model(
+            input_ids=input_ids, pixel_values=pixel_values, attention_mask=attention_mask
+        )
+        return outputs.logits, outputs.pred_boxes
+
+    with torch.no_grad():
+        query_embeds, feature_map, _outputs = runtime.model.image_text_embedder(
+            input_ids=input_ids, pixel_values=pixel_values, attention_mask=attention_mask
+        )
+
+    batch, grid_h, grid_w, hidden = feature_map.shape
+    image_feats = feature_map.reshape(batch, grid_h * grid_w, hidden)
+    num_queries = input_ids.shape[0] // batch
+    query_embeds = query_embeds.reshape(batch, num_queries, query_embeds.shape[-1])
+    # A padded (all-zero-first-token) query is masked out, exactly as the stock forward does.
+    query_mask = input_ids.reshape(batch, num_queries, input_ids.shape[-1])[..., 0] > 0
+
+    logits, _class_embeds = runtime.model.class_predictor(image_feats, query_embeds, query_mask)
+    pred_boxes = runtime.model.box_predictor(image_feats, feature_map)
+    return logits, pred_boxes
+
+
+def _batch_loss(
+    runtime: Runtime, batch: list[ImageTargets], image_dir: Path
+) -> dict[str, torch.Tensor]:
+    """Forward one micro-batch (bf16 autocast on CUDA) and return the loss terms in fp32.
+
+    The autocast region covers the forward only. Hungarian matching and the loss reductions run in
+    fp32 on purpose: bf16 has ~3 decimal digits of mantissa, which is enough for a ViT's activations
+    and nowhere near enough for a cost matrix whose argmin decides which patch supervises which box.
+    """
+    pixel_values = torch.cat(
+        [_load_pixel_values(image_dir / target.file_name) for target in batch]
+    ).to(runtime.device)
+
+    with torch.autocast(
+        device_type=runtime.device.type, dtype=torch.bfloat16, enabled=runtime.use_bf16
+    ):
+        logits, pred_boxes = _forward_batch(runtime, pixel_values)
+
+    return runtime.criterion(
+        {"logits": logits.float(), "pred_boxes": pred_boxes.float()},
+        _batch_targets(batch, runtime.device),
     )
 
 
@@ -262,24 +467,105 @@ def _total_loss(loss_dict: dict[str, torch.Tensor], config: FinetuneConfig) -> t
     )
 
 
-def _freeze_to_heads(model: Owlv2ForObjectDetection) -> list[torch.nn.Parameter]:
-    """Freeze everything, then unfreeze the three prediction heads. Returns the trainable params.
+def _mean_losses(sums: dict[str, float], batches: int) -> dict[str, float]:
+    """Per-micro-batch means of the total and of each term -- the numbers the log records."""
+    divisor = float(max(batches, 1))
+    return {key: value / divisor for key, value in sums.items()}
 
-    ``class_head`` carries OWLv2's learned ``logit_scale`` / ``logit_shift``, so training it also
-    trains the model's own calibration -- which is exactly what the method's compressed-cosine
-    thresholding problem needs.
+
+def _train_one_epoch(
+    runtime: Runtime,
+    targets: list[ImageTargets],
+    image_dir: Path,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    rng: np.random.Generator,
+    steps_taken: int,
+) -> tuple[dict[str, float], int]:
+    """One shuffled pass over the training split. Returns ``(mean losses, cumulative step count)``.
+
+    Gradient accumulation divides each micro-batch loss by ``grad_accum`` before ``backward()``, so
+    the accumulated gradient is the mean over the effective batch rather than its sum -- otherwise
+    raising ``--grad-accum`` would silently also raise the effective learning rate.
     """
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    trainable: list[torch.nn.Parameter] = []
-    for head in (model.box_head, model.class_head, model.objectness_head):
-        for parameter in head.parameters():
-            parameter.requires_grad_(True)
-            trainable.append(parameter)
-    return trainable
+    config = runtime.config
+    runtime.model.train()
+    if runtime.plan.backbone_frozen:
+        # A frozen module in train() mode is a no-op for OWLv2 (dropout is 0.0 and LayerNorm keeps
+        # no running stats), but eval() states the intent and is robust to a config that changes.
+        runtime.model.owlv2.eval()
+    runtime.model.owlv2.text_model.eval()  # frozen in every arm
+
+    sums = dict.fromkeys(("loss", *_LOSS_KEYS), 0.0)
+    batches = 0
+    pending = 0
+    optimizer.zero_grad(set_to_none=True)
+
+    for indices in deterministic_batches(len(targets), config.batch_size, rng):
+        batch = [targets[index] for index in indices]
+        loss_dict = _batch_loss(runtime, batch, image_dir)
+        loss = _total_loss(loss_dict, config)
+
+        (loss / config.grad_accum).backward()
+        pending += 1
+        batches += 1
+        sums["loss"] += float(loss.item())
+        for key in _LOSS_KEYS:
+            sums[key] += float(loss_dict[key].item())
+
+        if pending == config.grad_accum:
+            steps_taken = _optimizer_step(runtime, optimizer, scheduler, steps_taken)
+            pending = 0
+            if config.max_steps is not None and steps_taken >= config.max_steps:
+                logger.info(f"stopping early at --max-steps {config.max_steps}")
+                return _mean_losses(sums, batches), steps_taken
+
+    if pending:  # flush a short tail rather than discarding its gradient
+        steps_taken = _optimizer_step(runtime, optimizer, scheduler, steps_taken)
+
+    return _mean_losses(sums, batches), steps_taken
 
 
-# ---------------------------------------------------------------------------------- 4. the CLI
+def _optimizer_step(
+    runtime: Runtime,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    steps_taken: int,
+) -> int:
+    grad_norm = torch.nn.utils.clip_grad_norm_(runtime.plan.all_trainable, runtime.config.grad_clip)
+    optimizer.step()
+    scheduler.step()
+    optimizer.zero_grad(set_to_none=True)
+    steps_taken += 1
+    if steps_taken % 10 == 1:
+        rates = " / ".join(f"{group['lr']:.2e}" for group in optimizer.param_groups)
+        logger.debug(f"step {steps_taken}: grad-norm {float(grad_norm):.3f}, lr {rates}")
+    return steps_taken
+
+
+@torch.no_grad()
+def _evaluate(runtime: Runtime, targets: list[ImageTargets], image_dir: Path) -> dict[str, float]:
+    """The identical loss over the held-out ``valid`` split, in deterministic file_name order.
+
+    No shuffle: the val number must depend only on the weights, so that an epoch-to-epoch change is
+    the model moving and not the batch composition moving. ``test`` is never touched by this script.
+    """
+    runtime.model.eval()
+    sums = dict.fromkeys(("loss", *_LOSS_KEYS), 0.0)
+    batches = 0
+
+    for start in range(0, len(targets), runtime.config.batch_size):
+        batch = targets[start : start + runtime.config.batch_size]
+        loss_dict = _batch_loss(runtime, batch, image_dir)
+        sums["loss"] += float(_total_loss(loss_dict, runtime.config).item())
+        for key in _LOSS_KEYS:
+            sums[key] += float(loss_dict[key].item())
+        batches += 1
+
+    return _mean_losses(sums, batches)
+
+
+# ---------------------------------------------------------------------------------- 5. the CLI
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -287,13 +573,43 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Fine-tune OWLv2 on the floor-plans train split.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    defaults = FinetuneConfig()
     parser.add_argument("--train-coco", type=Path, default=Path(_DEFAULT_TRAIN_COCO))
+    parser.add_argument(
+        "--val-coco",
+        type=Path,
+        default=Path(_DEFAULT_VAL_COCO),
+        help="Held-out split for per-epoch val loss and checkpoint selection. NEVER the test split.",
+    )
     parser.add_argument("--out", type=Path, default=Path(_DEFAULT_OUT))
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--lr-head", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=defaults.seed)
+    parser.add_argument("--epochs", type=int, default=defaults.epochs)
+    parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
+    parser.add_argument("--grad-accum", type=int, default=defaults.grad_accum)
+    parser.add_argument("--lr-head", type=float, default=defaults.lr_head)
+    parser.add_argument("--lr-backbone", type=float, default=defaults.lr_backbone)
+    parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay)
+    parser.add_argument("--grad-clip", type=float, default=defaults.grad_clip)
+    parser.add_argument("--warmup-frac", type=float, default=defaults.warmup_frac)
+    parser.add_argument(
+        "--unfreeze-last-n",
+        type=int,
+        default=defaults.unfreeze_last_n,
+        help="Also train the last N vision-encoder blocks at --lr-backbone (0 = heads only).",
+    )
+    parser.add_argument(
+        "--unfreeze-all",
+        action="store_true",
+        help="Arm B: also train the whole vision tower at --lr-backbone. The text tower stays "
+        "frozen in every arm.",
+    )
     parser.add_argument("--limit-images", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument(
+        "--no-bf16",
+        action="store_true",
+        help="Disable bf16 autocast on CUDA (it is off on CPU/MPS regardless).",
+    )
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda", "mps"),
@@ -303,55 +619,122 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _config_from_args(args: argparse.Namespace) -> FinetuneConfig:
+    """The one place CLI flags become the frozen, logged, self-describing config."""
+    return FinetuneConfig(
+        seed=args.seed,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        grad_accum=args.grad_accum,
+        lr_head=args.lr_head,
+        lr_backbone=args.lr_backbone,
+        weight_decay=args.weight_decay,
+        grad_clip=args.grad_clip,
+        warmup_frac=args.warmup_frac,
+        unfreeze_last_n=args.unfreeze_last_n,
+        unfreeze_all=args.unfreeze_all,
+        max_steps=args.max_steps,
+        limit_images=args.limit_images,
+    )
+
+
 def _resolve_device(choice: str) -> torch.device:
     if choice != "auto":
         return torch.device(choice)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Fine-tune OWLv2's heads on the floor-plan train split and save a HuggingFace checkpoint."""
-    args = _parse_args(argv)
-    config = FinetuneConfig(
-        seed=args.seed,
-        batch_size=args.batch_size,
-        lr_head=args.lr_head,
-        max_steps=args.max_steps,
-        limit_images=args.limit_images,
+def _build_optimizer(
+    plan: FreezePlan, config: FinetuneConfig, total_steps: int
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    """Two-group AdamW (heads at ``lr_head``, backbone at ``lr_backbone``) + cosine warmup.
+
+    The backbone group is omitted entirely rather than added empty when the arm is heads-only, so
+    the logged LR columns match the parameters that actually move.
+    """
+    groups = [{"params": plan.head_params, "lr": config.lr_head}]
+    if plan.backbone_params:
+        groups.append({"params": plan.backbone_params, "lr": config.lr_backbone})
+    optimizer = torch.optim.AdamW(groups, weight_decay=config.weight_decay)
+
+    warmup = warmup_steps_for(total_steps, config.warmup_frac)
+    logger.info(f"schedule: {total_steps} optimizer step(s), {warmup} of them warmup")
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda step: cosine_warmup_factor(step, total_steps, warmup)
     )
+    return optimizer, scheduler
+
+
+def _planned_steps(image_count: int, config: FinetuneConfig) -> int:
+    """Total optimizer steps the schedule is stretched over (the short tail batch counts)."""
+    micro_batches = -(-image_count // config.batch_size)  # ceil
+    per_epoch = -(-micro_batches // config.grad_accum)
+    total = max(1, per_epoch * config.epochs)
+    return min(total, config.max_steps) if config.max_steps is not None else total
+
+
+def _write_train_log(
+    log_path: Path,
+    config: FinetuneConfig,
+    plan: FreezePlan,
+    epochs: list[dict[str, object]],
+    best_epoch: int,
+    best_val: float,
+    args: argparse.Namespace,
+    use_bf16: bool,
+) -> None:
+    """The record the report reads: the resolved config, the arm, the seed, and the curve."""
+    log_path.write_text(
+        json.dumps(
+            {
+                "arm": plan.arm,
+                "seed": config.seed,
+                "config": config.model_dump(mode="json"),
+                "classes": list(FLOORPLAN_CLASSES),
+                "base_model": _BASE_MODEL,
+                "train_coco": str(args.train_coco),
+                "val_coco": str(args.val_coco),
+                "trainable_params": plan.trainable_params,
+                "total_params": plan.total_params,
+                "bf16": use_bf16,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_val,
+                "epochs": epochs,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Fine-tune OWLv2 on the floor-plan train split and save the best-val HuggingFace checkpoint."""
+    args = _parse_args(argv)
+    config = _config_from_args(args)
 
     # Reproducibility: one explicit seed drives torch and the numpy epoch shuffler. Never a bare
     # random.shuffle, and never cv2.setRNGSeed (a no-op for anything that matters here, D-11).
     torch.manual_seed(config.seed)
     device = _resolve_device(args.device)
+    use_bf16 = device.type == "cuda" and not args.no_bf16 and torch.cuda.is_bf16_supported()
 
     # 1. Targets: COCO xywh px -> cxcywh normalized by the PADDED-SQUARE side (torch-free, tested).
-    if not args.train_coco.is_file():
-        raise SystemExit(
-            f"no COCO annotations at {args.train_coco}. The floor plans are a MANUAL dataset: "
-            f"drop the Roboflow export at datasets/_incoming/floorplans/{{train,valid,test}} first."
-        )
-    coco = json.loads(args.train_coco.read_text())
-    targets = coco_to_owlv2_targets(coco)
-    if config.limit_images is not None:
-        targets = targets[: config.limit_images]
-    if not targets:
-        raise SystemExit(f"{args.train_coco} produced no usable targets")
-    image_dir = args.train_coco.parent
+    train_targets, train_dir = _load_split(args.train_coco, config.limit_images, "train")
+    val_targets, val_dir = _load_split(args.val_coco, config.limit_images, "val")
 
     # 2. Model + processor. The text tower is frozen in every arm (it is not in the exported graph).
-    logger.info(f"loading {_BASE_MODEL} onto {device}")
+    logger.info(f"loading {_BASE_MODEL} onto {device} (bf16 autocast: {use_bf16})")
     model = Owlv2ForObjectDetection.from_pretrained(_BASE_MODEL).to(device)
     processor = Owlv2Processor.from_pretrained(_BASE_MODEL)
     input_ids, attention_mask = _tokenize_class_names(processor, device)
 
-    # 3. Freeze strategy: heads only (arm A). Task 2 adds the --unfreeze-* arms.
-    trainable = _freeze_to_heads(model)
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in trainable)
+    # 3. Freeze strategy -> the two learning-rate groups.
+    plan = _apply_freeze_strategy(model, config)
     logger.info(
-        f"trainable {trainable_params:,} / {total_params:,} params "
-        f"({100.0 * trainable_params / total_params:.2f}%) -- heads only"
+        f"arm {plan.arm}: trainable {plan.trainable_params:,} / {plan.total_params:,} params "
+        f"({100.0 * plan.trainable_params / plan.total_params:.2f}%) -- "
+        f"{len(plan.head_params)} head tensor(s), {len(plan.backbone_params)} backbone tensor(s)"
     )
 
     # 4. Loss: sigmoid-consistent matching + focal labels + inherited L1/GIoU boxes. "cardinality"
@@ -366,45 +749,72 @@ def main(argv: list[str] | None = None) -> None:
         focal_alpha=config.focal_alpha,
         focal_gamma=config.focal_gamma,
     ).to(device)
+    runtime = Runtime(
+        model=model,
+        criterion=criterion,
+        config=config,
+        device=device,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        plan=plan,
+        use_bf16=use_bf16,
+    )
 
-    optimizer = torch.optim.AdamW(trainable, lr=config.lr_head, weight_decay=config.weight_decay)
-
-    # 5. The thin slice: iterate batches in the deterministic file_name order and take real steps.
-    model.train()
+    # 5. Train, validating after every epoch and keeping only the best-val checkpoint.
+    total_steps = _planned_steps(len(train_targets), config)
+    optimizer, scheduler = _build_optimizer(plan, config, total_steps)
     rng = np.random.default_rng(config.seed)
-    order = [int(i) for i in rng.permutation(len(targets))]
-    steps = 0
-    for start in range(0, len(order), config.batch_size):
-        batch = [targets[i] for i in order[start : start + config.batch_size]]
-        pixel_values = torch.cat(
-            [_load_pixel_values(image_dir / target.file_name) for target in batch]
-        ).to(device)
+    log_path = args.out / "train_log.json"
+    epochs: list[dict[str, object]] = []
+    best_val = float("inf")
+    best_epoch = 0
+    steps_taken = 0
+    args.out.mkdir(parents=True, exist_ok=True)
 
-        outputs = _forward_batch(model, pixel_values, input_ids, attention_mask)
-        loss_dict = criterion(
-            {"logits": outputs.logits, "pred_boxes": outputs.pred_boxes},
-            _batch_targets(batch, device),
+    for epoch in range(1, config.epochs + 1):
+        train_losses, steps_taken = _train_one_epoch(
+            runtime, train_targets, train_dir, optimizer, scheduler, rng, steps_taken
         )
-        loss = _total_loss(loss_dict, config)
+        val_losses = _evaluate(runtime, val_targets, val_dir)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(trainable, config.grad_clip)
-        optimizer.step()
-        steps += 1
+        improved = val_losses["loss"] < best_val
+        if improved:
+            best_val, best_epoch = val_losses["loss"], epoch
+            model.save_pretrained(args.out)
+            processor.save_pretrained(args.out)
+
         logger.info(
-            f"step {steps}: loss {loss.item():.4f} "
-            f"(ce {loss_dict['loss_ce'].item():.4f} bbox {loss_dict['loss_bbox'].item():.4f} "
-            f"giou {loss_dict['loss_giou'].item():.4f})"
+            f"epoch {epoch}/{config.epochs}: train {train_losses['loss']:.4f} "
+            f"val {val_losses['loss']:.4f} "
+            f"(ce {val_losses['loss_ce']:.4f} bbox {val_losses['loss_bbox']:.4f} "
+            f"giou {val_losses['loss_giou']:.4f}) "
+            f"{'-> SAVED (best val)' if improved else '-- not saved'}"
         )
-        if config.max_steps is not None and steps >= config.max_steps:
+
+        # Numbers only: no timestamps and no durations, so two same-seed runs' logs compare equal.
+        epochs.append(
+            {
+                "epoch": epoch,
+                "steps": steps_taken,
+                "train_loss": train_losses["loss"],
+                **{f"train_{key}": train_losses[key] for key in _LOSS_KEYS},
+                "val_loss": val_losses["loss"],
+                **{f"val_{key}": val_losses[key] for key in _LOSS_KEYS},
+                "saved": improved,
+            }
+        )
+        # Rewritten every epoch so a long GPU run that dies at hour three still leaves its curve.
+        _write_train_log(log_path, config, plan, epochs, best_epoch, best_val, args, use_bf16)
+
+        if config.max_steps is not None and steps_taken >= config.max_steps:
             break
 
-    # 6. Save a plain HuggingFace checkpoint -- exactly what `export_owlv2.py --checkpoint` reads.
-    args.out.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(args.out)
-    processor.save_pretrained(args.out)
-    logger.info(f"saved checkpoint to {args.out} after {steps} step(s)")
+    if best_epoch == 0:
+        raise SystemExit("no epoch improved on an infinite val loss -- nothing was saved")
+    logger.info(
+        f"saved the epoch-{best_epoch} checkpoint (val loss {best_val:.4f}) to {args.out}; "
+        f"curve in {log_path}"
+    )
 
 
 if __name__ == "__main__":

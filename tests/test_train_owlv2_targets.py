@@ -23,7 +23,9 @@ from object_search.train.owlv2_targets import (
     OWLV2_NUM_PATCHES,
     FinetuneConfig,
     coco_to_owlv2_targets,
+    cosine_warmup_factor,
     deterministic_batches,
+    warmup_steps_for,
 )
 
 _CATEGORIES: list[dict[str, Any]] = [
@@ -299,3 +301,79 @@ def test_deterministic_batches_is_identical_for_the_same_seed_and_differs_across
 
 def test_deterministic_batches_of_an_empty_split_yields_nothing() -> None:
     assert list(deterministic_batches(0, 4, np.random.default_rng(0))) == []
+
+
+# --------------------------------------------------------------------- the learning-rate schedule
+
+
+def test_cosine_warmup_rises_linearly_then_decays_to_zero() -> None:
+    """The three landmarks of the schedule: first step, end of warmup, end of run."""
+    factors = [cosine_warmup_factor(step, total_steps=100, warmup_steps=10) for step in range(100)]
+
+    assert factors[0] == pytest.approx(0.1)  # counts from 1, so the first step is NOT a no-op
+    assert factors[9] == pytest.approx(1.0)  # last warmup step reaches the base learning rate
+    assert factors[10] == pytest.approx(1.0)  # ... and the cosine branch meets it continuously
+    assert factors[-1] < 0.001  # the run ends at (essentially) zero
+    assert all(0.0 <= factor <= 1.0 for factor in factors)
+
+
+def test_cosine_warmup_is_monotone_up_then_monotone_down() -> None:
+    factors = [cosine_warmup_factor(step, total_steps=50, warmup_steps=5) for step in range(50)]
+    warmup, decay = factors[:5], factors[4:]
+    assert warmup == sorted(warmup)
+    assert decay == sorted(decay, reverse=True)
+
+
+def test_cosine_warmup_without_warmup_starts_at_the_base_rate() -> None:
+    assert cosine_warmup_factor(0, total_steps=20, warmup_steps=0) == pytest.approx(1.0)
+
+
+def test_cosine_warmup_respects_a_nonzero_floor() -> None:
+    """A `min_factor` floor keeps the tail of the run learning instead of stalling at zero."""
+    last = cosine_warmup_factor(19, total_steps=20, warmup_steps=0, min_factor=0.1)
+    assert 0.1 <= last < 0.11
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"step": -1, "total_steps": 10, "warmup_steps": 1},
+        {"step": 0, "total_steps": 0, "warmup_steps": 0},
+        {"step": 0, "total_steps": 10, "warmup_steps": -1},
+        {"step": 0, "total_steps": 10, "warmup_steps": 10},  # would make the schedule constant
+        {"step": 0, "total_steps": 10, "warmup_steps": 1, "min_factor": 1.5},
+    ],
+)
+def test_cosine_warmup_rejects_nonsensical_schedules(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        cosine_warmup_factor(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("total_steps", "warmup_frac", "expected"),
+    [
+        (100, 0.1, 10),
+        (100, 0.0, 0),
+        (3, 0.1, 0),  # rounds to nothing on a smoke run rather than swallowing it
+        (3, 0.9, 2),  # clamped to total_steps - 1, so the schedule never becomes constant
+        (1, 0.5, 0),
+    ],
+)
+def test_warmup_steps_for_rounds_and_clamps(
+    total_steps: int, warmup_frac: float, expected: int
+) -> None:
+    resolved = warmup_steps_for(total_steps, warmup_frac)
+    assert resolved == expected
+    # Whatever it returns is, by construction, accepted by the schedule it feeds.
+    assert 0.0 <= cosine_warmup_factor(0, total_steps, resolved) <= 1.0
+
+
+def test_warmup_steps_for_rejects_an_empty_run() -> None:
+    with pytest.raises(ValueError):
+        warmup_steps_for(0, 0.1)
+
+
+def test_finetune_config_carries_the_warmup_fraction() -> None:
+    assert FinetuneConfig().warmup_frac == pytest.approx(0.1)
+    with pytest.raises(ValidationError):
+        FinetuneConfig(warmup_frac=1.0)  # a whole run of warmup is not a schedule
