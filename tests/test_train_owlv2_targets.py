@@ -259,6 +259,28 @@ def test_finetune_config_defaults_are_the_owl_vit_recipe() -> None:
     assert config.unfreeze_all is False and config.unfreeze_last_n == 0  # arm A is the default
 
 
+def test_the_default_loss_mode_is_focal_the_already_measured_recipe() -> None:
+    """D-hg1-05: adding the contrastive variant must not change what a bare run does.
+
+    The three arms measured by quick task 260801-8zy were produced by this default; if it ever
+    flips, their numbers silently stop describing the shipped recipe.
+    """
+    assert FinetuneConfig().loss_mode == "focal"
+
+
+def test_the_supcon_defaults_are_the_khosla_recipe() -> None:
+    """tau = 0.07 (D-hg1-02), an unweighted contrastive term, and 64 background negatives."""
+    config = FinetuneConfig()
+    assert config.supcon_temperature == pytest.approx(0.07)
+    assert config.w_contrast == pytest.approx(1.0)
+    assert config.supcon_background_negatives == 64
+
+
+@pytest.mark.parametrize("loss_mode", ["focal", "contrastive", "both"])
+def test_every_advertised_loss_mode_is_accepted(loss_mode: str) -> None:
+    assert FinetuneConfig(loss_mode=loss_mode).loss_mode == loss_mode  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -274,9 +296,14 @@ def test_finetune_config_defaults_are_the_owl_vit_recipe() -> None:
         ("max_steps", 0),
         ("limit_images", 0),
         ("seed", -1),
+        ("loss_mode", "supcon"),  # a plausible-looking name that is not one of the three
+        ("supcon_temperature", 0.0),  # tau divides the similarities
+        ("supcon_temperature", -0.07),
+        ("w_contrast", -1.0),
+        ("supcon_background_negatives", -1),
     ],
 )
-def test_finetune_config_rejects_out_of_range_values(field: str, value: float) -> None:
+def test_finetune_config_rejects_out_of_range_values(field: str, value: float | str) -> None:
     with pytest.raises(ValidationError):
         FinetuneConfig(**{field: value})
 

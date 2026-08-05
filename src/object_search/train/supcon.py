@@ -76,6 +76,17 @@ x-fastest order (index 1 is corner ``(0.50, 0.25)``, row 0 / col 1), and ``compu
 per-patch box prior from exactly those coordinates. If either the raster order or the frame were
 wrong, background sampling would draw "negatives" from *inside* the objects, and the loss would fall
 while training the precise opposite of what it claims (threat T-hg1-01).
+
+The diagnostic, and why its components are nullable
+---------------------------------------------------
+:func:`cosine_gap_report` measures the property the loss is *supposed* to move -- mean same-class
+cosine against mean different-class and mean anchor-to-background cosine -- so a run carries its own
+answer to "did the objective move the thing ``owlv2-oneshot`` actually scores with?", independently
+of whether F1 followed (D-hg1-06). Every component is ``float | None`` and a component with no
+contributing pair is ``None``, **never** ``0.0``: a pool with one anchor per class has no same-class
+pair at all, and reporting ``0.0`` there would read as "measured, no separation" when the truth is
+"not measurable". The same distinction the repo's nullable human-count rule makes, for the same
+reason -- a fabricated zero is indistinguishable from a real one once it is in a table.
 """
 
 from __future__ import annotations
@@ -90,6 +101,18 @@ from loguru import logger
 # same convention (and the same value) as ``search/owlv2_oneshot._l2_normalize``: a zero vector
 # stays zero rather than becoming NaN.
 _EPS = 1e-12
+
+
+def _l2_normalize(matrix: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Row-wise L2 normalization. A zero row stays zero rather than becoming NaN (see :data:`_EPS`).
+
+    Shared by :func:`supcon_loss` and :func:`cosine_gap_report` so the loss and the diagnostic that
+    reports on it can never disagree about what "cosine" means.
+    """
+    normalized: npt.NDArray[np.float64] = matrix / np.maximum(
+        np.linalg.norm(matrix, axis=1, keepdims=True), _EPS
+    )
+    return normalized
 
 
 def patch_grid_size(num_patches: int) -> int:
@@ -161,6 +184,144 @@ def background_patch_mask(
     return ~inside_any
 
 
+def sample_background_indices(
+    boxes: npt.NDArray[np.floating],
+    grid: int,
+    count: int,
+    rng: np.random.Generator,
+) -> npt.NDArray[np.int64]:
+    """Draw up to ``count`` background patch indices, without replacement, deterministically.
+
+    The denominator-only negatives of D-hg1-03. Every returned index is a cell
+    :func:`background_patch_mask` marked ``True``, so a sampled row can never be a patch the model
+    is simultaneously being told is a door.
+
+    ``rng`` is an explicitly-seeded :func:`numpy.random.default_rng`, passed in by the caller --
+    never a bare ``random`` call and never a fresh generator built here, so the repo's
+    reproducibility rule holds: the same seed draws the same patches, and a training run's
+    background sample is a function of its config rather than of the interpreter's global state.
+
+    Fewer than ``count`` indices is a normal return, not an error: a floor plan whose annotations
+    tile most of the page genuinely has fewer background cells than asked for, and an exception
+    there would abort a legitimate training run over an image that simply has little background.
+
+    Args:
+        boxes: ``(n, 4)`` ``(cx, cy, w, h)`` normalized over the padded-square side. May be empty.
+        grid: The patch-grid side, from :func:`patch_grid_size`.
+        count: How many background patches to draw. ``0`` is a supported disable and returns an
+            empty array (it is what ``supcon_background_negatives=0`` means).
+        rng: The seeded generator to draw from.
+
+    Returns:
+        An ``int64`` array of at most ``count`` patch indices, **ascending** -- so the pooled row
+        order is a function of the sampled set rather than of the draw order.
+
+    Raises:
+        ValueError: If ``count`` is negative, or ``grid``/``boxes`` are rejected by
+            :func:`background_patch_mask`.
+    """
+    if count < 0:
+        raise ValueError(f"count must be >= 0, got {count}")
+    if count == 0:
+        return np.zeros(0, dtype=np.int64)
+
+    candidates = np.flatnonzero(background_patch_mask(boxes, grid)).astype(np.int64)
+    if candidates.size == 0:
+        logger.debug(
+            "sample_background_indices: every one of the {} cell(s) is covered by a box; "
+            "no background negatives for this image",
+            grid * grid,
+        )
+        return np.zeros(0, dtype=np.int64)
+    if candidates.size <= count:
+        return candidates
+
+    drawn: npt.NDArray[np.int64] = np.sort(rng.choice(candidates, size=count, replace=False))
+    return drawn
+
+
+def cosine_gap_report(
+    anchor_embeddings: npt.NDArray[np.floating],
+    anchor_labels: npt.NDArray[np.integer],
+    background_embeddings: npt.NDArray[np.floating],
+) -> dict[str, float | None]:
+    """Mean same-class / different-class / anchor-to-background cosine, and the two gaps.
+
+    The diagnostic of D-hg1-06: it measures the property the contrastive objective claims to train,
+    in the same L2-normalized space ``owlv2-oneshot`` scores in, so a run can distinguish "the loss
+    moved the cosine property but F1 did not follow" from "the loss never moved it". Recorded at
+    epoch 0 as well as after every epoch, because without the pre-training measurement the numbers
+    have no reference point inside the run.
+
+    Every component is nullable and a component with no contributing pair is ``None``, never
+    ``0.0`` -- see the module docstring for why that distinction is load-bearing rather than
+    fastidious.
+
+    Args:
+        anchor_embeddings: ``(n, d)`` matched-anchor rows. May be empty.
+        anchor_labels: ``(n,)`` class labels aligned with ``anchor_embeddings``.
+        background_embeddings: ``(m, d)`` background rows. May be empty.
+
+    Returns:
+        ``{"same_class_mean", "diff_class_mean", "background_mean", "gap_class",
+        "gap_background"}``, each ``float`` or ``None``. ``gap_class = same_class_mean -
+        diff_class_mean`` and ``gap_background = same_class_mean - background_mean``, both ``None``
+        if either operand is.
+
+    Raises:
+        ValueError: If either array is not 2-D, the labels do not align with the anchors, or the
+            two embedding sets disagree about ``d``.
+    """
+    anchors = np.asarray(anchor_embeddings, dtype=np.float64)
+    background = np.asarray(background_embeddings, dtype=np.float64)
+    if anchors.ndim != 2:
+        raise ValueError(f"anchor_embeddings must be (n, d), got shape {anchors.shape}")
+    if background.ndim != 2:
+        raise ValueError(f"background_embeddings must be (m, d), got shape {background.shape}")
+    labels = np.asarray(anchor_labels)
+    if labels.shape != (anchors.shape[0],):
+        raise ValueError(f"anchor_labels must be ({anchors.shape[0]},), got {labels.shape}")
+    if anchors.size and background.size and anchors.shape[1] != background.shape[1]:
+        raise ValueError(
+            f"anchors are {anchors.shape[1]}-D but background is {background.shape[1]}-D"
+        )
+
+    same_class_mean: float | None = None
+    diff_class_mean: float | None = None
+    background_mean: float | None = None
+
+    if anchors.shape[0] >= 2:
+        normalized = _l2_normalize(anchors)
+        # Upper triangle only: each unordered pair counted once, and never a row against itself
+        # (whose cosine is 1 by construction and would inflate the same-class mean).
+        rows, cols = np.triu_indices(anchors.shape[0], k=1)
+        pair_cosine = (normalized @ normalized.T)[rows, cols]
+        same_pair = labels[rows] == labels[cols]
+        if bool(np.any(same_pair)):
+            same_class_mean = float(pair_cosine[same_pair].mean())
+        if bool(np.any(~same_pair)):
+            diff_class_mean = float(pair_cosine[~same_pair].mean())
+
+    if anchors.shape[0] and background.shape[0]:
+        background_mean = float((_l2_normalize(anchors) @ _l2_normalize(background).T).mean())
+
+    return {
+        "same_class_mean": same_class_mean,
+        "diff_class_mean": diff_class_mean,
+        "background_mean": background_mean,
+        "gap_class": (
+            None
+            if same_class_mean is None or diff_class_mean is None
+            else same_class_mean - diff_class_mean
+        ),
+        "gap_background": (
+            None
+            if same_class_mean is None or background_mean is None
+            else same_class_mean - background_mean
+        ),
+    }
+
+
 def supcon_loss(
     embeddings: npt.NDArray[np.floating],
     labels: npt.NDArray[np.integer],
@@ -216,7 +377,7 @@ def supcon_loss(
         return 0.0
 
     # 1. L2-normalize, so the dot product below IS cosine -- the space owlv2-oneshot scores in.
-    z = z / np.maximum(np.linalg.norm(z, axis=1, keepdims=True), _EPS)
+    z = _l2_normalize(z)
     similarity = (z @ z.T) / temperature
 
     # 2. A(i) is every other row INCLUDING the denominator-only ones; P(i) is the same-class rows,

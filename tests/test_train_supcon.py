@@ -27,7 +27,9 @@ import pytest
 
 from object_search.train.supcon import (
     background_patch_mask,
+    cosine_gap_report,
     patch_grid_size,
+    sample_background_indices,
     supcon_loss,
 )
 
@@ -328,3 +330,199 @@ def test_background_mask_unions_overlapping_boxes() -> None:
 def test_background_patch_mask_rejects_bad_shapes(boxes: np.ndarray, grid: int) -> None:
     with pytest.raises(ValueError):
         background_patch_mask(boxes, grid)
+
+
+# ------------------------------------------------------------------- background negative sampling
+
+_TWO_BOXES = np.array([[0.2, 0.2, 0.2, 0.2], [0.7, 0.6, 0.3, 0.2]])
+
+
+def test_background_sampling_is_identical_for_the_same_seed_and_differs_across_seeds() -> None:
+    """The repo's reproducibility rule at the one place the contrastive loss is stochastic."""
+    first = sample_background_indices(_TWO_BOXES, 20, 16, np.random.default_rng(0))
+    again = sample_background_indices(_TWO_BOXES, 20, 16, np.random.default_rng(0))
+    other = sample_background_indices(_TWO_BOXES, 20, 16, np.random.default_rng(1))
+
+    assert np.array_equal(first, again)
+    assert not np.array_equal(first, other)
+
+
+def test_sampled_indices_are_never_inside_a_box() -> None:
+    """Asserted against the mask itself, which is the claim that makes the loss mean anything.
+
+    If this ever fails, the "negatives" are patches the box loss is simultaneously supervising as
+    objects, and the contrastive term trains the exact opposite of what it advertises while its
+    curve still falls (threat T-hg1-01).
+    """
+    mask = background_patch_mask(_TWO_BOXES, 20)
+    drawn = sample_background_indices(_TWO_BOXES, 20, 64, np.random.default_rng(3))
+
+    assert drawn.size == 64
+    assert mask[drawn].all()
+    assert len(set(drawn.tolist())) == drawn.size  # without replacement
+
+
+def test_sampled_indices_are_ascending_and_int64() -> None:
+    """Sorted, so the pooled row order depends on the sampled SET, not on the draw order."""
+    drawn = sample_background_indices(_TWO_BOXES, 20, 32, np.random.default_rng(4))
+
+    assert drawn.dtype == np.int64
+    assert drawn.tolist() == sorted(drawn.tolist())
+
+
+def test_asking_for_more_than_exist_returns_every_background_cell_not_an_error() -> None:
+    """A densely-annotated plan genuinely has few background cells; that is not a failure."""
+    box = np.array([[0.5, 0.5, 0.75, 0.75]])  # leaves only the border cells on a 6x6 grid
+    mask = background_patch_mask(box, 6)
+    drawn = sample_background_indices(box, 6, 64, np.random.default_rng(0))
+
+    assert 0 < drawn.size < 64
+    assert drawn.tolist() == np.flatnonzero(mask).tolist()
+
+
+def test_an_image_with_no_background_cell_yields_an_empty_draw() -> None:
+    covered = np.array([[0.5, 0.5, 1.0, 1.0]])
+    drawn = sample_background_indices(covered, 8, 32, np.random.default_rng(0))
+
+    assert drawn.size == 0
+    assert drawn.dtype == np.int64
+
+
+def test_a_count_of_zero_is_a_supported_disable() -> None:
+    """`supcon_background_negatives=0` must be an ordinary return, so the knob is testable."""
+    drawn = sample_background_indices(_TWO_BOXES, 20, 0, np.random.default_rng(0))
+
+    assert drawn.size == 0
+    assert drawn.dtype == np.int64
+
+
+def test_zero_count_does_not_consume_the_generator() -> None:
+    """Disabling background negatives must not perturb the seeded stream the epoch shuffle uses."""
+    rng = np.random.default_rng(7)
+    sample_background_indices(_TWO_BOXES, 20, 0, rng)
+
+    assert rng.integers(0, 1_000_000) == np.random.default_rng(7).integers(0, 1_000_000)
+
+
+@pytest.mark.parametrize("count", [-1, -64])
+def test_sample_background_indices_rejects_a_negative_count(count: int) -> None:
+    with pytest.raises(ValueError):
+        sample_background_indices(_TWO_BOXES, 20, count, np.random.default_rng(0))
+
+
+def test_sample_background_indices_propagates_the_mask_shape_guards() -> None:
+    with pytest.raises(ValueError):
+        sample_background_indices(np.zeros((2, 3)), 4, 2, np.random.default_rng(0))
+
+
+# -------------------------------------------------------------------------- the cosine diagnostic
+
+
+def test_cosine_gap_of_clustered_anchors_far_from_background_is_near_its_maximum() -> None:
+    """Tight clusters, mutually near-orthogonal, with background further still."""
+    embeddings, labels = _clustered_pool(classes=3, per_class=4, dim=16, spread=0.01)
+    background = -embeddings[:6]  # antipodal to real anchors: as far as a cosine can get
+
+    report = cosine_gap_report(embeddings, labels, background)
+
+    assert report["same_class_mean"] is not None and report["same_class_mean"] > 0.99
+    assert report["gap_class"] is not None and report["gap_class"] > 0.9
+    assert report["gap_background"] is not None and report["gap_background"] > 0.9
+
+
+def test_cosine_gap_of_randomly_labelled_anchors_is_near_zero() -> None:
+    """Labels that describe nothing must not produce a class gap -- the diagnostic's null case."""
+    rng = np.random.default_rng(11)
+    embeddings = rng.normal(size=(60, 32))
+    labels = rng.integers(0, 3, size=60)
+
+    report = cosine_gap_report(embeddings, labels, np.zeros((0, 32)))
+
+    assert report["gap_class"] is not None
+    assert abs(report["gap_class"]) < 0.05
+    assert report["background_mean"] is None  # nothing to measure against
+    assert report["gap_background"] is None
+
+
+def test_a_component_with_no_contributing_pair_is_none_never_zero() -> None:
+    """One anchor per class: there IS no same-class pair, so `None` -- not a fabricated 0.0.
+
+    A ``0.0`` here would read in the report's cosine-gap table as "measured, no separation", when
+    the truth is "not measurable". The repo's nullable-human-count rule, applied to a metric.
+    """
+    embeddings = np.array([[1.0, 0.0], [0.0, 1.0]])
+    report = cosine_gap_report(embeddings, np.array([0, 1]), np.zeros((0, 2)))
+
+    assert report["same_class_mean"] is None
+    assert report["diff_class_mean"] == pytest.approx(0.0)  # measured, and genuinely zero
+    assert report["gap_class"] is None
+    assert report["gap_background"] is None
+
+
+def test_a_single_class_pool_has_no_different_class_mean() -> None:
+    embeddings, _labels = _clustered_pool(classes=1, per_class=4)
+    report = cosine_gap_report(embeddings, np.zeros(4, dtype=int), np.zeros((0, 8)))
+
+    assert report["same_class_mean"] is not None
+    assert report["diff_class_mean"] is None
+    assert report["gap_class"] is None
+
+
+def test_an_empty_anchor_pool_reports_every_component_as_none() -> None:
+    report = cosine_gap_report(np.zeros((0, 4)), np.zeros(0, dtype=int), np.zeros((3, 4)))
+
+    assert set(report) == {
+        "same_class_mean",
+        "diff_class_mean",
+        "background_mean",
+        "gap_class",
+        "gap_background",
+    }
+    assert all(value is None for value in report.values())
+
+
+def test_the_background_mean_is_measured_over_every_anchor_background_pair() -> None:
+    """Two anchors at 0 and 90 degrees against one background row at 0: mean cosine 0.5."""
+    anchors = np.array([[1.0, 0.0], [0.0, 1.0]])
+    report = cosine_gap_report(anchors, np.array([0, 1]), np.array([[3.0, 0.0]]))
+
+    assert report["background_mean"] == pytest.approx(0.5)
+
+
+def test_cosine_gap_is_invariant_to_a_positive_rescaling() -> None:
+    """L2 normalization happens INSIDE, exactly as it does at inference."""
+    embeddings, labels = _clustered_pool(classes=2, per_class=3)
+    background = np.abs(embeddings[:2]) + 0.3
+    scaled = embeddings.copy()
+    scaled[0] *= 12.0
+
+    baseline = cosine_gap_report(embeddings, labels, background)
+    rescaled = cosine_gap_report(scaled, labels, background * 5.0)
+
+    for key, value in baseline.items():
+        assert rescaled[key] == pytest.approx(value)
+
+
+def test_a_zero_anchor_row_does_not_produce_nan() -> None:
+    embeddings, labels = _clustered_pool(classes=2, per_class=3)
+    embeddings[0] = 0.0
+
+    report = cosine_gap_report(embeddings, labels, np.zeros((1, 8)))
+
+    assert all(value is not None and math.isfinite(value) for value in report.values())
+
+
+@pytest.mark.parametrize(
+    ("anchors", "labels", "background"),
+    [
+        (np.zeros(4), np.zeros(4, dtype=int), np.zeros((1, 4))),  # anchors not 2-D
+        (np.zeros((4, 3)), np.zeros(4, dtype=int), np.zeros(3)),  # background not 2-D
+        (np.zeros((4, 3)), np.zeros(3, dtype=int), np.zeros((1, 3))),  # labels misaligned
+        (np.zeros((4, 3)), np.zeros(4, dtype=int), np.zeros((1, 5))),  # dimensions disagree
+    ],
+)
+def test_cosine_gap_report_rejects_mismatched_inputs(
+    anchors: np.ndarray, labels: np.ndarray, background: np.ndarray
+) -> None:
+    with pytest.raises(ValueError):
+        cosine_gap_report(anchors, labels, background)

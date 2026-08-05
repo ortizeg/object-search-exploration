@@ -74,12 +74,55 @@ BGR->RGB, rescale ``1/255``, **pad bottom-right** to a square of side ``max(H, W
 padded-square side** (see the ``owlv2_targets`` module docstring for why per-axis ``(W, H)``
 normalization would be a silent, plausible-looking bug).
 
+The second objective: ``--loss-mode contrastive`` (quick task 260805-hg1)
+-------------------------------------------------------------------------
+The recipe above trains a **5-way text-conditioned classification** and measured a negative result
+on this domain. Its diagnosed reason is that the objective is a *proxy*: ``owlv2-oneshot`` does not
+classify at inference, it ranks scene patches by **L2-normalized cosine similarity** to one
+image-derived query embedding, in the ``class_embeds`` space. Nothing in a focal loss over
+``pred_logits`` asks for that space to be well-separated -- ``class_head.logit_shift`` and
+``logit_scale`` can absorb a great deal of the improvement, and neither is exported.
+
+``--loss-mode contrastive`` replaces the focal term with a **supervised-contrastive loss over
+``class_embeds`` itself** (Khosla et al. 2020's ``L_out``; the torch-free specification, and every
+decision behind it, is in :mod:`object_search.train.supcon`). It asks for exactly the inference-time
+property: same-class instances cosine-close, different-class instances and **background patches**
+cosine-far. Background patches are denominator-only negatives and are load-bearing rather than a
+refinement -- the measured failure is precision 0.01-0.11 at high recall, i.e. background scoring
+too high, which an anchor-only contrastive term cannot touch (D-hg1-03).
+
+Two things are deliberately unchanged in every mode: ``loss_bbox``/``loss_giou`` stay in the total
+(the box head still has to be trained for the exported graph to produce usable boxes, and a
+contrastive objective supervises no geometry at all), and ``focal`` remains the **default**, with
+its per-epoch numbers asserted identical to a fixture captured before any of this existed.
+
+The contrastive pool is the EFFECTIVE batch, and the pooled anchors are diagnosed
+---------------------------------------------------------------------------------
+Per D-hg1-04 the SupCon term is computed **once per optimizer step** over the anchors and background
+rows of all ``--grad-accum`` micro-batches, not once per micro-batch: at ``--batch-size 2`` a single
+micro-batch holds ~1.8 stairs boxes, and an anchor with no same-class positive contributes nothing,
+so a per-micro-batch pool would quietly reduce a five-class objective to a door/window one. The cost
+is stated rather than hidden -- in contrastive/both mode the backward is deferred to the
+accumulation boundary, so ``grad_accum`` micro-batch graphs are retained (cheap on the primary
+``headonly`` arm, where the ViT runs under ``no_grad``; expensive with an unfrozen backbone, which
+is one more reason the primary contrastive run is ``headonly``).
+
+Per D-hg1-06 every contrastive run also records ``val_cos_gap`` -- mean same-class, different-class
+and anchor-to-background cosine over the val anchors -- **including an epoch-0 entry measured before
+the first optimizer step**. Without that pre-training reference the gap has no meaning inside the
+run, and the run could not distinguish "the loss moved the property the method uses but F1 did not
+follow" from "the loss never moved it", which is precisely the question 260801-8zy could not answer.
+The epoch-0 record is a no-gradient pass over both splits, so its ``train_*`` columns are the
+pretrained model's losses rather than an epoch of training.
+
 Reproducibility
 ---------------
 Same seed => identical per-epoch losses, which the task's verify step asserts by diffing two runs'
-``train_log.json``. One ``--seed`` drives ``torch.manual_seed`` and the ``np.random.default_rng``
-epoch shuffler; the epoch record holds numbers only (never a duration or a timestamp), so the log
-files of two same-seed runs compare equal.
+``train_log.json``. One ``--seed`` drives ``torch.manual_seed``, the ``np.random.default_rng`` epoch
+shuffler, and the background-negative sampler; the epoch record holds numbers only (never a duration
+or a timestamp), so the log files of two same-seed runs compare equal. Validation draws its
+background patches from a generator re-seeded at the start of **every** evaluation, so an
+epoch-to-epoch change in ``val_cos_gap`` is the model moving and never the sample moving.
 """
 
 from __future__ import annotations
@@ -110,6 +153,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 from object_search.inference.owlv2 import owlv2_preprocess_tensor  # noqa: E402
 from object_search.train.owlv2_targets import (  # noqa: E402
     FLOORPLAN_CLASSES,
+    OWLV2_NUM_PATCHES,
     FinetuneConfig,
     ImageTargets,
     coco_to_owlv2_targets,
@@ -117,7 +161,12 @@ from object_search.train.owlv2_targets import (  # noqa: E402
     deterministic_batches,
     warmup_steps_for,
 )
-from object_search.train.supcon import supcon_loss  # noqa: E402
+from object_search.train.supcon import (  # noqa: E402
+    cosine_gap_report,
+    patch_grid_size,
+    sample_background_indices,
+    supcon_loss,
+)
 
 _BASE_MODEL = "google/owlv2-base-patch16-ensemble"
 _DEFAULT_TRAIN_COCO = "datasets/_incoming/floorplans/train/_annotations.coco.json"
@@ -555,8 +604,10 @@ def _contrastive_rows(
     outputs: dict[str, torch.Tensor],
     class_embeds: torch.Tensor,
     targets: list[dict[str, torch.Tensor]],
+    batch: list[ImageTargets],
+    rng: np.random.Generator,
 ) -> ContrastiveRows:
-    """Gather this micro-batch's SupCon anchors: the matched patch for each ground-truth box.
+    """Gather this micro-batch's SupCon rows: the matched anchors, plus background negatives.
 
     The anchor selection is the **existing** ``Owlv2HungarianMatcher`` assignment, not new matching
     logic: the anchor for a ground-truth box is by construction the same patch the box loss
@@ -567,25 +618,54 @@ def _contrastive_rows(
     is a deliberate trade: a duplicated, deterministic, ``no_grad`` Hungarian solve (microseconds
     against a 3600-patch ViT forward) in exchange for not threading cached mutable state out of a
     ``transformers`` base class. It runs in contrastive/both mode only.
+
+    The background rows (D-hg1-03) are drawn from the **numpy** ``ImageTargets.boxes`` rather than
+    the batched tensors, because ``sample_background_indices`` is the tested torch-free
+    specification and its coordinate frame is the frame those boxes are already in. The grid side is
+    derived from the tensor the model actually returned, so a re-export at another resolution is
+    caught here instead of silently mis-indexing every negative.
     """
     indices = runtime.criterion.matcher(outputs, targets)
+    num_patches = int(class_embeds.shape[1])
+    grid = patch_grid_size(num_patches)
+    if num_patches != OWLV2_NUM_PATCHES:
+        logger.warning(
+            "class_embeds carries {} patches ({}x{}), not the pinned {} -- background sampling "
+            "follows the tensor, but check that the export operating point is what you intended",
+            num_patches,
+            grid,
+            grid,
+            OWLV2_NUM_PATCHES,
+        )
 
     anchors: list[torch.Tensor] = []
     labels: list[torch.Tensor] = []
+    background: list[torch.Tensor] = []
     for image_index, (source_idx, target_idx) in enumerate(indices):
         source = source_idx.to(class_embeds.device)
         anchors.append(class_embeds[image_index, source])
         labels.append(targets[image_index]["class_labels"][target_idx.to(class_embeds.device)])
 
-    empty_background = class_embeds.new_zeros((0, class_embeds.shape[-1]))
+        sampled = sample_background_indices(
+            batch[image_index].boxes, grid, runtime.config.supcon_background_negatives, rng
+        )
+        if sampled.size:
+            background.append(
+                class_embeds[
+                    image_index,
+                    torch.from_numpy(sampled).to(device=class_embeds.device, dtype=torch.int64),
+                ]
+            )
+
+    empty = class_embeds.new_zeros((0, class_embeds.shape[-1]))
     return ContrastiveRows(
-        anchors=torch.cat(anchors) if anchors else empty_background,
+        anchors=torch.cat(anchors) if anchors else empty,
         labels=(
             torch.cat(labels)
             if labels
             else torch.zeros(0, dtype=torch.int64, device=class_embeds.device)
         ),
-        background=empty_background,
+        background=torch.cat(background) if background else empty,
     )
 
 
@@ -616,7 +696,7 @@ def _pooled_supcon(rows: Sequence[ContrastiveRows], config: FinetuneConfig) -> t
 
 
 def _batch_loss(
-    runtime: Runtime, batch: list[ImageTargets], image_dir: Path
+    runtime: Runtime, batch: list[ImageTargets], image_dir: Path, rng: np.random.Generator
 ) -> tuple[dict[str, torch.Tensor], ContrastiveRows | None]:
     """Forward one micro-batch (bf16 autocast on CUDA) -> the loss terms in fp32, plus SupCon rows.
 
@@ -625,7 +705,8 @@ def _batch_loss(
     and nowhere near enough for a cost matrix whose argmin decides which patch supervises which box.
 
     The returned ``ContrastiveRows`` is ``None`` in ``focal`` mode, so that arm does no extra work
-    at all and stays byte-comparable with the three already-measured arms.
+    at all and stays byte-comparable with the three already-measured arms -- including its
+    consumption of ``rng``, which focal mode never touches here.
     """
     pixel_values = torch.cat(
         [_load_pixel_values(image_dir / target.file_name) for target in batch]
@@ -642,7 +723,7 @@ def _batch_loss(
 
     rows = None
     if runtime.config.loss_mode != "focal":
-        rows = _contrastive_rows(runtime, outputs, class_embeds.float(), targets)
+        rows = _contrastive_rows(runtime, outputs, class_embeds.float(), targets, batch, rng)
     return loss_dict, rows
 
 
@@ -670,6 +751,57 @@ def _mean_losses(sums: dict[str, float], batches: int) -> dict[str, float]:
     return {key: value / divisor for key, value in sums.items()}
 
 
+def _epoch_means(
+    sums: dict[str, float],
+    batches: int,
+    supcon_sum: float,
+    supcon_pools: int,
+    config: FinetuneConfig,
+) -> dict[str, float]:
+    """Fold the two different granularities into one set of epoch numbers.
+
+    ``loss_ce``/``loss_bbox``/``loss_giou`` are per-**micro-batch** quantities; the contrastive term
+    is a per-**pool** one (D-hg1-04: once per optimizer step over the effective batch), so the two
+    cannot share a divisor. Each is averaged over its own count and the reported total is
+    ``mean(box terms) + w_contrast * mean(supcon)`` -- which is exactly what the accumulated
+    gradient represents, since averaging a per-micro-batch ``w_contrast * supcon_i`` gives the same
+    thing. In ``focal`` mode this returns ``_mean_losses`` untouched.
+    """
+    means = _mean_losses(sums, batches)
+    if config.loss_mode == "focal":
+        return means
+    supcon = supcon_sum / float(max(supcon_pools, 1))
+    means[_SUPCON_KEY] = supcon
+    means["loss"] = means["loss"] + config.w_contrast * supcon
+    return means
+
+
+def _backward_accumulated(
+    runtime: Runtime,
+    micro_totals: list[torch.Tensor],
+    rows: Sequence[ContrastiveRows],
+) -> float | None:
+    """One optimizer step's deferred backward, in contrastive/both mode. Returns the pooled SupCon.
+
+    The whole point of D-hg1-04 lives here: the micro-batch box/focal totals were kept as live
+    graphs rather than backwarded on the spot, so the contrastive term can be computed **once**
+    over the anchors and background rows of the entire effective batch and the sum backwarded in
+    one pass. Division by ``grad_accum`` happens in the same place the focal path does it, so
+    raising ``--grad-accum`` still does not silently raise the effective learning rate; the
+    contrastive term is added undivided because it is already a single per-step quantity.
+
+    Returns ``None`` when the pool had no anchor with a same-class positive -- the loss then
+    genuinely has no contrastive component to report for that step, and averaging in a fabricated
+    ``0.0`` would make the reported curve depend on batch composition.
+    """
+    total = torch.stack(micro_totals).sum() / runtime.config.grad_accum
+    supcon = _pooled_supcon(rows, runtime.config)
+    if supcon is not None:
+        total = total + runtime.config.w_contrast * supcon
+    total.backward()
+    return None if supcon is None else float(supcon.item())
+
+
 def _train_one_epoch(
     runtime: Runtime,
     targets: list[ImageTargets],
@@ -684,9 +816,19 @@ def _train_one_epoch(
     Gradient accumulation divides each micro-batch loss by ``grad_accum`` before ``backward()``, so
     the accumulated gradient is the mean over the effective batch rather than its sum -- otherwise
     raising ``--grad-accum`` would silently also raise the effective learning rate.
+
+    Two backward strategies, and which one runs is decided by ``--loss-mode``:
+
+    * ``focal`` -- backward each micro-batch immediately, exactly as before. Nothing about this path
+      changed when the contrastive objective was added, which is what the preflight-fixture
+      assertion in the task's verify step checks.
+    * ``contrastive``/``both`` -- hold each micro-batch's box/focal total as a live graph, pool the
+      SupCon rows, and backward once at the accumulation boundary (D-hg1-04 and
+      :func:`_backward_accumulated`). ``rng`` also feeds the background sampler in these modes, so
+      the same seed draws the same negatives.
     """
     config = runtime.config
-    loss_keys = _loss_keys_for(config)
+    deferred = config.loss_mode != "focal"
     runtime.model.train()
     if runtime.plan.backbone_frozen:
         # A frozen module in train() mode is a no-op for OWLv2 (dropout is 0.0 and LayerNorm keeps
@@ -694,41 +836,75 @@ def _train_one_epoch(
         runtime.model.owlv2.eval()
     runtime.model.owlv2.text_model.eval()  # frozen in every arm
 
-    sums = dict.fromkeys(("loss", *loss_keys), 0.0)
+    sums = dict.fromkeys(("loss", *_LOSS_KEYS), 0.0)
     batches = 0
     pending = 0
+    pending_totals: list[torch.Tensor] = []
+    pending_rows: list[ContrastiveRows] = []
+    supcon_sum = 0.0
+    supcon_pools = 0
     optimizer.zero_grad(set_to_none=True)
 
     for indices in deterministic_batches(len(targets), config.batch_size, rng):
         batch = [targets[index] for index in indices]
-        loss_dict, rows = _batch_loss(runtime, batch, image_dir)
+        loss_dict, rows = _batch_loss(runtime, batch, image_dir, rng)
         loss = _total_loss(loss_dict, config)
-        if config.loss_mode != "focal":
-            supcon = _pooled_supcon([] if rows is None else [rows], config)
-            loss_dict[_SUPCON_KEY] = (
-                torch.zeros((), device=runtime.device) if supcon is None else supcon
-            )
-            if supcon is not None:
-                loss = loss + config.w_contrast * supcon
 
-        (loss / config.grad_accum).backward()
+        if deferred:
+            pending_totals.append(loss)  # backwarded at the accumulation boundary, not here
+            if rows is not None:
+                pending_rows.append(rows)
+        else:
+            (loss / config.grad_accum).backward()
+
         pending += 1
         batches += 1
         sums["loss"] += float(loss.item())
-        for key in loss_keys:
+        for key in _LOSS_KEYS:
             sums[key] += float(loss_dict[key].item())
 
         if pending == config.grad_accum:
-            steps_taken = _optimizer_step(runtime, optimizer, scheduler, steps_taken)
-            pending = 0
+            steps_taken, pooled = _apply_step(
+                runtime, optimizer, scheduler, steps_taken, pending_totals, pending_rows
+            )
+            if pooled is not None:
+                supcon_sum += pooled
+                supcon_pools += 1
+            pending, pending_totals, pending_rows = 0, [], []
             if config.max_steps is not None and steps_taken >= config.max_steps:
                 logger.info(f"stopping early at --max-steps {config.max_steps}")
-                return _mean_losses(sums, batches), steps_taken
+                return (
+                    _epoch_means(sums, batches, supcon_sum, supcon_pools, config),
+                    steps_taken,
+                )
 
     if pending:  # flush a short tail rather than discarding its gradient
-        steps_taken = _optimizer_step(runtime, optimizer, scheduler, steps_taken)
+        steps_taken, pooled = _apply_step(
+            runtime, optimizer, scheduler, steps_taken, pending_totals, pending_rows
+        )
+        if pooled is not None:
+            supcon_sum += pooled
+            supcon_pools += 1
 
-    return _mean_losses(sums, batches), steps_taken
+    return _epoch_means(sums, batches, supcon_sum, supcon_pools, config), steps_taken
+
+
+def _apply_step(
+    runtime: Runtime,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    steps_taken: int,
+    micro_totals: list[torch.Tensor],
+    rows: Sequence[ContrastiveRows],
+) -> tuple[int, float | None]:
+    """Backward any deferred micro-batches, then take one optimizer step.
+
+    ``micro_totals`` is always empty in ``focal`` mode (that path backwards as it goes), so this
+    reduces to the original :func:`_optimizer_step` call there -- one code path, two behaviours,
+    and no branch duplicated across the loop body and its tail flush.
+    """
+    pooled = _backward_accumulated(runtime, micro_totals, rows) if micro_totals else None
+    return _optimizer_step(runtime, optimizer, scheduler, steps_taken), pooled
 
 
 def _optimizer_step(
@@ -749,39 +925,87 @@ def _optimizer_step(
 
 
 @torch.no_grad()
-def _evaluate(runtime: Runtime, targets: list[ImageTargets], image_dir: Path) -> dict[str, float]:
-    """The identical loss over the held-out ``valid`` split, in deterministic file_name order.
+def _evaluate(
+    runtime: Runtime, targets: list[ImageTargets], image_dir: Path
+) -> tuple[dict[str, float], dict[str, float | None] | None]:
+    """The identical loss over a held-out split, plus the cosine diagnostic. No optimizer step.
 
     No shuffle: the val number must depend only on the weights, so that an epoch-to-epoch change is
-    the model moving and not the batch composition moving. ``test`` is never touched by this script.
+    the model moving and not the batch composition moving. For the same reason the background
+    sampler runs from a generator re-seeded **here**, at every call: the val negatives are then the
+    same patches at epoch 0 and at epoch 8, and a move in ``val_cos_gap`` cannot be the sample
+    moving. ``test`` is never touched by this script.
+
+    The contrastive term is pooled over ``grad_accum`` micro-batches, matching training's
+    granularity so the val and train numbers mean the same thing -- and bounding the pairwise
+    similarity matrix, which pooling the whole split would not.
+
+    Returns:
+        ``(mean losses, cosine gap report)``. The report is ``None`` in ``focal`` mode, which is
+        what keeps a focal run's ``epochs`` array exactly the shape the already-measured arms have.
     """
     config = runtime.config
-    loss_keys = _loss_keys_for(config)
+    contrastive = config.loss_mode != "focal"
     runtime.model.eval()
-    sums = dict.fromkeys(("loss", *loss_keys), 0.0)
+    sums = dict.fromkeys(("loss", *_LOSS_KEYS), 0.0)
     batches = 0
+    rng = np.random.default_rng(config.seed)
+
+    pending_rows: list[ContrastiveRows] = []
+    supcon_sum = 0.0
+    supcon_pools = 0
+    anchor_chunks: list[np.ndarray] = []
+    label_chunks: list[np.ndarray] = []
+    background_chunks: list[np.ndarray] = []
+
+    def pool_pending() -> None:
+        """Score one pool's worth of held rows -- the val counterpart of the accumulation boundary.
+
+        The contrastive term MUST be in the val total: it is what selects the checkpoint, and a val
+        loss made only of box terms would pick the epoch with the best boxes rather than the best
+        embedding space, silently defeating the whole experiment.
+        """
+        nonlocal supcon_sum, supcon_pools
+        pooled = _pooled_supcon(pending_rows, config)
+        if pooled is not None:
+            supcon_sum += float(pooled.item())
+            supcon_pools += 1
+        pending_rows.clear()
 
     for start in range(0, len(targets), config.batch_size):
         batch = targets[start : start + config.batch_size]
-        loss_dict, rows = _batch_loss(runtime, batch, image_dir)
+        loss_dict, rows = _batch_loss(runtime, batch, image_dir, rng)
         total = _total_loss(loss_dict, config)
-        if config.loss_mode != "focal":
-            # The contrastive term MUST be in the val total: it is what selects the checkpoint, and
-            # a val loss made only of box terms would pick the epoch with the best boxes rather
-            # than the best embedding space -- silently defeating the whole experiment.
-            supcon = _pooled_supcon([] if rows is None else [rows], config)
-            loss_dict[_SUPCON_KEY] = (
-                torch.zeros((), device=runtime.device) if supcon is None else supcon
-            )
-            if supcon is not None:
-                total = total + config.w_contrast * supcon
 
         sums["loss"] += float(total.item())
-        for key in loss_keys:
+        for key in _LOSS_KEYS:
             sums[key] += float(loss_dict[key].item())
         batches += 1
 
-    return _mean_losses(sums, batches)
+        if rows is not None:
+            pending_rows.append(rows)
+            anchor_chunks.append(rows.anchors.cpu().numpy())
+            label_chunks.append(rows.labels.cpu().numpy())
+            background_chunks.append(rows.background.cpu().numpy())
+            if len(pending_rows) == config.grad_accum:
+                pool_pending()
+
+    if pending_rows:
+        pool_pending()
+
+    losses = _epoch_means(sums, batches, supcon_sum, supcon_pools, config)
+    if not contrastive:
+        return losses, None
+
+    # The gap IS measured over the whole split, unlike the loss: it is a summary statistic rather
+    # than a training signal, and pooling it is what makes it comparable epoch to epoch.
+    width = 1 if not anchor_chunks else int(anchor_chunks[0].shape[1])
+    gap = cosine_gap_report(
+        np.concatenate(anchor_chunks) if anchor_chunks else np.zeros((0, width)),
+        np.concatenate(label_chunks) if label_chunks else np.zeros(0, dtype=np.int64),
+        np.concatenate(background_chunks) if background_chunks else np.zeros((0, width)),
+    )
+    return losses, gap
 
 
 # ---------------------------------------------------------------------------------- 5. the CLI
@@ -804,7 +1028,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--epochs", type=int, default=defaults.epochs)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
-    parser.add_argument("--grad-accum", type=int, default=defaults.grad_accum)
+    parser.add_argument(
+        "--grad-accum",
+        type=int,
+        default=defaults.grad_accum,
+        help="Micro-batches per optimizer step. In contrastive/both mode this ALSO sets the "
+        "contrastive pool: SupCon is computed once per step over all of them (D-hg1-04), so the "
+        "rare classes get same-class positives -- at the cost of retaining that many micro-batch "
+        "graphs until the accumulation boundary. Cheap with a frozen backbone (only the heads are "
+        "retained); with --unfreeze-all it retains that many ViT graphs, so lower it there.",
+    )
     parser.add_argument("--lr-head", type=float, default=defaults.lr_head)
     parser.add_argument("--lr-backbone", type=float, default=defaults.lr_backbone)
     parser.add_argument("--weight-decay", type=float, default=defaults.weight_decay)
@@ -836,6 +1069,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=defaults.supcon_temperature,
         help="SupCon temperature tau (contrastive/both mode).",
+    )
+    parser.add_argument(
+        "--supcon-background-negatives",
+        type=int,
+        default=defaults.supcon_background_negatives,
+        help="Background patches sampled per image as DENOMINATOR-ONLY negatives: grid cells whose "
+        "normalized centre lies in no ground-truth box. They are never anchors and never "
+        "positives. Load-bearing rather than a refinement -- the measured failure is background "
+        "scoring too high, which an anchor-only SupCon cannot address. 0 disables them.",
     )
     parser.add_argument(
         "--w-contrast",
@@ -884,6 +1126,7 @@ def _config_from_args(args: argparse.Namespace) -> FinetuneConfig:
         loss_mode=args.loss_mode,
         supcon_temperature=args.supcon_temperature,
         w_contrast=args.w_contrast,
+        supcon_background_negatives=args.supcon_background_negatives,
         max_steps=args.max_steps,
         limit_images=args.limit_images,
     )
@@ -945,6 +1188,15 @@ def _run_self_check() -> None:
     logger.info("self-check PASSED: torch mirrors the NumPy specification and differentiates")
 
 
+def _format_gap(gap: dict[str, float | None] | None) -> str:
+    """One-line rendering of a cosine-gap report, with ``None`` shown as ``n/a`` and never as 0."""
+    if gap is None:
+        return "n/a"
+    return " ".join(
+        f"{key}={'n/a' if value is None else f'{value:+.4f}'}" for key, value in gap.items()
+    )
+
+
 def _resolve_device(choice: str) -> torch.device:
     if choice != "auto":
         return torch.device(choice)
@@ -978,6 +1230,36 @@ def _planned_steps(image_count: int, config: FinetuneConfig) -> int:
     per_epoch = -(-micro_batches // config.grad_accum)
     total = max(1, per_epoch * config.epochs)
     return min(total, config.max_steps) if config.max_steps is not None else total
+
+
+def _epoch_record(
+    epoch: int,
+    steps: int,
+    train_losses: dict[str, float],
+    val_losses: dict[str, float],
+    loss_keys: Sequence[str],
+    *,
+    saved: bool,
+    cos_gap: dict[str, float | None] | None,
+) -> dict[str, object]:
+    """One row of the ``epochs`` array. Numbers only -- no timestamp, no duration.
+
+    Built in one place so the epoch-0 reference row (D-hg1-06) and the per-epoch rows cannot drift
+    into different shapes, and so a ``focal`` run provably emits exactly the keys it always has:
+    ``loss_keys`` excludes ``loss_supcon`` there and ``cos_gap`` is ``None``.
+    """
+    record: dict[str, object] = {
+        "epoch": epoch,
+        "steps": steps,
+        "train_loss": train_losses["loss"],
+        **{f"train_{key}": train_losses[key] for key in loss_keys},
+        "val_loss": val_losses["loss"],
+        **{f"val_{key}": val_losses[key] for key in loss_keys},
+        "saved": saved,
+    }
+    if cos_gap is not None:
+        record["val_cos_gap"] = cos_gap
+    return record
 
 
 def _write_train_log(
@@ -1084,11 +1366,27 @@ def main(argv: list[str] | None = None) -> None:
     steps_taken = 0
     args.out.mkdir(parents=True, exist_ok=True)
 
+    # 5a. The epoch-0 reference point (D-hg1-06), contrastive/both only. One no-gradient pass over
+    #     each split before a single weight has moved, so the run carries its own pretrained
+    #     baseline for the cosine property owlv2-oneshot actually scores with. `focal` runs skip it
+    #     entirely and stay comparable, row for row, with the three already-measured arms.
+    if config.loss_mode != "focal":
+        logger.info("epoch 0: measuring the pre-training reference point (no optimizer step)")
+        zero_train, _ = _evaluate(runtime, train_targets, train_dir)
+        zero_val, zero_gap = _evaluate(runtime, val_targets, val_dir)
+        logger.info(
+            f"epoch 0: train {zero_train['loss']:.4f} val {zero_val['loss']:.4f} "
+            f"(supcon {zero_val[_SUPCON_KEY]:.4f}) cos-gap {_format_gap(zero_gap)}"
+        )
+        epochs.append(
+            _epoch_record(0, 0, zero_train, zero_val, loss_keys, saved=False, cos_gap=zero_gap)
+        )
+
     for epoch in range(1, config.epochs + 1):
         train_losses, steps_taken = _train_one_epoch(
             runtime, train_targets, train_dir, optimizer, scheduler, rng, steps_taken
         )
-        val_losses = _evaluate(runtime, val_targets, val_dir)
+        val_losses, cos_gap = _evaluate(runtime, val_targets, val_dir)
 
         improved = val_losses["loss"] < best_val
         if improved:
@@ -1103,18 +1401,19 @@ def main(argv: list[str] | None = None) -> None:
             f"giou {val_losses['loss_giou']:.4f}) "
             f"{'-> SAVED (best val)' if improved else '-- not saved'}"
         )
+        if cos_gap is not None:
+            logger.info(f"epoch {epoch}: val cos-gap {_format_gap(cos_gap)}")
 
-        # Numbers only: no timestamps and no durations, so two same-seed runs' logs compare equal.
         epochs.append(
-            {
-                "epoch": epoch,
-                "steps": steps_taken,
-                "train_loss": train_losses["loss"],
-                **{f"train_{key}": train_losses[key] for key in loss_keys},
-                "val_loss": val_losses["loss"],
-                **{f"val_{key}": val_losses[key] for key in loss_keys},
-                "saved": improved,
-            }
+            _epoch_record(
+                epoch,
+                steps_taken,
+                train_losses,
+                val_losses,
+                loss_keys,
+                saved=improved,
+                cos_gap=cos_gap,
+            )
         )
         # Rewritten every epoch so a long GPU run that dies at hour three still leaves its curve.
         _write_train_log(log_path, config, plan, epochs, best_epoch, best_val, args, use_bf16)
