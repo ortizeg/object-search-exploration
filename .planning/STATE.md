@@ -33,11 +33,14 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-07-29 — Quick task 260729-dh6: floor-plan eval enrichment — per-slice research
-metrics (recall by symbol-size, F1 by crowding, F1 by plan-resolution via a matched-GT-index sibling
-of match_predictions), broadened aggressive tuning grids (+ size-representative exemplar, exemplar
-{1,3}), and an opt-in dino-dense fixed-size letterbox (GPU-OOM fix). Full suite green (714 passed,
-93.60% coverage). Aggressive GPU re-run is the pending manual vast.ai step.
+Last activity: 2026-08-04 — Quick task 260801-8zy: fine-tuned owlv2-oneshot's OWLv2 weights on the
+197-image floor-plans train split (text-conditioned proxy, both heads-only and full-unfreeze arms),
+exported to ONNX, measured on the full 28-plan test splits on a vast.ai RTX 3090. Negative result:
+fine-tuning does not close the gap to propose-retrieve (0.459 door F1) or ncc (0.403 window F1), and
+regresses doors vs. the pretrained baseline (0.154 → 0.087 → 0.083, monotonically worse with more
+unfrozen capacity). Fixed a real onnxruntime-gpu/CUDA-version bug along the way (silent CPU fallback,
+baked the fix into scripts/gpu_finetune.sh). Full suite green (751 passed, 92.44% coverage). Neither
+arm adopted as default; ncc/propose-retrieve remain the floor-plan recommendation.
 
 Progress: [█████████░] 88%
 
@@ -48,6 +51,7 @@ Progress: [█████████░] 88%
 | 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
+| 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
 
 ## Performance Metrics
 
