@@ -76,6 +76,9 @@ doors, 1st on windows, full 28/28 coverage, and (below) uniformly robust to symb
   the single biggest domain-specific lever. `mosse` reached **0.74 precision** on doors the same way.
 - **`owlv2` over-detects** (recall high, precision ~0.01–0.11, counting error MAE 38–107); capping
   `max_box_area_frac=0.1` helped but did not fix it. Not usable here without heavier calibration.
+  Fine-tuning was tried next and measured as a negative result — see
+  [`owlv2` floor-plan fine-tune](../reports/owlv2-floorplans-finetune.md): both arms regress doors
+  vs. the pretrained baseline, and neither closes the gap to `propose-retrieve`/`ncc`.
 - **The `dino-dense` letterbox works:** coverage 0/28 → 13/14 (OOM failures 28 → 1). Still not
   competitive, but no longer broken.
 

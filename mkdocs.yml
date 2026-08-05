@@ -109,5 +109,6 @@ nav:
       - MOSSE: reports/mosse-improvement.md
       - DINO dense: reports/dino-dense-improvement.md
       - OWLv2: reports/owlv2-improvement.md
+      - OWLv2 floor-plan fine-tune: reports/owlv2-floorplans-finetune.md
       - Propose–retrieve: reports/propose-retrieve-improvement.md
   - Robustness backlog: ROBUSTNESS-BACKLOG.md
