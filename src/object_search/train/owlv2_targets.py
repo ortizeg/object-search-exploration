@@ -44,7 +44,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -178,6 +178,44 @@ class FinetuneConfig(BaseModel):
     )
     w_giou: float = Field(
         default=2.0, ge=0.0, description="Weight of the GIoU term in the total loss."
+    )
+    loss_mode: Literal["focal", "contrastive", "both"] = Field(
+        default="focal",
+        description=(
+            "Which classification-side objective trains the embedding. focal (the DEFAULT, and "
+            "the already-measured recipe) = sigmoid focal loss over the text-conditioned logits. "
+            "contrastive = a supervised-contrastive loss over class_embeds, which is the space "
+            "owlv2-oneshot actually scores in, replacing the focal term. both = the sum of the "
+            "two. loss_bbox and loss_giou stay in the total loss in EVERY mode -- the box head "
+            "still has to be trained for the exported graph to produce usable boxes."
+        ),
+    )
+    supcon_temperature: float = Field(
+        default=0.07,
+        gt=0.0,
+        description=(
+            "SupCon temperature tau (Khosla et al. 2020's headline value, and the SimCLR/MoCo "
+            "convention). It divides the cosine similarities, so lower = sharper weighting of the "
+            "hardest negatives. Only read in contrastive/both mode."
+        ),
+    )
+    w_contrast: float = Field(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "Weight of the supervised-contrastive term in the total loss (contrastive/both mode)."
+        ),
+    )
+    supcon_background_negatives: int = Field(
+        default=64,
+        ge=0,
+        description=(
+            "Background patches sampled per image as DENOMINATOR-ONLY negatives: grid cells whose "
+            "normalized centre lies in no ground-truth box. They are never anchors and never "
+            "positives. This is load-bearing rather than a refinement -- owlv2-oneshot's measured "
+            "floor-plan failure is low precision at high recall, i.e. background scoring too high, "
+            "which an anchor-only SupCon cannot address. 0 disables them."
+        ),
     )
     max_steps: int | None = Field(
         default=None,

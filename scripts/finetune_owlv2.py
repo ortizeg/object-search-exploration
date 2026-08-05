@@ -87,6 +87,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,12 +117,29 @@ from object_search.train.owlv2_targets import (  # noqa: E402
     deterministic_batches,
     warmup_steps_for,
 )
+from object_search.train.supcon import supcon_loss  # noqa: E402
 
 _BASE_MODEL = "google/owlv2-base-patch16-ensemble"
 _DEFAULT_TRAIN_COCO = "datasets/_incoming/floorplans/train/_annotations.coco.json"
 _DEFAULT_VAL_COCO = "datasets/_incoming/floorplans/valid/_annotations.coco.json"
 _DEFAULT_OUT = "models/finetune/owlv2-floorplans-headonly"
+
+# The loss terms a `focal` run logs -- EXACTLY the three it has always logged. `contrastive` and
+# `both` append `loss_supcon` (see `_loss_keys_for`), so a focal run's `epochs` array keeps its
+# current shape and stays byte-comparable with the three already-measured arms.
 _LOSS_KEYS = ("loss_ce", "loss_bbox", "loss_giou")
+_SUPCON_KEY = "loss_supcon"
+
+# Guards the L2 normalization of a zero embedding, matching `object_search.train.supcon._EPS` and
+# `search/owlv2_oneshot._l2_normalize`: a zero vector stays zero rather than becoming NaN.
+_SUPCON_EPS = 1e-12
+
+
+def _loss_keys_for(config: FinetuneConfig) -> tuple[str, ...]:
+    """The loss terms this run logs. Mode-dependent, so `focal` keeps exactly its historic keys."""
+    if config.loss_mode == "focal":
+        return _LOSS_KEYS
+    return (*_LOSS_KEYS, _SUPCON_KEY)
 
 
 # ---------------------------------------------------------------- 1. matching and the losses
@@ -230,6 +248,78 @@ def _generalized_box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Te
     from transformers.loss.loss_for_object_detection import generalized_box_iou
 
     return generalized_box_iou(boxes1, boxes2)
+
+
+def supcon_loss_torch(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float,
+    negative_only_count: int = 0,
+) -> torch.Tensor:
+    """Differentiable mirror of :func:`object_search.train.supcon.supcon_loss` (the ``L_out`` form).
+
+    The NumPy function in ``src/`` is the **specification** -- it is the one ``pixi run test`` can
+    gate, because torch lives only in the ``export`` pixi environment and ``pytest`` is not
+    installed there. This mirror exists so the loss is differentiable; ``finetune-owlv2
+    --self-check`` asserts the two agree to ``<1e-6`` on the same inputs and that this one leaves a
+    finite, non-zero gradient. Keep the two in step: the numbered steps below match that module's.
+
+    ``negative_only_count`` is expressed as a **trailing row count** rather than a bool mask because
+    the caller builds the pool by concatenation -- matched anchors first, then background patches --
+    so "the last k rows are background" is the shape the data already has.
+
+    Args:
+        embeddings: ``(n, d)`` pooled embeddings, anchors first then background.
+        labels: ``(n,)`` int64 class labels. The trailing background entries are ignored.
+        temperature: SupCon ``tau``.
+        negative_only_count: How many trailing rows are denominator-only (D-hg1-03): they appear in
+            every anchor's denominator but are never anchors and never positives.
+
+    Returns:
+        A scalar tensor. Exactly zero (and still attached to the graph, so ``.backward()`` is
+        always safe) when no anchor has a same-class positive.
+    """
+    count = int(embeddings.shape[0])
+    if count < 2:
+        return embeddings.sum() * 0.0
+
+    # 1. L2-normalize, so the matmul IS cosine -- the space owlv2-oneshot scores in.
+    normalized = embeddings / embeddings.norm(dim=1, keepdim=True).clamp_min(_SUPCON_EPS)
+    similarity = (normalized @ normalized.t()) / temperature
+
+    # 2. A(i) is every other row INCLUDING the background ones; P(i) is the same-class rows,
+    #    excluding self and excluding anything denominator-only on either side.
+    self_pair = torch.eye(count, dtype=torch.bool, device=embeddings.device)
+    in_denominator = ~self_pair
+    denominator_only = torch.zeros(count, dtype=torch.bool, device=embeddings.device)
+    if negative_only_count > 0:
+        denominator_only[count - negative_only_count :] = True
+    positives = (
+        (labels[:, None] == labels[None, :])
+        & ~self_pair
+        & ~denominator_only[None, :]
+        & ~denominator_only[:, None]
+    )
+
+    # 3. log sum_{a in A(i)} exp(sim), row max subtracted. A naive exp over similarities scaled by
+    #    1/0.07 overflows float32 into a plausible-looking `inf` (threat T-hg1-07).
+    row_max = similarity.masked_fill(~in_denominator, float("-inf")).max(dim=1, keepdim=True).values
+    shifted = torch.where(
+        in_denominator, (similarity - row_max).exp(), torch.zeros_like(similarity)
+    )
+    log_denominator = row_max[:, 0] + shifted.sum(dim=1).log()
+    log_prob = similarity - log_denominator[:, None]
+
+    # 4. Mean over the CONTRIBUTING anchors only -- an anchor with no positive is dropped from the
+    #    sum AND from the divisor, never averaged in as a fabricated zero.
+    positive_counts = positives.sum(dim=1)
+    contributing = positive_counts > 0
+    if not bool(contributing.any()):
+        return embeddings.sum() * 0.0
+
+    positive_log_prob = torch.where(positives, log_prob, torch.zeros_like(log_prob)).sum(dim=1)
+    per_anchor = -positive_log_prob[contributing] / positive_counts[contributing]
+    return per_anchor.mean()
 
 
 # ------------------------------------------------------------------- 2. data -> model tensors
@@ -390,7 +480,14 @@ class Runtime:
 
 
 def _forward_batch(runtime: Runtime, pixel_values: torch.Tensor):
-    """One text-conditioned forward pass -> ``(logits, pred_boxes)``.
+    """One text-conditioned forward pass -> ``(logits, pred_boxes, class_embeds)``.
+
+    ``class_embeds`` is ``[batch, num_patches, 512]`` and is **already computed** by
+    ``class_predictor`` -- it used to be bound to ``_class_embeds`` and thrown away. Keeping it is
+    the entire wiring the contrastive objective needs; no extra forward computation is added. It is
+    the space ``owlv2-oneshot`` scores in at inference (``search/owlv2_oneshot.py`` L2-normalizes
+    it and takes a cosine against the query embedding), which is why a loss over it trains the
+    property the method actually uses rather than a correlate of it.
 
     Two paths, and the difference is memory, not maths:
 
@@ -415,7 +512,7 @@ def _forward_batch(runtime: Runtime, pixel_values: torch.Tensor):
         outputs = runtime.model(
             input_ids=input_ids, pixel_values=pixel_values, attention_mask=attention_mask
         )
-        return outputs.logits, outputs.pred_boxes
+        return outputs.logits, outputs.pred_boxes, outputs.class_embeds
 
     with torch.no_grad():
         query_embeds, feature_map, _outputs = runtime.model.image_text_embedder(
@@ -429,19 +526,106 @@ def _forward_batch(runtime: Runtime, pixel_values: torch.Tensor):
     # A padded (all-zero-first-token) query is masked out, exactly as the stock forward does.
     query_mask = input_ids.reshape(batch, num_queries, input_ids.shape[-1])[..., 0] > 0
 
-    logits, _class_embeds = runtime.model.class_predictor(image_feats, query_embeds, query_mask)
+    logits, class_embeds = runtime.model.class_predictor(image_feats, query_embeds, query_mask)
     pred_boxes = runtime.model.box_predictor(image_feats, feature_map)
-    return logits, pred_boxes
+    return logits, pred_boxes, class_embeds
+
+
+@dataclass(frozen=True, eq=False)
+class ContrastiveRows:
+    """The rows one micro-batch contributes to the pooled SupCon set.
+
+    ``eq=False`` because the fields are tensors (element-wise ``==`` has no single truth value).
+
+    Attributes:
+        anchors: ``(n_boxes, 512)`` ``class_embeds`` rows at the patch indices the Hungarian
+            matcher assigned to this micro-batch's ground-truth boxes.
+        labels: ``(n_boxes,)`` int64 class labels, aligned with ``anchors``.
+        background: ``(n_background, 512)`` rows sampled from patches whose grid-cell centre lies
+            in no ground-truth box -- denominator-only negatives (D-hg1-03).
+    """
+
+    anchors: torch.Tensor
+    labels: torch.Tensor
+    background: torch.Tensor
+
+
+def _contrastive_rows(
+    runtime: Runtime,
+    outputs: dict[str, torch.Tensor],
+    class_embeds: torch.Tensor,
+    targets: list[dict[str, torch.Tensor]],
+) -> ContrastiveRows:
+    """Gather this micro-batch's SupCon anchors: the matched patch for each ground-truth box.
+
+    The anchor selection is the **existing** ``Owlv2HungarianMatcher`` assignment, not new matching
+    logic: the anchor for a ground-truth box is by construction the same patch the box loss
+    supervises, which is what makes the contrastive term and the box term agree about what a "door"
+    is. The gather mirrors ``ImageLoss._get_source_permutation_idx``.
+
+    The matcher is run once more here rather than having the criterion hand its indices back. That
+    is a deliberate trade: a duplicated, deterministic, ``no_grad`` Hungarian solve (microseconds
+    against a 3600-patch ViT forward) in exchange for not threading cached mutable state out of a
+    ``transformers`` base class. It runs in contrastive/both mode only.
+    """
+    indices = runtime.criterion.matcher(outputs, targets)
+
+    anchors: list[torch.Tensor] = []
+    labels: list[torch.Tensor] = []
+    for image_index, (source_idx, target_idx) in enumerate(indices):
+        source = source_idx.to(class_embeds.device)
+        anchors.append(class_embeds[image_index, source])
+        labels.append(targets[image_index]["class_labels"][target_idx.to(class_embeds.device)])
+
+    empty_background = class_embeds.new_zeros((0, class_embeds.shape[-1]))
+    return ContrastiveRows(
+        anchors=torch.cat(anchors) if anchors else empty_background,
+        labels=(
+            torch.cat(labels)
+            if labels
+            else torch.zeros(0, dtype=torch.int64, device=class_embeds.device)
+        ),
+        background=empty_background,
+    )
+
+
+def _pooled_supcon(rows: Sequence[ContrastiveRows], config: FinetuneConfig) -> torch.Tensor | None:
+    """SupCon over a pooled set of micro-batches -> a scalar tensor, or ``None`` if there is no pool.
+
+    Taking a sequence rather than one ``ContrastiveRows`` is what makes D-hg1-04 a one-line caller
+    change: pass one element for a per-micro-batch pool, or ``grad_accum`` elements for the
+    effective batch. Background rows are concatenated AFTER every anchor, which is the trailing-row
+    convention :func:`supcon_loss_torch` expects.
+    """
+    if not rows:
+        return None
+    anchors = torch.cat([row.anchors for row in rows])
+    if anchors.shape[0] == 0:
+        return None
+
+    background = torch.cat([row.background for row in rows])
+    labels = torch.cat([row.labels for row in rows])
+    pooled = torch.cat([anchors, background])
+    # A background row's label is never read (the denominator-only mask excludes it on both sides);
+    # -1 is used so an accidental read would be loud rather than silently valid.
+    pooled_labels = torch.cat([labels, labels.new_full((background.shape[0],), -1)])
+
+    return supcon_loss_torch(
+        pooled, pooled_labels, config.supcon_temperature, int(background.shape[0])
+    )
 
 
 def _batch_loss(
     runtime: Runtime, batch: list[ImageTargets], image_dir: Path
-) -> dict[str, torch.Tensor]:
-    """Forward one micro-batch (bf16 autocast on CUDA) and return the loss terms in fp32.
+) -> tuple[dict[str, torch.Tensor], ContrastiveRows | None]:
+    """Forward one micro-batch (bf16 autocast on CUDA) -> the loss terms in fp32, plus SupCon rows.
 
     The autocast region covers the forward only. Hungarian matching and the loss reductions run in
     fp32 on purpose: bf16 has ~3 decimal digits of mantissa, which is enough for a ViT's activations
     and nowhere near enough for a cost matrix whose argmin decides which patch supervises which box.
+
+    The returned ``ContrastiveRows`` is ``None`` in ``focal`` mode, so that arm does no extra work
+    at all and stays byte-comparable with the three already-measured arms.
     """
     pixel_values = torch.cat(
         [_load_pixel_values(image_dir / target.file_name) for target in batch]
@@ -450,21 +634,34 @@ def _batch_loss(
     with torch.autocast(
         device_type=runtime.device.type, dtype=torch.bfloat16, enabled=runtime.use_bf16
     ):
-        logits, pred_boxes = _forward_batch(runtime, pixel_values)
+        logits, pred_boxes, class_embeds = _forward_batch(runtime, pixel_values)
 
-    return runtime.criterion(
-        {"logits": logits.float(), "pred_boxes": pred_boxes.float()},
-        _batch_targets(batch, runtime.device),
-    )
+    outputs = {"logits": logits.float(), "pred_boxes": pred_boxes.float()}
+    targets = _batch_targets(batch, runtime.device)
+    loss_dict = runtime.criterion(outputs, targets)
+
+    rows = None
+    if runtime.config.loss_mode != "focal":
+        rows = _contrastive_rows(runtime, outputs, class_embeds.float(), targets)
+    return loss_dict, rows
 
 
 def _total_loss(loss_dict: dict[str, torch.Tensor], config: FinetuneConfig) -> torch.Tensor:
-    """``w_class * loss_ce + w_bbox * loss_bbox + w_giou * loss_giou`` (defaults 1 / 5 / 2)."""
-    return (
-        config.w_class * loss_dict["loss_ce"]
-        + config.w_bbox * loss_dict["loss_bbox"]
-        + config.w_giou * loss_dict["loss_giou"]
-    )
+    """The per-micro-batch terms: ``w_class * loss_ce`` (focal/both) ``+ w_bbox``/``w_giou`` boxes.
+
+    ``loss_bbox`` and ``loss_giou`` are in EVERY mode: ``box_head`` still has to be trained for the
+    exported graph to produce usable boxes, and a contrastive objective supervises no geometry at
+    all. Only the classification-side term is swapped (D-hg1-05).
+
+    The contrastive term is deliberately **not** added here. It is computed once per optimizer step
+    over the pooled effective batch (D-hg1-04), which is a different granularity from this
+    function's, so folding it in would misrepresent where it is applied. The caller adds
+    ``w_contrast * loss_supcon`` at the accumulation boundary.
+    """
+    total = config.w_bbox * loss_dict["loss_bbox"] + config.w_giou * loss_dict["loss_giou"]
+    if config.loss_mode in ("focal", "both"):
+        total = total + config.w_class * loss_dict["loss_ce"]
+    return total
 
 
 def _mean_losses(sums: dict[str, float], batches: int) -> dict[str, float]:
@@ -489,6 +686,7 @@ def _train_one_epoch(
     raising ``--grad-accum`` would silently also raise the effective learning rate.
     """
     config = runtime.config
+    loss_keys = _loss_keys_for(config)
     runtime.model.train()
     if runtime.plan.backbone_frozen:
         # A frozen module in train() mode is a no-op for OWLv2 (dropout is 0.0 and LayerNorm keeps
@@ -496,21 +694,28 @@ def _train_one_epoch(
         runtime.model.owlv2.eval()
     runtime.model.owlv2.text_model.eval()  # frozen in every arm
 
-    sums = dict.fromkeys(("loss", *_LOSS_KEYS), 0.0)
+    sums = dict.fromkeys(("loss", *loss_keys), 0.0)
     batches = 0
     pending = 0
     optimizer.zero_grad(set_to_none=True)
 
     for indices in deterministic_batches(len(targets), config.batch_size, rng):
         batch = [targets[index] for index in indices]
-        loss_dict = _batch_loss(runtime, batch, image_dir)
+        loss_dict, rows = _batch_loss(runtime, batch, image_dir)
         loss = _total_loss(loss_dict, config)
+        if config.loss_mode != "focal":
+            supcon = _pooled_supcon([] if rows is None else [rows], config)
+            loss_dict[_SUPCON_KEY] = (
+                torch.zeros((), device=runtime.device) if supcon is None else supcon
+            )
+            if supcon is not None:
+                loss = loss + config.w_contrast * supcon
 
         (loss / config.grad_accum).backward()
         pending += 1
         batches += 1
         sums["loss"] += float(loss.item())
-        for key in _LOSS_KEYS:
+        for key in loss_keys:
             sums[key] += float(loss_dict[key].item())
 
         if pending == config.grad_accum:
@@ -550,15 +755,29 @@ def _evaluate(runtime: Runtime, targets: list[ImageTargets], image_dir: Path) ->
     No shuffle: the val number must depend only on the weights, so that an epoch-to-epoch change is
     the model moving and not the batch composition moving. ``test`` is never touched by this script.
     """
+    config = runtime.config
+    loss_keys = _loss_keys_for(config)
     runtime.model.eval()
-    sums = dict.fromkeys(("loss", *_LOSS_KEYS), 0.0)
+    sums = dict.fromkeys(("loss", *loss_keys), 0.0)
     batches = 0
 
-    for start in range(0, len(targets), runtime.config.batch_size):
-        batch = targets[start : start + runtime.config.batch_size]
-        loss_dict = _batch_loss(runtime, batch, image_dir)
-        sums["loss"] += float(_total_loss(loss_dict, runtime.config).item())
-        for key in _LOSS_KEYS:
+    for start in range(0, len(targets), config.batch_size):
+        batch = targets[start : start + config.batch_size]
+        loss_dict, rows = _batch_loss(runtime, batch, image_dir)
+        total = _total_loss(loss_dict, config)
+        if config.loss_mode != "focal":
+            # The contrastive term MUST be in the val total: it is what selects the checkpoint, and
+            # a val loss made only of box terms would pick the epoch with the best boxes rather
+            # than the best embedding space -- silently defeating the whole experiment.
+            supcon = _pooled_supcon([] if rows is None else [rows], config)
+            loss_dict[_SUPCON_KEY] = (
+                torch.zeros((), device=runtime.device) if supcon is None else supcon
+            )
+            if supcon is not None:
+                total = total + config.w_contrast * supcon
+
+        sums["loss"] += float(total.item())
+        for key in loss_keys:
             sums[key] += float(loss_dict[key].item())
         batches += 1
 
@@ -603,6 +822,35 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Arm B: also train the whole vision tower at --lr-backbone. The text tower stays "
         "frozen in every arm.",
     )
+    parser.add_argument(
+        "--loss-mode",
+        choices=("focal", "contrastive", "both"),
+        default=defaults.loss_mode,
+        help="focal (DEFAULT, the already-measured recipe) = sigmoid focal loss over the "
+        "text-conditioned logits. contrastive = a supervised-contrastive loss over class_embeds -- "
+        "the space owlv2-oneshot actually scores in -- replacing the focal term. both = the sum. "
+        "The L1/GIoU box terms are in every mode.",
+    )
+    parser.add_argument(
+        "--supcon-temperature",
+        type=float,
+        default=defaults.supcon_temperature,
+        help="SupCon temperature tau (contrastive/both mode).",
+    )
+    parser.add_argument(
+        "--w-contrast",
+        type=float,
+        default=defaults.w_contrast,
+        help="Weight of the supervised-contrastive term in the total loss.",
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help="Assert the torch SupCon mirror agrees with the NumPy specification in "
+        "object_search.train.supcon and that it has a finite non-zero gradient, then exit. This is "
+        "how the torch half is gated: torch lives only in the export pixi environment, where "
+        "pytest is not installed.",
+    )
     parser.add_argument("--limit-images", type=int, default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument(
@@ -633,9 +881,68 @@ def _config_from_args(args: argparse.Namespace) -> FinetuneConfig:
         warmup_frac=args.warmup_frac,
         unfreeze_last_n=args.unfreeze_last_n,
         unfreeze_all=args.unfreeze_all,
+        loss_mode=args.loss_mode,
+        supcon_temperature=args.supcon_temperature,
+        w_contrast=args.w_contrast,
         max_steps=args.max_steps,
         limit_images=args.limit_images,
     )
+
+
+def _run_self_check() -> None:
+    """Assert ``supcon_loss_torch`` mirrors the NumPy specification, and that it differentiates.
+
+    Verified fact 4 of this task: ``pixi run test`` cannot import torch (it lives only in the
+    ``export`` environment) and ``pytest`` is not installed in ``export``. So the NumPy function is
+    the tested specification and this flag is how the torch mirror is gated. Both halves matter:
+
+    * **numeric parity** catches a transcription slip (an ``L_in`` fold, a sign, a mask polarity);
+    * **a finite non-zero gradient** catches the failure parity alone cannot -- a loss that computes
+      the right number through ``no_grad``/``detach``/an integer cast trains nothing at all, and
+      would produce a perfectly plausible flat curve.
+
+    The comparison runs in float64 so any difference is the *maths*, not float32 rounding.
+
+    Raises:
+        SystemExit: If the two disagree, or the gradient is not finite and non-zero.
+    """
+    rng = np.random.default_rng(0)
+    embeddings = rng.normal(size=(24, 16))
+    labels = rng.integers(0, 4, size=24)
+    background_rows = 6
+    temperature = FinetuneConfig().supcon_temperature
+
+    # The trailing rows carry REAL labels that collide with the anchors', so this also checks that
+    # the denominator-only rule is enforced inside both implementations rather than by the caller.
+    negative_only = np.zeros(len(labels), dtype=bool)
+    negative_only[-background_rows:] = True
+    expected = supcon_loss(embeddings, labels, temperature, negative_only=negative_only)
+
+    tensor = torch.tensor(embeddings, dtype=torch.float64, requires_grad=True)
+    actual = supcon_loss_torch(
+        tensor, torch.tensor(labels, dtype=torch.int64), temperature, background_rows
+    )
+    delta = abs(float(actual.item()) - expected)
+
+    actual.backward()
+    gradient = tensor.grad
+    if gradient is None:
+        raise SystemExit("self-check FAILED: supcon_loss_torch produced no gradient at all")
+    finite = bool(torch.isfinite(gradient).all())
+    magnitude = float(gradient.abs().sum().item())
+
+    logger.info(
+        f"self-check: numpy {expected:.12f} vs torch {float(actual.item()):.12f} "
+        f"(|delta| {delta:.3e}); gradient finite={finite}, sum|grad|={magnitude:.6f}"
+    )
+    if delta >= 1e-6:
+        raise SystemExit(f"self-check FAILED: torch and numpy SupCon disagree by {delta:.3e}")
+    if not finite or magnitude == 0.0:
+        raise SystemExit(
+            f"self-check FAILED: gradient finite={finite}, sum|grad|={magnitude} -- a loss with no "
+            "gradient trains nothing while still printing a plausible curve"
+        )
+    logger.info("self-check PASSED: torch mirrors the NumPy specification and differentiates")
 
 
 def _resolve_device(choice: str) -> torch.device:
@@ -711,7 +1018,13 @@ def _write_train_log(
 def main(argv: list[str] | None = None) -> None:
     """Fine-tune OWLv2 on the floor-plan train split and save the best-val HuggingFace checkpoint."""
     args = _parse_args(argv)
+    if args.self_check:
+        # Before any data or weights are touched: this gate is about the loss function, and it must
+        # be runnable on a laptop with no dataset and no network.
+        _run_self_check()
+        return
     config = _config_from_args(args)
+    loss_keys = _loss_keys_for(config)
 
     # Reproducibility: one explicit seed drives torch and the numpy epoch shuffler. Never a bare
     # random.shuffle, and never cv2.setRNGSeed (a no-op for anything that matters here, D-11).
@@ -797,9 +1110,9 @@ def main(argv: list[str] | None = None) -> None:
                 "epoch": epoch,
                 "steps": steps_taken,
                 "train_loss": train_losses["loss"],
-                **{f"train_{key}": train_losses[key] for key in _LOSS_KEYS},
+                **{f"train_{key}": train_losses[key] for key in loss_keys},
                 "val_loss": val_losses["loss"],
-                **{f"val_{key}": val_losses[key] for key in _LOSS_KEYS},
+                **{f"val_{key}": val_losses[key] for key in loss_keys},
                 "saved": improved,
             }
         )
