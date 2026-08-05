@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # Fine-tune OWLv2 on the floor-plans train split on a CUDA GPU box (e.g. a vast.ai RTX 3090/4090),
-# export both arms to ONNX, and measure baseline-vs-fine-tuned precision/recall on the frozen
-# 28-plan floor-plan test splits. This is the reproducible recipe behind the numbers in
-# docs/reports/owlv2-floorplans-finetune.md (quick task 260801-8zy).
+# export the trained arm(s) to ONNX, and measure baseline-vs-fine-tuned precision/recall on the
+# frozen 28-plan floor-plan test splits. This is the reproducible recipe behind the numbers in
+# docs/reports/owlv2-floorplans-finetune.md (quick tasks 260801-8zy and 260805-hg1).
 #
-# Two arms, both seeded, both with a val-selected checkpoint:
-#   A (primary) headonly -- box_head + class_head only, vision tower frozen;
-#   B (stretch) full     -- plus the whole vision tower (the text tower stays frozen in EVERY arm,
-#                           because it is not part of the exported graph -- see finetune_owlv2.py).
+# Arm-selectable via ARMS (space-separated, default reproduces the original 260801-8zy 3-arm run
+# exactly):
+#   baseline    -- train-free; evaluates the already-exported pretrained graph.
+#   headonly    -- box_head + class_head only, vision tower frozen, classification (focal) loss.
+#   full        -- + the whole vision tower unfrozen, classification (focal) loss.
+#   contrastive -- box_head + class_head only (heads-only freeze, like headonly), but
+#                  --loss-mode contrastive (SupCon over class_embeds, see 260805-hg1). Added
+#                  without touching the headonly/full rows so the default ARMS reproduces
+#                  260801-8zy's committed numbers byte-for-byte in intent, if not in bits (GPU
+#                  floating point is not bit-identical across physical hardware -- verify a
+#                  regenerated checkpoint by its train_log.json loss curve, never by sha256).
+# The text tower stays frozen in EVERY arm -- it is not part of the exported graph, see
+# scripts/finetune_owlv2.py.
 #
 # Prereqs on the box:
 #   * a CUDA 12.x image, git, curl;
@@ -15,22 +24,22 @@
 #     Floor plans is a MANUAL dataset -- there is NO ungated URL, so it must be copied to the box
 #     BEFORE running this script, exactly as scripts/gpu_bench.sh documents:
 #       scp -r ~/Downloads/floorPlans <user>@<box>:/path/to/object-search-exploration/datasets/_incoming/floorplans
-#     Unlike gpu_bench.sh (which degrades to "skip the floor-plan cells"), this script has nothing
-#     to do without them and exits with an actionable message.
-#   * HF_TOKEN is OPTIONAL here. Unlike gpu_bench.sh -- which pulls the gated rpine/fscd* datasets
-#     and therefore hard-requires it -- everything this script downloads is public: OWLv2's base
-#     weights (google/owlv2-base-patch16-ensemble, Apache-2.0) and the DINOv2/SuperPoint artifacts
+#     This script has nothing to do without them and exits with an actionable message.
+#   * HF_TOKEN is OPTIONAL here. Everything this script downloads is public: OWLv2's base weights
+#     (google/owlv2-base-patch16-ensemble, Apache-2.0) and the DINOv2/SuperPoint artifacts
 #     fetch-models already handles. The floor plans arrive by scp, not from the Hub. So a missing
 #     HF_TOKEN is a warning, never a failure.
 #
 # Usage:
-#   BRANCH=worktree/radiant-lark bash scripts/gpu_finetune.sh
+#   bash scripts/gpu_finetune.sh                                   # all three original arms
+#   ARMS="contrastive" SEED=0 EPOCHS=8 BATCH_SIZE=2 GRAD_ACCUM=4 bash scripts/gpu_finetune.sh
 #
 # Artifacts for pull-back (printed again at the end):
-#   docs/benchmark/owlv2-finetune/*.json            -- 3 arms x 2 classes tuning reports
-#   models/finetune/*/train_log.json                -- the per-epoch train/val curves
-#   models/owlv2_base_patch16_floorplans_ft.onnx    -- arm A (the registered artifact)
-#   models/owlv2_base_patch16_floorplans_ft_full.onnx -- arm B (unregistered comparison)
+#   docs/benchmark/owlv2-finetune/*.json              -- N arms x 2 classes tuning reports
+#   models/finetune/*/train_log.json                  -- the per-epoch train/val curves
+#   models/owlv2_base_patch16_floorplans_ft.onnx            -- headonly (registered artifact)
+#   models/owlv2_base_patch16_floorplans_ft_full.onnx       -- full (unregistered comparison)
+#   models/owlv2_base_patch16_floorplans_ft_contrastive.onnx -- contrastive (unregistered comparison)
 set -euo pipefail
 
 export HF_HUB_DISABLE_XET=1
@@ -47,10 +56,24 @@ SEED="${SEED:-0}"
 EPOCHS="${EPOCHS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
-ARM_A_DIR="models/finetune/owlv2-floorplans-headonly"
-ARM_B_DIR="models/finetune/owlv2-floorplans-full"
-ARM_A_ONNX="owlv2_base_patch16_floorplans_ft.onnx"
-ARM_B_ONNX="owlv2_base_patch16_floorplans_ft_full.onnx"
+ARMS="${ARMS:-baseline headonly full}"
+
+declare -A TRAIN_FLAGS=(
+  [headonly]=""
+  [full]="--unfreeze-all"
+  [contrastive]="--loss-mode contrastive"
+)
+declare -A CKPT_DIR=(
+  [headonly]="models/finetune/owlv2-floorplans-headonly"
+  [full]="models/finetune/owlv2-floorplans-full"
+  [contrastive]="models/finetune/owlv2-floorplans-contrastive"
+)
+declare -A ONNX_NAME=(
+  [baseline]="owlv2_base_patch16.onnx"
+  [headonly]="owlv2_base_patch16_floorplans_ft.onnx"
+  [full]="owlv2_base_patch16_floorplans_ft_full.onnx"
+  [contrastive]="owlv2_base_patch16_floorplans_ft_contrastive.onnx"
+)
 
 echo "== 1/8  install envs (default + export) and assert BOTH CUDA paths =="
 "$PIXI" install
@@ -135,37 +158,36 @@ echo "== 3/8  convert floor plans -> datasets/floorplans-{door,window}/{val,test
 "$PIXI" run fetch-datasets
 test -d datasets/floorplans-door/test && test -d datasets/floorplans-window/test
 
-echo "== 4/8  arm A (primary): heads only, vision tower frozen =="
-"$PIXI" run -e export finetune-owlv2 \
-  --seed "$SEED" --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
-  --out "$ARM_A_DIR"
+echo "== 4/8  train arm(s): $ARMS =="
+for arm in $ARMS; do
+  [ "$arm" = "baseline" ] && { echo "--- $arm is train-free (already exported in step 2) ---"; continue; }
+  echo "--- train $arm (finetune-owlv2 ${TRAIN_FLAGS[$arm]:-}) ---"
+  # shellcheck disable=SC2086 -- TRAIN_FLAGS is a single pre-tokenized flag or empty, not user input
+  "$PIXI" run -e export finetune-owlv2 ${TRAIN_FLAGS[$arm]:-} \
+    --seed "$SEED" --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
+    --out "${CKPT_DIR[$arm]}"
+done
 
-echo "== 5/8  arm B (stretch): the whole exported vision path unfrozen =="
-"$PIXI" run -e export finetune-owlv2 --unfreeze-all \
-  --seed "$SEED" --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
-  --out "$ARM_B_DIR"
-
-echo "== 6/8  export each arm to its OWN onnx artifact (the shipped baseline stays untouched) =="
-"$PIXI" run -e export python scripts/export_owlv2.py --checkpoint "$ARM_A_DIR" --out "$ARM_A_ONNX"
-"$PIXI" run -e export python scripts/export_owlv2.py --checkpoint "$ARM_B_DIR" --out "$ARM_B_ONNX"
-ls -la "models/$ARM_A_ONNX" "models/$ARM_B_ONNX"
-# Re-assert the ORT GPU build: step 6 ran `pixi run`, which can re-sync the conda CPU onnxruntime.
+echo "== 5/8  export trained arm(s) to their OWN onnx artifact (the shipped baseline stays untouched) =="
+for arm in $ARMS; do
+  [ "$arm" = "baseline" ] && continue
+  "$PIXI" run -e export python scripts/export_owlv2.py --checkpoint "${CKPT_DIR[$arm]}" --out "${ONNX_NAME[$arm]}"
+  ls -la "models/${ONNX_NAME[$arm]}"
+done
+# Re-assert the ORT GPU build: the export step ran `pixi run`, which can re-sync the conda CPU
+# onnxruntime.
 "$PYBIN" -c "import onnxruntime as o; assert 'CUDAExecutionProvider' in o.get_available_providers()" \
   || "$PYBIN" -m pip install --force-reinstall --no-deps "onnxruntime-gpu==1.23.2"
 
-echo "== 7/8  evaluate 3 arms x 2 classes -- ONE PROCESS PER RUN =="
+echo "== 6/8  evaluate arm(s) x 2 classes -- ONE PROCESS PER RUN =="
 # Per-run processes mirror gpu_bench.sh: onnxruntime re-allocates its CUDA arena per distinct input
 # resolution and the plans vary in size, so a shared process is where the OOMs live. Everything
-# except OS_OWLV2_MODEL is identical across the three arms, so the delta is attributable to the
-# weights alone. A single failed cell prints TUNE_FAIL and the GPU session continues.
+# except OS_OWLV2_MODEL is identical across arms, so the delta is attributable to the weights
+# alone. A single failed cell prints TUNE_FAIL and the GPU session continues.
 mkdir -p docs/benchmark/owlv2-finetune
 for ds in floorplans-door floorplans-window; do
-  for arm in baseline headonly full; do
-    case "$arm" in
-      baseline) MODEL="owlv2_base_patch16.onnx" ;;
-      headonly) MODEL="$ARM_A_ONNX" ;;
-      full)     MODEL="$ARM_B_ONNX" ;;
-    esac
+  for arm in $ARMS; do
+    MODEL="${ONNX_NAME[$arm]}"
     echo "--- tune $ds / $arm ($MODEL) ---"
     OS_OWLV2_MODEL="$MODEL" "$PYBIN" - "$ds" "$arm" <<'PYEOF' || echo "TUNE_FAIL $arm $ds"
 import sys
@@ -177,19 +199,30 @@ PYEOF
   done
 done
 
-echo "== 8/8  sha256 provenance + the pull-back list =="
-"$PYBIN" - <<'PYEOF'
+echo "== 7/8  sha256 provenance =="
+"$PYBIN" - "$ARMS" <<'PYEOF'
+import sys
 from pathlib import Path
 from object_search.provenance import file_sha256
-for name in ("owlv2_base_patch16.onnx",
-             "owlv2_base_patch16_floorplans_ft.onnx",
-             "owlv2_base_patch16_floorplans_ft_full.onnx"):
+onnx_names = {
+    "baseline": "owlv2_base_patch16.onnx",
+    "headonly": "owlv2_base_patch16_floorplans_ft.onnx",
+    "full": "owlv2_base_patch16_floorplans_ft_full.onnx",
+    "contrastive": "owlv2_base_patch16_floorplans_ft_contrastive.onnx",
+}
+arms = sys.argv[1].split()
+for arm in arms:
+    name = onnx_names[arm]
     path = Path("models") / name
     print(f"{name}: {file_sha256(path) if path.is_file() else 'MISSING'}")
 PYEOF
 
+echo "== 8/8  pull-back list =="
 echo "DONE. Pull these back:"
 ls -la docs/benchmark/owlv2-finetune/*.json || true
 ls -la models/finetune/*/train_log.json || true
-ls -la "models/$ARM_A_ONNX" "models/$ARM_B_ONNX" || true
+for arm in $ARMS; do
+  [ "$arm" = "baseline" ] && continue
+  ls -la "models/${ONNX_NAME[$arm]}" || true
+done
 echo "Then DESTROY the instance: vastai destroy instance <id>  (and confirm with: vastai show instances)"
