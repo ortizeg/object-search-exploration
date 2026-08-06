@@ -166,3 +166,7 @@ synth = "python -m object_search.cli synth"
 chipset = "python -m object_search.cli chipset"
 textured = "python -m object_search.cli textured"
 markers = "python -m object_search.cli markers"
+# Real-object-insertion set: download the licensed Wikimedia Commons source photos, then segment
+# + composite them (needs the fastsam-s weight: `pixi run -e export fetch-models --only fastsam-s`).
+fetch-real-photos = "python -m object_search.cli fetch-real-photos"
+real-objects = "python -m object_search.cli real-objects"

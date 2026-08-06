@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "sand",
+  "boxes": [
+    {
+      "h": 106,
+      "w": 190,
+      "x": 540,
+      "y": 53
+    },
+    {
+      "h": 60,
+      "w": 288,
+      "x": 210,
+      "y": 145
+    },
+    {
+      "h": 48,
+      "w": 220,
+      "x": 42,
+      "y": 658
+    },
+    {
+      "h": 91,
+      "w": 313,
+      "x": 271,
+      "y": 720
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 1024,
+  "image": "real-varied-screwdriver.jpg",
+  "regime": "varied",
+  "requested_n": 4,
+  "seed": 1315184218,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.4249953735092817,
+    "instance_scale_min": 0.9236793987683319,
+    "rotation_max_deg": 7.465659943790652,
+    "rotation_min_deg": -16.255552393757505,
+    "true_instance_count": 4
+  },
+  "target": "screwdriver",
+  "width": 777
+}

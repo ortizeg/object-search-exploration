@@ -1,0 +1,65 @@
+{
+  "achieved_n": 7,
+  "background": "cardboard",
+  "boxes": [
+    {
+      "h": 75,
+      "w": 67,
+      "x": 623,
+      "y": 95
+    },
+    {
+      "h": 132,
+      "w": 140,
+      "x": 76,
+      "y": 110
+    },
+    {
+      "h": 304,
+      "w": 309,
+      "x": 475,
+      "y": 253
+    },
+    {
+      "h": 310,
+      "w": 293,
+      "x": 144,
+      "y": 395
+    },
+    {
+      "h": 75,
+      "w": 81,
+      "x": 884,
+      "y": 549
+    },
+    {
+      "h": 187,
+      "w": 165,
+      "x": 444,
+      "y": 574
+    },
+    {
+      "h": 66,
+      "w": 59,
+      "x": 942,
+      "y": 642
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "real-varied-apple.jpg",
+  "regime": "varied",
+  "requested_n": 7,
+  "seed": 1100328947,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.3433211892004038,
+    "instance_scale_min": 0.25026981248175695,
+    "rotation_max_deg": 27.398208401911734,
+    "rotation_min_deg": -23.047548420223407,
+    "true_instance_count": 7
+  },
+  "target": "apple",
+  "width": 1024
+}

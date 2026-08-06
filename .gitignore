@@ -74,6 +74,13 @@ benchmark.log
 # CI (.github/workflows/docs.yml). Never committed; the docs/ Markdown is the source of truth.
 site/
 
+# Real-object-insertion set (EVAL): raw Commons downloads and cached FastSAM cutouts are
+# regenerable (`pixi run fetch-real-photos` / `pixi run real-objects`) and depend on the
+# gitignored FastSAM weight. Only the composited JPEGs + .gt.json sidecars under
+# assets/demo/real-objects/ are committed.
+assets/demo/real-objects/_raw/
+assets/demo/real-objects/cutouts/
+
 # Deliberately NOT ignored, do not add:
 #   pixi.lock       -- committed on purpose (application, reproducible CI)
 #   docs/assets/ui/ -- committed UI walkthrough screenshots (captured by scripts/capture_ui.py)

@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "granite",
+  "boxes": [
+    {
+      "h": 73,
+      "w": 117,
+      "x": 392,
+      "y": 217
+    },
+    {
+      "h": 128,
+      "w": 202,
+      "x": 128,
+      "y": 318
+    },
+    {
+      "h": 240,
+      "w": 282,
+      "x": 344,
+      "y": 408
+    },
+    {
+      "h": 114,
+      "w": 212,
+      "x": 106,
+      "y": 747
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 925,
+  "image": "real-varied-c-clamp.jpg",
+  "regime": "varied",
+  "requested_n": 4,
+  "seed": 1003502844,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.280883501080889,
+    "instance_scale_min": 0.5037327872648716,
+    "rotation_max_deg": 14.933906353290979,
+    "rotation_min_deg": -26.648810299035354,
+    "true_instance_count": 4
+  },
+  "target": "c-clamp",
+  "width": 1024
+}
