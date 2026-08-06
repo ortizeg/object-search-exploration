@@ -1,0 +1,53 @@
+{
+  "achieved_n": 5,
+  "background": "mosaic-tile",
+  "boxes": [
+    {
+      "h": 247,
+      "w": 251,
+      "x": 150,
+      "y": 199
+    },
+    {
+      "h": 242,
+      "w": 244,
+      "x": 631,
+      "y": 254
+    },
+    {
+      "h": 115,
+      "w": 116,
+      "x": 410,
+      "y": 366
+    },
+    {
+      "h": 95,
+      "w": 96,
+      "x": 655,
+      "y": 528
+    },
+    {
+      "h": 105,
+      "w": 106,
+      "x": 501,
+      "y": 700
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 815,
+  "image": "real-cluttered-orange.jpg",
+  "regime": "cluttered",
+  "requested_n": 5,
+  "seed": 1225149313,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.1130242297339872,
+    "instance_scale_min": 0.4267424881403896,
+    "rotation_max_deg": 9.516208609605531,
+    "rotation_min_deg": -18.313274715351845,
+    "true_instance_count": 5
+  },
+  "target": "orange",
+  "width": 1024
+}

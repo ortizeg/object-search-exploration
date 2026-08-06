@@ -1,0 +1,59 @@
+{
+  "achieved_n": 6,
+  "background": "wood-floor",
+  "boxes": [
+    {
+      "h": 195,
+      "w": 220,
+      "x": 463,
+      "y": 152
+    },
+    {
+      "h": 195,
+      "w": 220,
+      "x": 114,
+      "y": 159
+    },
+    {
+      "h": 195,
+      "w": 220,
+      "x": 297,
+      "y": 379
+    },
+    {
+      "h": 195,
+      "w": 220,
+      "x": 521,
+      "y": 592
+    },
+    {
+      "h": 195,
+      "w": 220,
+      "x": 188,
+      "y": 613
+    },
+    {
+      "h": 195,
+      "w": 220,
+      "x": 511,
+      "y": 798
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 1024,
+  "image": "real-plain-tennis-ball.jpg",
+  "regime": "plain",
+  "requested_n": 6,
+  "seed": 1065962972,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 6
+  },
+  "target": "tennis-ball",
+  "width": 768
+}

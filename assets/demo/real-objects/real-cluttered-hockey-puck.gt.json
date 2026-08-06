@@ -1,0 +1,65 @@
+{
+  "achieved_n": 7,
+  "background": "leaf-litter",
+  "boxes": [
+    {
+      "h": 147,
+      "w": 151,
+      "x": 392,
+      "y": 58
+    },
+    {
+      "h": 138,
+      "w": 143,
+      "x": 584,
+      "y": 149
+    },
+    {
+      "h": 236,
+      "w": 243,
+      "x": 56,
+      "y": 228
+    },
+    {
+      "h": 271,
+      "w": 266,
+      "x": 309,
+      "y": 245
+    },
+    {
+      "h": 76,
+      "w": 80,
+      "x": 711,
+      "y": 368
+    },
+    {
+      "h": 84,
+      "w": 86,
+      "x": 591,
+      "y": 473
+    },
+    {
+      "h": 119,
+      "w": 118,
+      "x": 174,
+      "y": 512
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 683,
+  "image": "real-cluttered-hockey-puck.jpg",
+  "regime": "cluttered",
+  "requested_n": 7,
+  "seed": 1142905666,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.2207764003294663,
+    "instance_scale_min": 0.32584873903691963,
+    "rotation_max_deg": 16.28678532258155,
+    "rotation_min_deg": -19.831639439589868,
+    "true_instance_count": 7
+  },
+  "target": "hockey-puck",
+  "width": 1024
+}

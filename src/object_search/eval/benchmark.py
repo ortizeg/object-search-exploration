@@ -55,6 +55,7 @@ from object_search.eval.labels import (
     chipset_image_ids,
     load_ground_truth,
     load_research_ground_truth,
+    real_objects_image_ids,
     scene_path,
     textured_image_ids,
 )
@@ -192,10 +193,18 @@ class BenchmarkConfig(BaseModel):
             images = chipset_image_ids()[: self.ci_image_limit]
             return _MODEL_FREE_METHODS, images
         # The full sweep includes the chipset (NCC-favourable), the textured regimes (EVAL-20,
-        # keypoint- and deep-feature-favourable), and the configured synthetic scenes, so the
+        # keypoint- and deep-feature-favourable), the real-object-insertion set (real photographic
+        # texture/lighting, no synthetic render), and the configured synthetic scenes, so the
         # per-slice crossover has every side present.
         images = tuple(
-            dict.fromkeys((*chipset_image_ids(), *textured_image_ids(), *self.image_ids))
+            dict.fromkeys(
+                (
+                    *chipset_image_ids(),
+                    *textured_image_ids(),
+                    *real_objects_image_ids(),
+                    *self.image_ids,
+                )
+            )
         )
         return self.methods, images
 

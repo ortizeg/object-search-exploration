@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "leaf-litter",
+  "boxes": [
+    {
+      "h": 245,
+      "w": 285,
+      "x": 225,
+      "y": 58
+    },
+    {
+      "h": 334,
+      "w": 313,
+      "x": 580,
+      "y": 152
+    },
+    {
+      "h": 80,
+      "w": 85,
+      "x": 338,
+      "y": 315
+    },
+    {
+      "h": 146,
+      "w": 157,
+      "x": 140,
+      "y": 339
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 683,
+  "image": "real-cluttered-ping-pong-ball.jpg",
+  "regime": "cluttered",
+  "requested_n": 4,
+  "seed": 414871736,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.4078904136385535,
+    "instance_scale_min": 0.36904506353300914,
+    "rotation_max_deg": 8.624233234311927,
+    "rotation_min_deg": -16.145383894971886,
+    "true_instance_count": 4
+  },
+  "target": "ping-pong-ball",
+  "width": 1024
+}

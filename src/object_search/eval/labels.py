@@ -38,13 +38,14 @@ from object_search.provenance import repo_root
 from object_search.schemas.geometry import BBox, ExemplarBox
 from object_search.schemas.records import SliceMetadata
 
-# The directories searched for ``<image_id>.gt.json``, in order. All three carry the identical
+# The directories searched for ``<image_id>.gt.json``, in order. All of them carry the identical
 # sidecar format, which is the whole point of a single loader.
 _GT_ROOTS: tuple[Path, ...] = (
     Path("assets") / "demo" / "chipset",
     Path("assets") / "demo" / "synthetic",
     Path("assets") / "demo" / "basketball",
     Path("assets") / "demo" / "textured",
+    Path("assets") / "demo" / "real-objects",
 )
 
 
@@ -137,6 +138,8 @@ def _source_for(root_name: str) -> str:
         return "synthetic"
     if root_name == "textured":
         return "textured"
+    if root_name == "real-objects":
+        return "real-objects"
     return "hand"
 
 
@@ -236,6 +239,21 @@ def textured_image_ids() -> tuple[str, ...]:
     if not textured_dir.is_dir():
         return ()
     return tuple(sorted(path.name[: -len(".gt.json")] for path in textured_dir.glob("*.gt.json")))
+
+
+def real_objects_image_ids() -> tuple[str, ...]:
+    """Every real-object-insertion image id with a committed sidecar, sorted by id.
+
+    Derived from the files on disk like :func:`chipset_image_ids` / :func:`textured_image_ids`, so
+    a partial local regeneration (some raw photos/cutouts missing) still sweeps whatever *is*
+    committed rather than a hardcoded, possibly-stale list.
+    """
+    real_objects_dir = repo_root() / "assets" / "demo" / "real-objects"
+    if not real_objects_dir.is_dir():
+        return ()
+    return tuple(
+        sorted(path.name[: -len(".gt.json")] for path in real_objects_dir.glob("*.gt.json"))
+    )
 
 
 def scene_path(image_id: str) -> Path | None:

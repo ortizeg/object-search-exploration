@@ -1,0 +1,53 @@
+{
+  "achieved_n": 5,
+  "background": "gravel",
+  "boxes": [
+    {
+      "h": 145,
+      "w": 150,
+      "x": 419,
+      "y": 85
+    },
+    {
+      "h": 228,
+      "w": 226,
+      "x": 31,
+      "y": 181
+    },
+    {
+      "h": 215,
+      "w": 223,
+      "x": 663,
+      "y": 239
+    },
+    {
+      "h": 75,
+      "w": 74,
+      "x": 858,
+      "y": 459
+    },
+    {
+      "h": 70,
+      "w": 74,
+      "x": 634,
+      "y": 589
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "real-varied-hockey-puck.jpg",
+  "regime": "varied",
+  "requested_n": 5,
+  "seed": 501304122,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0238547733364258,
+    "instance_scale_min": 0.29935885835234116,
+    "rotation_max_deg": 25.425409440089844,
+    "rotation_min_deg": -21.77796907751604,
+    "true_instance_count": 5
+  },
+  "target": "hockey-puck",
+  "width": 1024
+}

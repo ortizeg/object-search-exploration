@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "grass",
+  "boxes": [
+    {
+      "h": 220,
+      "w": 217,
+      "x": 691,
+      "y": 50
+    },
+    {
+      "h": 220,
+      "w": 217,
+      "x": 405,
+      "y": 142
+    },
+    {
+      "h": 220,
+      "w": 217,
+      "x": 32,
+      "y": 179
+    },
+    {
+      "h": 220,
+      "w": 217,
+      "x": 346,
+      "y": 403
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 660,
+  "image": "real-plain-hockey-puck.jpg",
+  "regime": "plain",
+  "requested_n": 4,
+  "seed": 1147619033,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 4
+  },
+  "target": "hockey-puck",
+  "width": 1024
+}
