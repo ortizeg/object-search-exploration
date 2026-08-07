@@ -53,6 +53,10 @@ runs.db-shm
 # COMMITTED deliverable is the derived charts/tables (EVAL-06, plan 08-02), not this raw dump.
 # The full run also depends on fetched weights, so the file's contents vary by environment.
 docs/benchmark/results.json
+# real-objects-results.json is the analogous raw dump from the real-objects-only sweep
+# (`pixi run bench-real-objects`); same reasoning -- the committed deliverable is
+# docs/reports/real-objects-report.html + real-objects-findings.md, not this raw dump.
+docs/benchmark/real-objects-results.json
 # research-results.json is the analogous raw dump from the research sweep (`pixi run bench-research`
 # / run_research_sweep); it depends on the licence-gated fetched archives + weights, so its numbers
 # vary by environment. The COMMITTED deliverable is docs/reports/research-report.* + the DOC-07 doc.

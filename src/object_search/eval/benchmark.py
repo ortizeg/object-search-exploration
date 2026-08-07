@@ -140,8 +140,15 @@ class BenchmarkConfig(BaseModel):
 
     Attributes:
         methods: Registry keys to run. Ignored when ``ci`` is set (the CI subset is fixed).
-        image_ids: Scene ids to sweep. Ignored when ``ci`` is set (chipset only).
+        image_ids: Scene ids to sweep. Ignored when ``ci`` or ``real_objects_only`` is set.
         ci: Model-free subset -- ``ncc`` + classical ``sparse-geo`` over the chipset, no weights.
+        real_objects_only: Run every configured ``methods`` over exactly
+            :func:`object_search.eval.labels.real_objects_image_ids` -- no chipset, textured, or
+            configured synthetic ids unioned in. Checked after ``ci`` (``ci`` wins if both are set,
+            same precedence as the CI subset always taking priority over the full sweep). Feeds the
+            dedicated ``real-objects-report.html`` (``pixi run bench-real-objects``), kept separate
+            from the default full sweep so a reader can compare "real photographic pixels only"
+            against "synthetic only" without hand-filtering one pooled ``results.json``.
         iou_threshold: IoU for a prediction to count as a true positive.
         out: Output path for ``results.json``; resolved against the repo root when relative.
         ci_image_limit: Cap on chipset images in the CI subset, keeping CI runtime bounded while
@@ -176,6 +183,7 @@ class BenchmarkConfig(BaseModel):
     )
     image_ids: tuple[str, ...] = _SYNTHETIC_IMAGE_IDS
     ci: bool = False
+    real_objects_only: bool = False
     iou_threshold: float = Field(default=0.5, gt=0.0, le=1.0)
     out: str = "docs/benchmark/results.json"
     ci_image_limit: int = Field(default=6, ge=1)
@@ -192,6 +200,11 @@ class BenchmarkConfig(BaseModel):
         if self.ci:
             images = chipset_image_ids()[: self.ci_image_limit]
             return _MODEL_FREE_METHODS, images
+        if self.real_objects_only:
+            # Exactly the real-objects set, every configured method -- no chipset/textured/
+            # synthetic ids unioned in, so this sweep is comparable one-for-one against the
+            # real-objects rows the full sweep also produces (same cells, independent artifact).
+            return self.methods, real_objects_image_ids()
         # The full sweep includes the chipset (NCC-favourable), the textured regimes (EVAL-20,
         # keypoint- and deep-feature-favourable), the real-object-insertion set (real photographic
         # texture/lighting, no synthetic render), and the configured synthetic scenes, so the
