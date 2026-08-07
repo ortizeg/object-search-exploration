@@ -93,8 +93,10 @@ nav:
       - Design: EVAL-DESIGN.md
       - Benchmark results: benchmark/results.md
       - Real-objects vs synthetic: reports/real-objects-findings.md
-      - Limitations: LIMITATIONS.md
       - Datasets: DATASETS.md
+      - Research datasets: eval/research-datasets.md
+      - Floor-plan findings: eval/floorplans-findings.md
+      - Limitations: LIMITATIONS.md
   - Explorations:
       - Marker-conditioned: explorations/marker-conditioned.md
       - Milestone 2: MILESTONE-2.md
