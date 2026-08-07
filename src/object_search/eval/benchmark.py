@@ -10,8 +10,10 @@ What it produces
 ``docs/benchmark/results.json`` with, per method: pooled precision/recall/F1, mean AP, and a
 latency summary, **plus per-slice breakdowns** by true instance count, by canvas size (the
 chipset ramps 320x240 -> 6000x4000, and a single pooled latency would hide where each method's
-cost goes), and by scale variation. Per-slice is the deliverable (EVAL-10): "Method 1 wins on the
-fixed-scale chipset, Method 3 wins once scale varies" is a statement the pooled number cannot make.
+cost goes), by scale variation, and by ground-truth box size (small/medium/large, as a fraction of
+the image -- the same bucketing the floor-plan research path uses, reused here). Per-slice is the
+deliverable (EVAL-10): "Method 1 wins on the fixed-scale chipset, Method 3 wins once scale varies"
+is a statement the pooled number cannot make.
 
 The crossover, on purpose
 -------------------------
@@ -63,7 +65,6 @@ from object_search.eval.metrics import (
     average_precision,
     average_precision_coco,
     counting_errors,
-    match_predictions,
     match_predictions_detailed,
     precision_recall_f1,
 )
@@ -97,14 +98,17 @@ _SYNTHETIC_IMAGE_IDS: tuple[str, ...] = ("scatter-scaled", "cluttered-distractor
 # (tie-break `(-score, y, x)`), the same reproducibility guarantee the rest of the harness uses.
 _FUSION_NMS_IOU: float = 0.5
 
-# -- research per-slice analysis (EVAL-10 applied to floor plans) ------------------------------
-# SYMBOL-SIZE buckets cut a GT box by its area as a fraction of the plan area (box.area /
-# (plan_width * plan_height)). Floor-plan door/window symbols are TINY relative to the whole plan,
-# so the interesting spread is at the small end: a 30x30 door on an 800x600 plan is ~0.0019 of the
-# canvas, a chunky 60x40 window ~0.005. The two cuts below split "tiny" from "typical" from
-# "unusually large / merged-annotation" and are area FRACTIONS, not absolute pixels, so they hold
-# across the varied plan resolutions without per-image tuning. Recall is reported per bucket so a
-# method that only finds the big symbols is visibly distinguished from one that finds small ones.
+# -- per-box-size analysis (EVAL-10 applied to floor plans, reused for the main sweep) ----------
+# SYMBOL-SIZE buckets cut a GT box by its area as a fraction of the image area (box.area /
+# (image_width * image_height)). Originally tuned for floor-plan door/window symbols, which are
+# TINY relative to the whole plan: a 30x30 door on an 800x600 plan is ~0.0019 of the canvas, a
+# chunky 60x40 window ~0.005. The two cuts below split "tiny" from "typical" from "unusually large
+# / merged-annotation" and are area FRACTIONS, not absolute pixels, so they hold across varied
+# image resolutions without per-image tuning. Also checked against the chipset/textured/
+# real-objects/synthetic set (746 boxes): 11.5% fall below the small cut, 46.0% below the medium
+# cut -- a genuinely three-way split there too, not a degenerate one, so the same cuts are reused
+# rather than introducing a second, domain-specific pair. Recall is reported per bucket so a method
+# that only finds the big instances is visibly distinguished from one that finds small ones.
 _SYMBOL_SIZE_SMALL_MAX: float = 0.004
 _SYMBOL_SIZE_MEDIUM_MAX: float = 0.016
 # The fixed bucket order, always emitted (recall None on an empty bucket) so the table is stable.
@@ -117,12 +121,13 @@ _SYMBOL_SIZE_BUCKETS: tuple[str, ...] = ("small", "medium", "large")
 
 
 class GtBoxRecord(BaseModel):
-    """One ground-truth box's per-slice record for the research path: its size bucket + matched.
+    """One ground-truth box's per-slice record: its size bucket + whether it was matched.
 
-    Additive and JSON-serialisable; :class:`ImageResult` carries a tuple of these only on the
-    research path (default empty everywhere else), so the chipset/CI path is unaffected. The
-    ``matched`` flag comes from :func:`object_search.eval.metrics.match_predictions_detailed`, so a
-    GT box is ``matched`` exactly when some prediction claimed it under the EVAL-16 duplicate rule.
+    Additive and JSON-serialisable; populated on both the main chipset/textured/real-objects sweep
+    and the research path (empty only when a sidecar has no recorded canvas ``width``/``height``,
+    per :func:`_build_gt_records`'s guard). The ``matched`` flag comes from
+    :func:`object_search.eval.metrics.match_predictions_detailed`, so a GT box is ``matched``
+    exactly when some prediction claimed it under the EVAL-16 duplicate rule.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -255,7 +260,8 @@ class ImageResult(BaseModel):
     ap75: float | None = None
     predicted_count: int | None = None
     true_count: int | None = None
-    # -- research per-slice records (Task 260729-dh6); default empty keeps chipset byte-identical --
+    # Per-GT-box size-bucket + matched records, feeding the by_symbol_size slice (Task 260729-dh6,
+    # extended to the main sweep below); empty only when the sidecar has no recorded canvas size.
     gt_records: tuple[GtBoxRecord, ...] = ()
 
 
@@ -289,13 +295,14 @@ def _symbol_size_bucket(box_area: int, plan_area: int) -> str:
 
 
 def _build_gt_records(gt: GroundTruth, matched: tuple[bool, ...]) -> tuple[GtBoxRecord, ...]:
-    """Pair each GT box with its symbol-size bucket and whether it was matched (research path).
+    """Pair each GT box with its size bucket and whether it was matched. Used by both sweeps.
 
-    The plan area is ``gt.width * gt.height``. When either dimension is missing (a sidecar that did
-    not record the canvas) the size fraction is undefined, so **every box is skipped** from the size
-    aggregation rather than defaulting to a fabricated plan area -- an unknown must never read as a
-    concrete bucket. ``matched`` is aligned index-for-index to ``gt.boxes`` (the detailed matcher's
-    contract), so ``zip(..., strict=True)`` is safe and a length mismatch would raise loudly.
+    The image area is ``gt.width * gt.height``. When either dimension is missing (a sidecar that
+    did not record the canvas) the size fraction is undefined, so **every box is skipped** from
+    the size aggregation rather than defaulting to a fabricated plan area -- an unknown must never
+    read as a concrete bucket. ``matched`` is aligned index-for-index to ``gt.boxes`` (the detailed
+    matcher's contract), so ``zip(..., strict=True)`` is safe and a length mismatch would raise
+    loudly.
     """
     if gt.width is None or gt.height is None:
         return ()
@@ -415,7 +422,10 @@ def _run_one(method: str, image_id: str, gt: GroundTruth, iou_threshold: float) 
         )
 
     pred_boxes = [match.box for match in result.matches]
-    tp, fp, fn = match_predictions(pred_boxes, gt.boxes, iou_threshold)
+    # The DETAILED matcher (also used by the research path) additionally returns which GT boxes
+    # were matched, aligned to gt.boxes, so the per-box-size recall slice below can be built
+    # without re-running the match. tp still equals sum(matched), so counts are unchanged.
+    tp, fp, fn, matched = match_predictions_detailed(pred_boxes, gt.boxes, iou_threshold)
     precision, recall, f1 = precision_recall_f1(tp, fp, fn)
     # AP over the full candidate log: above-threshold matches AND sub-threshold candidates.
     candidate_log: list[tuple[BBox, float]] = [(m.box, m.score) for m in result.matches]
@@ -437,6 +447,7 @@ def _run_one(method: str, image_id: str, gt: GroundTruth, iou_threshold: float) 
         ap=ap,
         latency_ms=result.latency.total_ms,
         n_matches=len(result.matches),
+        gt_records=_build_gt_records(gt, matched),
     )
 
 
@@ -536,15 +547,21 @@ def run_benchmark(config: BenchmarkConfig) -> dict[str, Any]:
             _run_one(method, image_id, gt, config.iou_threshold)
             for image_id, gt in labelled.items()
         ]
+        all_gt_records = [rec for r in records for rec in r.gt_records]
         methods_out[method] = {
             "overall": _aggregate(records),
             "slices": {
                 "by_instance_count": _slice_by(records, lambda r: r.instance_count),
                 "by_canvas_size": _slice_by(records, lambda r: r.canvas_size),
                 "by_scale_bucket": _slice_by(records, lambda r: r.scale_bucket),
+                # Recall by ground-truth box area as a fraction of the image (small/medium/large,
+                # the same cuts and helper the research/floor-plan path uses) -- reused here so the
+                # main sweep answers "does this method find small instances?" too, not just the
+                # coarse per-image scale-jitter bucket above.
+                "by_symbol_size": _recall_by_size(all_gt_records),
             },
-            # gt_records is a research-only internal carrier for the per-slice aggregation; it is
-            # excluded from per_image so the chipset output stays byte-identical (and JSON-stable).
+            # gt_records feeds by_symbol_size above; excluded from per_image so each row's shape
+            # is unchanged and JSON-stable (a tuple field would otherwise round-trip to a list).
             "per_image": [r.model_dump(exclude={"gt_records"}) for r in records],
         }
 
