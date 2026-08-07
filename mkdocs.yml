@@ -92,6 +92,7 @@ nav:
   - Evaluation:
       - Design: EVAL-DESIGN.md
       - Benchmark results: benchmark/results.md
+      - Real-objects vs synthetic: reports/real-objects-findings.md
       - Limitations: LIMITATIONS.md
       - Datasets: DATASETS.md
   - Explorations:
@@ -107,5 +108,6 @@ nav:
       - MOSSE: reports/mosse-improvement.md
       - DINO dense: reports/dino-dense-improvement.md
       - OWLv2: reports/owlv2-improvement.md
+      - OWLv2 (real-objects): reports/owlv2-oneshot-real-objects-improvement.md
       - Propose–retrieve: reports/propose-retrieve-improvement.md
   - Robustness backlog: ROBUSTNESS-BACKLOG.md
