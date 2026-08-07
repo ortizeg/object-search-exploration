@@ -185,6 +185,10 @@ chipset/textured.
 - Source: `object_search.synthetic.real_insertion`. Regenerate with `pixi run fetch-real-photos`
   (downloads the licensed source photos) then `pixi run real-objects` (segments + composites;
   needs the `fastsam-s` weight, `pixi run -e export fetch-models --only fastsam-s`).
+- **Dedicated report:** [`real-objects-report.html`](reports/real-objects-report.html) scores all
+  six methods on this set alone (`pixi run bench-real-objects` then `pixi run report-real-objects`);
+  [`real-objects-findings.md`](reports/real-objects-findings.md) compares those numbers against the
+  synthetic benchmark and explains where and why they diverge.
 
 ## basketball — real frames (rating-only)
 
