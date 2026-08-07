@@ -72,6 +72,14 @@ def test_ci_benchmark_writes_results_with_per_slice_breakdowns(tmp_path: Path) -
         # Per-instance-count slice exists too (EVAL-10 slices).
         assert block["slices"]["by_instance_count"]
 
+        # Per-box-size (small/medium/large) recall slice, reused from the research path -- the
+        # chipset sidecars carry width/height, so this is populated on the main sweep too.
+        by_size = block["slices"]["by_symbol_size"]
+        assert set(by_size) == {"small", "medium", "large"}
+        for bucket in by_size.values():
+            assert "n_gt" in bucket
+            assert "recall" in bucket
+
 
 def test_coverage_reports_unlabelled_images_honestly(tmp_path: Path) -> None:
     out = tmp_path / "results.json"
