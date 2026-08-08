@@ -138,8 +138,49 @@ def _ncc_grid() -> tuple[dict[str, object], ...]:
     )
 
 
+# ``mosse``-only ADDITIVE block from the floor-plan domain investigation (quick task 260730-w9s,
+# see EXPERIMENTS.md in that quick task's directory). Mirrors the sibling `ncc` investigation's
+# finding: a pure 4-angle CARDINAL bank (0/90/180/270 deg), with `n_angle_groups` scaled to match
+# (4 groups -- one per cardinal, so each sub-filter stays sharp), beat both the shipped +/-35 deg
+# bank and wider continuous banks on BOTH floor-plan classes -- floorplans-door test F1 0.201 ->
+# 0.414, floorplans-window 0.077 -> 0.141. Widening the bank WITHOUT scaling groups proportionally
+# (the naive "28 angles, still 4 groups" trial) reproduces the already-measured-bad one-blurry-
+# filter failure mode and must not be mistaken for a fair test -- see EXPERIMENTS.md E1.
+# `mirror` (a horizontally-flipped verify-side re-score template, for domains with bilateral
+# symmetry like door swing direction) is included as its own axis: unlike `ncc`'s near-tie, it is a
+# STRONG additional win for doors (F1 0.414 -> 0.509 val-argmax) and a mild net-negative for
+# windows (mirror stays off there) -- argmax-on-val lets each dataset pick honestly. Fixed at a
+# single scale and the tighter nms_iou, matching the investigation's own sweep (which held those
+# fixed while varying the bank/groups/mirror axes).
+_MOSSE_CARDINAL_BANK: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0)
+_MOSSE_CARDINAL_GROUPS = 4
+_MOSSE_MIRROR_OPTIONS: tuple[bool, ...] = (False, True)
+
+
+def _mosse_grid() -> tuple[dict[str, object], ...]:
+    """``mosse``'s grid: the original scales x retain_frac x nms_iou sweep, PLUS an additive
+    cardinal-rotation-bank (with matched `n_angle_groups`) x mirror block (see the module comment
+    above `_MOSSE_CARDINAL_BANK`).
+
+    Additive, not a replacement: the shipped bank/groups (mirror off) stay available as before, so
+    this can only match or beat the pre-existing grid on any dataset, never regress it.
+    """
+    return _correlation_grid() + tuple(
+        {
+            "scales": (1.0,),
+            "retain_frac": retain,
+            "nms_iou": 0.3,
+            "train_angles_deg": _MOSSE_CARDINAL_BANK,
+            "n_angle_groups": _MOSSE_CARDINAL_GROUPS,
+            "mirror": mirror,
+        }
+        for retain in _NCC_MOSSE_RETAIN
+        for mirror in _MOSSE_MIRROR_OPTIONS
+    )
+
+
 _NCC_GRID: tuple[dict[str, object], ...] = _ncc_grid()
-_MOSSE_GRID: tuple[dict[str, object], ...] = _correlation_grid()
+_MOSSE_GRID: tuple[dict[str, object], ...] = _mosse_grid()
 
 _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
     "ncc": _NCC_GRID,
@@ -312,9 +353,11 @@ def _tune_methods_at_count(
     report) or once per requested count (the additive nested multi-count report) without
     duplicating the loop.
 
-    ``grids`` maps a method to a caller-supplied grid that REPLACES :data:`_TUNING_GRIDS` for that
-    method; a method absent from the mapping (or ``grids=None``) falls back to the committed grid,
-    which is what keeps the default report byte-identical.
+    ``grids`` is an optional per-method override of :data:`_TUNING_GRIDS`, threaded straight to
+    :func:`tune_method`'s own ``grid=`` parameter (``None`` -- the default -- falls back to that
+    method's committed grid, unchanged). It exists so a research script can sweep a method-specific
+    variant (e.g. a floor-plan rotation-bank sweep) without shelling out to the full
+    ``tune-floorplans`` CLI, which always tunes every registered method.
     """
     per_method: list[dict[str, Any]] = []
     for method in methods:

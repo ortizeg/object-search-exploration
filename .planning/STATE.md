@@ -33,15 +33,19 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-01 — Quick task 260730-vx4: ncc floor-plan orientation/mirror follow-up —
-confirmed the rotation-bank-too-narrow hypothesis for doors (test F1 0.164 -> 0.358 via a cardinal
-0/90/180/270 bank + optional mirror, additive _TUNING_GRIDS entry, no NCCConfig default touched);
-windows show a disclosed val/test generalization gap (0.401 -> 0.350), not reverted. Two further
-recall levers (lower retain_frac, wider scale pyramid) tested and both net-negative -- ncc's real
-ceiling on this domain (true/false-positive scores overlap, unlike synthetic's clean separation).
-Zero synthetic-regime regression. New scripts/ncc_debug_visualize.py debug tool. Full suite green
-(705 passed, 92.34% coverage). Committed on quick/260730-vx4-ncc-floorplan, PR not yet opened.
-Sibling quick task 260730-w9s (mosse, same hypothesis) in progress next.
+Last activity: 2026-08-07 — Quick tasks 260730-vx4 (ncc) + 260730-w9s (mosse): floor-plan
+orientation/mirror follow-up, merged together into one PR against a rebased main. Both confirmed
+the rotation-bank-too-narrow hypothesis via a cardinal 0/90/180/270 bank (+ mirror), additive
+_TUNING_GRIDS entries, no shipped defaults touched. ncc doors F1 0.164->0.358 (windows: a disclosed
+val/test generalization gap, 0.401->0.350, not reverted); ncc also tested two further recall levers
+(lower retain_frac, wider scale pyramid) and found both net-negative -- its real ceiling on this
+domain (true/false-positive scores overlap, unlike synthetic's clean separation). mosse confirmed
+the hypothesis more cleanly for BOTH classes (doors F1 0.201->0.408, beating ncc; windows
+0.077->0.155, no generalization gap but still behind ncc's tuned window number), via a cardinal
+bank with n_angle_groups scaled to match (the angles-per-group invariant) plus a verify-side-only
+mirror knob; mosse also has a disclosed doors val/test nuance (narrower sweep found F1 0.509,
+honest full-grid argmax ships 0.408 instead). Zero synthetic-regime regression on either method.
+New scripts/ncc_debug_visualize.py debug tool. Full suite green.
 
 Progress: [█████████░] 88%
 
@@ -53,6 +57,7 @@ Progress: [█████████░] 88%
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
 | 260730-vx4 | ncc floor-plan orientation/mirror follow-up: cardinal bank + mirror, doors F1 0.164->0.358 | 2026-08-01 | 357abe3 | [260730-vx4](./quick/260730-vx4-improve-ncc-on-floor-plan-door-window-do/) |
+| 260730-w9s | mosse floor-plan orientation/mirror follow-up: cardinal bank + verify-mirror, doors F1 0.201->0.408, windows 0.077->0.155 | 2026-08-07 | c84428b | [260730-w9s](./quick/260730-w9s-improve-mosse-on-floor-plan-door-window-/) |
 
 ## Performance Metrics
 

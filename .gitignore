@@ -74,9 +74,10 @@ docs/benchmark/floorplans-results.md
 # Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
 benchmark.log
 # Raw per-experiment dumps + logs from the quick-task lab benches (e.g.
-# scripts/ncc_floorplan_experiment.py). Same rule as the tuning dumps above: they carry
-# environment-dependent numbers and PER-IMAGE rows keyed to the licensed floor-plan images. The
-# committed deliverable is the aggregate table in each task's EXPERIMENTS.md + the report section.
+# scripts/ncc_floorplan_experiment.py, scripts/mosse_floorplan_experiment.py). Same rule as the
+# tuning dumps above: they carry environment-dependent numbers and PER-IMAGE rows keyed to the
+# licensed floor-plan images. The committed deliverable is the aggregate table in each task's
+# EXPERIMENTS.md + the report section.
 .planning/quick/*/runs/
 .planning/quick/*/logs/
 # Per-image debug renders from scripts/ncc_debug_visualize.py (and its future siblings) --
