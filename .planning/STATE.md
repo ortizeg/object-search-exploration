@@ -33,11 +33,17 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-07-29 — Quick task 260729-dh6: floor-plan eval enrichment — per-slice research
-metrics (recall by symbol-size, F1 by crowding, F1 by plan-resolution via a matched-GT-index sibling
-of match_predictions), broadened aggressive tuning grids (+ size-representative exemplar, exemplar
-{1,3}), and an opt-in dino-dense fixed-size letterbox (GPU-OOM fix). Full suite green (714 passed,
-93.60% coverage). Aggressive GPU re-run is the pending manual vast.ai step.
+Last activity: 2026-08-07 — Quick task 260730-w9s: mosse floor-plan orientation/mirror follow-up —
+confirmed the rotation-bank-too-narrow hypothesis for BOTH doors and windows (test F1 door
+0.201->0.408, window 0.077->0.155) via a cardinal 0/90/180/270 bank with n_angle_groups scaled to
+match (the angles-per-group invariant) plus a verify-side-only mirror knob; additive
+_TUNING_GRIDS["mosse"] entry, no MOSSEConfig default touched. Doors beat ncc's equivalent (0.358);
+windows improve with no generalization gap (unlike ncc's window regression) but remain behind
+ncc's tuned window number. A doors val/test generalization-gap nuance (narrower sweep found F1
+0.509, full-grid honest argmax ships 0.408 instead) is disclosed in the report, not hidden. Zero
+synthetic-regime regression (full bench re-run byte-identical). Full suite green (707 passed,
+92.34% coverage). Committed on quick/260730-w9s-mosse-floorplan, PR not yet opened. Sibling quick
+task 260730-vx4 (ncc, same hypothesis) already committed on its own branch.
 
 Progress: [█████████░] 88%
 
@@ -48,6 +54,8 @@ Progress: [█████████░] 88%
 | 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
+| 260730-vx4 | ncc floor-plan orientation/mirror follow-up: cardinal bank + mirror, doors F1 0.164->0.358 (own branch, not yet merged here) | 2026-08-01 | 357abe3 | [260730-vx4](./quick/260730-vx4-improve-ncc-on-floor-plan-door-window-do/) |
+| 260730-w9s | mosse floor-plan orientation/mirror follow-up: cardinal bank + verify-mirror, doors F1 0.201->0.408, windows 0.077->0.155 | 2026-08-07 | c84428b | [260730-w9s](./quick/260730-w9s-improve-mosse-on-floor-plan-door-window-/) |
 
 ## Performance Metrics
 
