@@ -52,15 +52,27 @@ Post-processing (exact)
 -----------------------
 - **L2-normalize both sides**, then cosine = a plain NumPy matmul of the scene's ``(P, D)``
   normalized class-embed matrix against the ``(D,)`` normalized query embedding, in ``[-1, 1]``.
+- **Recalibrate with OWLv2's own learned logit_shift/logit_scale** (see the floor-plans improvement
+  report): ``calibrated = (cosine + logit_shift) * logit_scale``, HF's own
+  ``Owlv2ClassPredictionHead`` formula, using this SCENE's own per-patch shift/scale (computed with
+  no query, so it is query-independent). This is not a monotonic rescaling -- ``logit_shift``/
+  ``logit_scale`` vary per patch, so it CAN re-rank patches (unlike a single global scale/shift),
+  which is the property that motivated exporting it: on floor-plan line-art, raw cosine was
+  observed ranking generic wall/room-corner rectangles above the true door/window instances.
+  Measured (micro F1 @ IoU 0.5, retain_frac re-tuned to 0.85 for the new score scale): beats the
+  raw-cosine baseline on every one of the six regimes measured (chipset EASY, TEXTURED, VARIED,
+  CLUTTERED, and the floor-plan DOOR/WINDOW target domain) -- the two floor-plan regimes it was
+  built for improve the most (DOOR F1 0.115 -> 0.154, WINDOW 0.022 -> 0.027, still weak in absolute
+  terms but a real gain). Every downstream score (threshold, self-similarity anchor, NMS ordering,
+  candidates) uses the calibrated score, never raw cosine.
 - **Drop the generic whole-frame boxes** (area above ``max_box_area_frac`` of the image): OWLv2
   emits one that scores highest but is never a valid instance in a multi-instance scene, and left
   in it anchors the threshold and dominates NMS.
 - **Threshold** via ``common.calibration``, default **``self-similarity``**: cut at
   ``self_score * retain_frac`` where ``self_score`` is the exemplar's own self-match score (the top
-  score among boxes overlapping the exemplar box). OWLv2 cosine scores are **compressed near 1.0
-  and not cleanly bimodal**, so the ``gmm`` strategy degenerates to an unstable ``ratio`` cut that
-  floods some scenes and starves others; anchoring to the self-match is stable and label-free. A
-  fixed ``score_threshold`` overrides the calibrator.
+  calibrated score among boxes overlapping the exemplar box). ``gmm`` still degenerates badly even
+  against the calibrated score (measured, not just theorized) -- it is not a viable alternative. A
+  fixed ``score_threshold`` overrides the calibrator and is compared against the calibrated score.
 - **NMS at ``nms_iou``**: OWLv2 emits one box per patch, so one object spans several neighbouring
   patches that each score well; NMS collapses those into a single detection. Sort ties by
   ``(-score, y, x)`` (never score alone), the project's reproducibility rule.
@@ -78,9 +90,10 @@ Known failure modes
 -------------------
 - **The exemplar self-match.** The exemplar is part of the scene, so one accepted patch overlaps
   it; that patch is labelled ``is_exemplar=True`` rather than dropped or silently counted.
-- **Fixed 960 input caps small-object recall.** OWLv2's position embeddings pin the input to 960;
-  a small instance in a large scene occupies few patches. This is a real ceiling, noted in the
-  backlog (tiling is the fix, deferred).
+- **Fixed 960 input caps small-object recall on large canvases** -- OWLv2's position embeddings
+  pin the input to 960, so a small instance in a large scene occupies few patches. ``config.
+  tile_large_scenes`` (see below) exists for this, but MEASURED across six regimes it did not
+  net-help -- see the floor-plans improvement report and the ROBUSTNESS BACKLOG note below.
 - **Weights absent.** OWLv2 (Apache-2.0) weights are gitignored and fetched by
   ``pixi run -e export export-owlv2``. Absent, the method returns ``outcome=error`` with a
   ``model_unavailable`` note rather than raising, so the renderer and API degrade honestly.
@@ -94,15 +107,19 @@ non-commercial IDEA-licensed) does not touch how this repo may be shared. See
 
 ROBUSTNESS BACKLOG
 ------------------
-Deferred deliberately (mirrored in ``docs/methods/owlv2-oneshot.md`` and
-``docs/ROBUSTNESS-BACKLOG.md``); none is built in this phase:
+Mirrored in ``docs/methods/owlv2-oneshot.md`` and ``docs/ROBUSTNESS-BACKLOG.md``.
 
-- **Tiled / multi-scale inference** to lift small-object recall on large canvases past the fixed
-  960 input. This is the primary remaining weakness: on the EASY (chipset) regime a 6000x4000 scene
-  downscales chips below OWLv2's effective resolution, so precision stays low there.
-- **Export OWLv2's learned ``logit_scale`` / ``logit_shift``** and apply them before thresholding,
-  so scene scores are the model's calibrated logits rather than raw (compressed) cosine -- may make
-  the score distribution genuinely bimodal and remove the need for self-similarity anchoring.
+- **``config.tile_large_scenes`` -- BUILT AND MEASURED, off by default, not recommended.** Tiling
+  a large scene into overlapping 960px windows was hypothesized to lift small-object recall (the
+  EASY/chipset regime's known weakness). Measured across six regimes (see the floor-plans
+  improvement report): it regressed 5 of 6, INCLUDING EASY itself (F1 -20%, recall completely
+  unchanged -- every extra tile added false positives, not one new true positive). Kept as a
+  documented opt-in for further investigation, not as a recommendation.
+- **``config.rotation_invariant`` -- BUILT AND MEASURED, off by default, not recommended.** Scoring
+  on the max cosine across 0/90/180/270-degree query rotations was hypothesized to help mirrored/
+  rotated floor-plan symbols. Measured: it helped VARIED (+5%) and WINDOW (+12%, still near-zero
+  absolute) but regressed DOOR badly (-26%, one of the two target-domain regimes this exploration
+  cares about) and EASY (-20%). Kept as a documented opt-in, not as a recommendation.
 - **Text-prompt fusion** -- OWLv2 also takes text queries; combining the drawn exemplar with an
   optional label would use both modalities (the exploration's Milestone 2 seam).
 - **Query embedding from multiple exemplars** -- average several drawn boxes for a robust query.
@@ -111,16 +128,19 @@ Deferred deliberately (mirrored in ``docs/methods/owlv2-oneshot.md`` and
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
+import cv2
 import numpy as np
 import numpy.typing as npt
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from object_search.inference import models, resolve_providers
-from object_search.inference.owlv2 import OWLv2Inferencer
+from object_search.inference.owlv2 import OWLV2_IMAGE_SIZE, OWLV2_PATCH, OWLv2Inferencer
 from object_search.schemas import (
     BBox,
     Candidate,
@@ -132,7 +152,7 @@ from object_search.schemas import (
     SearchOutcome,
     SearchResult,
 )
-from object_search.search.common import calibration, nms
+from object_search.search.common import calibration, nms, viz
 from object_search.search.registry import register_method
 
 # -- Method-level constants (properties of the METHOD, not of a query, so not config fields) --
@@ -142,6 +162,9 @@ _OWLV2_KEY = "owlv2-base-patch16"  # the MODEL_REGISTRY key for the OWLv2 vision
 _PROVIDERS = resolve_providers()  # CPU by default (bit-identical); OS_ONNX_PROVIDERS opts into GPU
 _EXEMPLAR_IOU = 0.5  # a match overlapping the exemplar by >= this is the exemplar's own region
 _EXEMPLAR_SELF_IOU = 0.3  # looser overlap used to read off the exemplar's own self-match score
+_TILE_SIZE = OWLV2_IMAGE_SIZE  # tile side matches OWLv2's native input -- no extra downscaling
+_TILE_OVERLAP_FRAC = 0.2  # stride = _TILE_SIZE * (1 - this); keeps a symbol near a seam intact
+_PATCH_GRID = OWLV2_IMAGE_SIZE // OWLV2_PATCH  # 60 -- every tile is always resized to 960x960
 _EPS = 1e-12  # guards a zero-norm division; a genuinely zero embedding is background, not a match
 
 
@@ -172,13 +195,15 @@ class Owlv2OneshotConfig(BaseModel):
         ),
     )
     retain_frac: float = Field(
-        default=0.94,
+        default=0.85,
         ge=0.0,
         le=1.0,
         description=(
             "self-similarity accepts scene patches scoring above self_score * retain_frac. Higher "
-            "is stricter (fewer, more confident matches). 0.94 is the robust sweet spot across "
-            "regimes -- near-max F1 everywhere while keeping recall ~0.9 (see the report)."
+            "is stricter (fewer, more confident matches). 0.85 is the robust sweet spot against "
+            "the CALIBRATED score (see the floor-plans improvement report) -- it beat the prior "
+            "0.94/raw-cosine baseline's F1 on every regime measured, including the two floor-plan "
+            "target-domain regimes that motivated re-tuning it."
         ),
     )
     query_iou_frac: float = Field(
@@ -189,6 +214,27 @@ class Owlv2OneshotConfig(BaseModel):
             "Query-embedding selection: consider the exemplar-crop patches whose predicted box IoU "
             "with the full crop is at least this fraction of the maximum, then pick the single "
             "most distinctive (least similar to the mean) of them. Lower widens the candidate set."
+        ),
+    )
+    rotation_invariant: bool = Field(
+        default=False,
+        description=(
+            "Also encode the exemplar crop rotated 90/180/270 degrees, select a query embedding "
+            "per rotation, and score every scene patch by the MAX calibrated score across all four "
+            "-- floor-plan door/window symbols are frequently mirrored/rotated relative to the "
+            "drawn exemplar, and OWLv2 patch embeddings are not rotation-equivariant. Costs ~4x "
+            "the query-encode latency (query_ms), never the scene encode."
+        ),
+    )
+    tile_large_scenes: bool = Field(
+        default=False,
+        description=(
+            "Split a scene wider or taller than OWLv2's native 960px input into overlapping "
+            "960px tiles, encode each separately, and merge candidates before thresholding/NMS -- "
+            "instead of downscaling the whole scene into one 960px pass. A scene that already fits "
+            "within 960x960 is encoded once, identically to the untiled path (no-op). Costs one "
+            "extra forward pass per tile (scene_ms scales with tile count); never affects the "
+            "query encode."
         ),
     )
     max_box_area_frac: float = Field(
@@ -224,6 +270,16 @@ class Owlv2OneshotConfig(BaseModel):
         default=0,
         ge=0,
         description="random_state for the gmm calibrator (its only genuinely stochastic step).",
+    )
+    debug_dir: str | None = Field(
+        default=None,
+        description=(
+            "Local debugging aid, not a search parameter: when set, dump one PNG per algorithm "
+            "step (exemplar crop, per-tile raw-cosine/logit_shift/logit_scale/calibrated-score "
+            "heatmaps, valid/accepted/final box overlays) into this directory, so a practitioner "
+            "can see WHY a query behaved the way it did rather than just the final matches. "
+            "None ⇒ zero extra cost (the default, always)."
+        ),
     )
 
 
@@ -359,6 +415,71 @@ def boxes_to_pixels(
     return out
 
 
+def tile_boxes(orig_w: int, orig_h: int, tile_size: int, overlap_frac: float) -> list[BBox]:
+    """Cover ``(orig_w, orig_h)`` with ``tile_size``-square windows overlapping by ``overlap_frac``.
+
+    Returns a **single whole-image tile** when the image already fits within ``tile_size`` on both
+    axes -- the tiled and untiled code paths are then identical, so tiling is a strict no-op below
+    the threshold. Otherwise, tiles stride at ``tile_size * (1 - overlap_frac)`` along each axis (a
+    last tile is always flush with the far edge, even if that means a bigger-than-stride overlap
+    with its neighbour, so no scene pixel is ever left uncovered). Pure arithmetic -- no ONNX
+    session, no weight -- so CI gates it.
+    """
+    if orig_w <= tile_size and orig_h <= tile_size:
+        return [BBox(x=0, y=0, w=orig_w, h=orig_h)]
+    stride = max(1, round(tile_size * (1.0 - overlap_frac)))
+
+    def _starts(extent: int) -> list[int]:
+        if extent <= tile_size:
+            return [0]
+        starts = list(range(0, extent - tile_size + 1, stride))
+        if starts[-1] != extent - tile_size:
+            starts.append(extent - tile_size)
+        return starts
+
+    return [
+        BBox(x=x, y=y, w=min(tile_size, orig_w - x), h=min(tile_size, orig_h - y))
+        for y in _starts(orig_h)
+        for x in _starts(orig_w)
+    ]
+
+
+# -- debug-dump helpers (config.debug_dir only; zero cost, zero call sites, when it is None) -----
+
+
+def _debug_write_heatmap(out_dir: Path, name: str, values: npt.NDArray[np.float32]) -> None:
+    """Reshape one tile's flat per-patch ``values`` to the ``_PATCH_GRID`` square and write a PNG.
+
+    Uses ``common.viz``'s shared viridis colormap (one source of truth for "how heatmaps are
+    coloured"), so this is a thin disk-writing wrapper, not a second colormap implementation.
+    """
+    grid = values.reshape(_PATCH_GRID, _PATCH_GRID).astype(np.float64)
+    payload = viz.heatmap_png_b64(grid)
+    (out_dir / f"{name}.png").write_bytes(base64.b64decode(payload.png_b64))
+
+
+def _debug_write_boxes(
+    out_dir: Path,
+    name: str,
+    scene: npt.NDArray[np.uint8],
+    boxes: list[BBox],
+    scores: list[float],
+    exemplar: BBox,
+) -> None:
+    """Overlay ``boxes`` (scored) on ``scene``; write a PNG. Reuses ``viz.draw_matches``."""
+    matches = tuple(
+        Match(box=b, score=s, is_exemplar=b.iou(exemplar) >= _EXEMPLAR_IOU)
+        for b, s in zip(boxes, scores, strict=True)
+    )
+    canvas = viz.draw_matches(scene, matches, exemplar=ExemplarBox(box=exemplar))
+    cv2.imwrite(str(out_dir / f"{name}.png"), canvas)
+
+
+def _debug_write_text(out_dir: Path, name: str, lines: tuple[str, ...]) -> None:
+    """Write one small text summary alongside the images -- numbers a heatmap can't carry."""
+    (out_dir / f"{name}.txt").write_text("\n".join(lines) + "\n")
+
+
 def _empty_or_error(
     outcome: SearchOutcome,
     note: str,
@@ -425,40 +546,125 @@ def search(
         )
 
     orig_h, orig_w = int(image.shape[0]), int(image.shape[1])
+    debug_dir: Path | None = None
+    if config.debug_dir is not None:
+        debug_dir = Path(config.debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Encode the exemplar crop as a query image (same vision graph as the scene, one call).
+    # 1. Encode the exemplar crop as a query image (same vision graph as the scene). If
+    #    config.rotation_invariant, also encode the crop rotated 90/180/270 degrees -- OWLv2 patch
+    #    embeddings are not rotation-equivariant, so a mirrored/rotated scene instance (common on
+    #    floor plans) may not match the exemplar's own orientation.
     crop_box = exemplar.box.clipped_to(orig_w, orig_h)
     crop = np.ascontiguousarray(
         image[crop_box.y : crop_box.y2, crop_box.x : crop_box.x2], dtype=np.uint8
     )
-    t_query = perf_counter()
-    query = inferencer.embed_image(crop)
-    query_ms = (perf_counter() - t_query) * 1000.0
-
-    # 2. Select ONE query embedding: the most-distinctive covering patch (HF heuristic).
-    query_embedding = select_query_embedding(
-        query.class_embeds, query.boxes_cxcywh, config.query_iou_frac
+    rotated_crops = (
+        (crop, np.rot90(crop, 1), np.rot90(crop, 2), np.rot90(crop, 3))
+        if config.rotation_invariant
+        else (crop,)
     )
+    if debug_dir is not None:
+        for i, rotated_crop in enumerate(rotated_crops):
+            angle = i * 90
+            cv2.imwrite(
+                str(debug_dir / f"01_exemplar_crop_rot{angle:03d}.png"),
+                np.ascontiguousarray(rotated_crop, dtype=np.uint8),
+            )
 
-    # 3. Encode the scene (second and only other forward pass).
+    # 2. Select one query embedding PER rotation: the most-distinctive covering patch (HF
+    #    heuristic) run independently on each rotated crop.
+    query_ms = 0.0
+    query_embeddings: list[npt.NDArray[np.float32]] = []
+    for rotated_crop in rotated_crops:
+        t_query = perf_counter()
+        query = inferencer.embed_image(np.ascontiguousarray(rotated_crop, dtype=np.uint8))
+        query_ms += (perf_counter() - t_query) * 1000.0
+        query_embeddings.append(
+            select_query_embedding(query.class_embeds, query.boxes_cxcywh, config.query_iou_frac)
+        )
+
+    # 3. Encode the scene. If config.tile_large_scenes, split a scene wider or taller than OWLv2's
+    #    native 960px into overlapping 960px tiles and encode each separately -- OWLv2's fixed 960
+    #    input otherwise downscales a large canvas below its effective resolution (a small symbol
+    #    occupies very few of the 60x60 patches). A scene that already fits within 960x960 is a
+    #    single "tile" == the whole image, so this is byte-identical to the untiled path below that
+    #    size (tile_boxes returns one whole-image tile). Each tile's boxes are mapped to scene
+    #    pixels HERE, offset by the tile origin, so later steps can treat all tiles as one flat
+    #    candidate set; tile_area tracks each patch's SOURCE tile area (not the whole scene) for
+    #    the per-tile whole-frame filter in step 5.
+    scene_tiles = (
+        tile_boxes(orig_w, orig_h, _TILE_SIZE, _TILE_OVERLAP_FRAC)
+        if config.tile_large_scenes
+        else [BBox(x=0, y=0, w=orig_w, h=orig_h)]
+    )
     t_target = perf_counter()
-    target = inferencer.embed_image(image)
+    tile_class_embeds: list[npt.NDArray[np.float32]] = []
+    tile_logit_shift: list[npt.NDArray[np.float32]] = []
+    tile_logit_scale: list[npt.NDArray[np.float32]] = []
+    pixel_boxes: list[BBox | None] = []
+    tile_area: list[float] = []
+    for tile_index, tile in enumerate(scene_tiles):
+        tile_image = np.ascontiguousarray(image[tile.y : tile.y2, tile.x : tile.x2], dtype=np.uint8)
+        tile_embed = inferencer.embed_image(tile_image)
+        tile_class_embeds.append(tile_embed.class_embeds)
+        tile_logit_shift.append(tile_embed.logit_shift)
+        tile_logit_scale.append(tile_embed.logit_scale)
+        if debug_dir is not None:
+            # logit_shift/logit_scale are query-independent -- dumped here, at the scene encode,
+            # rather than step 4, so they read as "what THIS tile's own content looks like to the
+            # model" independent of any query.
+            shift_name = f"02_tile{tile_index}_logit_shift"
+            scale_name = f"02_tile{tile_index}_logit_scale"
+            _debug_write_heatmap(debug_dir, shift_name, tile_embed.logit_shift)
+            _debug_write_heatmap(debug_dir, scale_name, tile_embed.logit_scale)
+        for local_box in boxes_to_pixels(tile_embed.boxes_cxcywh, tile.w, tile.h):
+            global_box = (
+                None
+                if local_box is None
+                else BBox(
+                    x=local_box.x + tile.x, y=local_box.y + tile.y, w=local_box.w, h=local_box.h
+                )
+            )
+            pixel_boxes.append(global_box)
+            tile_area.append(float(tile.area))
     target_ms = (perf_counter() - t_target) * 1000.0
+    class_embeds_all = np.concatenate(tile_class_embeds, axis=0)
+    logit_shift_all = np.concatenate(tile_logit_shift, axis=0)
+    logit_scale_all = np.concatenate(tile_logit_scale, axis=0)
 
-    # 4. Cosine similarity of every scene patch to the query embedding. Both sides L2-normalized,
-    #    so the matmul IS cosine in [-1, 1]. A plain NumPy matmul -- no FAISS (one image).
-    target_norm = _l2_normalize(target.class_embeds, axis=1)
-    scores_all = np.asarray(target_norm @ query_embedding, dtype=np.float32)
+    # 4. Cosine similarity of every scene patch to EACH query embedding (both sides L2-normalized,
+    #    so the matmul IS cosine in [-1, 1]; a plain NumPy matmul -- no FAISS, one image), then take
+    #    the per-patch MAX across rotations (a no-op max over one embedding when rotation_invariant
+    #    is off). Then recalibrate with OWLv2's own learned, query-independent per-patch
+    #    logit_shift/logit_scale (HF's Owlv2ClassPredictionHead formula) -- unlike a single global
+    #    scale/shift, this CAN re-rank patches, which is the point: it is meant to suppress generic
+    #    high-cosine patches that are not actually the object (see the module docstring / the
+    #    floor-plans improvement report). Every score used downstream is calibrated, never raw
+    #    cosine.
+    target_norm = _l2_normalize(class_embeds_all, axis=1)
+    per_rotation_cosine = [
+        np.asarray(target_norm @ qe, dtype=np.float32) for qe in query_embeddings
+    ]
+    cosine_all = np.maximum.reduce(per_rotation_cosine).astype(np.float32)
+    scores_all = np.asarray((cosine_all + logit_shift_all) * logit_scale_all, dtype=np.float32)
+    if debug_dir is not None:
+        patches_per_tile = _PATCH_GRID * _PATCH_GRID
+        for tile_index in range(len(scene_tiles)):
+            lo, hi = tile_index * patches_per_tile, (tile_index + 1) * patches_per_tile
+            _debug_write_heatmap(debug_dir, f"03_tile{tile_index}_raw_cosine", cosine_all[lo:hi])
+            _debug_write_heatmap(
+                debug_dir, f"04_tile{tile_index}_calibrated_score", scores_all[lo:hi]
+            )
 
-    # 5. Map each patch's predicted box to scene pixels; drop degenerate boxes AND the generic
-    #    whole-frame boxes (area > max_box_area_frac of the image), which are never a valid instance
-    #    and otherwise score highest -- anchoring the threshold and dominating NMS. Keep alignment.
-    pixel_boxes = boxes_to_pixels(target.boxes_cxcywh, orig_w, orig_h)
-    max_box_area = config.max_box_area_frac * float(orig_w * orig_h)
+    # 5. Drop degenerate boxes AND the generic whole-frame boxes (area > max_box_area_frac of the
+    #    box's SOURCE TILE, not the whole scene -- OWLv2 emits one whole-frame box per forward pass,
+    #    so with tiling that is one per tile, each sized to ITS tile, not the scene). Left in, it
+    #    scores highest and anchors the threshold / dominates NMS. Keep alignment with scores_all.
     boxes: list[BBox] = []
     kept_scores: list[float] = []
     for i, pixel_box in enumerate(pixel_boxes):
-        if pixel_box is not None and pixel_box.area <= max_box_area:
+        if pixel_box is not None and pixel_box.area <= config.max_box_area_frac * tile_area[i]:
             boxes.append(pixel_box)
             kept_scores.append(float(scores_all[i]))
     if not boxes:
@@ -471,6 +677,8 @@ def search(
             metrics={"n_patches": float(scores_all.size), "n_valid": 0.0},
         )
     scores = np.asarray(kept_scores, dtype=np.float32)
+    if debug_dir is not None:
+        _debug_write_boxes(debug_dir, "05_valid_boxes", image, boxes, kept_scores, exemplar.box)
 
     # 6. Calibrate/threshold. self-similarity anchors the cut to the exemplar's OWN self-match
     #    score (self_score * retain_frac): OWLv2 cosine is compressed near 1.0 and not bimodal, so
@@ -494,6 +702,20 @@ def search(
         seed=config.seed,
     )
     threshold = calib.threshold
+    if debug_dir is not None:
+        _debug_write_text(
+            debug_dir,
+            "06_threshold_summary",
+            (
+                f"strategy: {strategy}",
+                f"reason: {calib.reason}",
+                f"self_score: {self_score:.4f}",
+                f"threshold: {threshold:.4f}",
+                f"score_max: {float(scores.max()):.4f}",
+                f"score_mean: {float(scores.mean()):.4f}",
+                f"n_valid_boxes: {len(boxes)}",
+            ),
+        )
 
     # 7. Split into accepted (matches) and sub-threshold candidates (EVAL-08), then NMS the accepted
     #    set to collapse the several neighbouring patches OWLv2 fires on one object. METHOD-12:
@@ -517,6 +739,23 @@ def search(
         [float(scores[i]) for i in kept],
         exemplar.box,
     )
+    if debug_dir is not None:
+        _debug_write_boxes(
+            debug_dir,
+            "07_accepted_prenms",
+            image,
+            [boxes[i] for i in accepted],
+            [float(scores[i]) for i in accepted],
+            exemplar.box,
+        )
+        _debug_write_boxes(
+            debug_dir,
+            "08_matches_final",
+            image,
+            [m.box for m in matches],
+            [m.score for m in matches],
+            exemplar.box,
+        )
 
     # 8. Diagnostics carry the top candidate boxes (the UI's debug overlay) and the pre-NMS accepted
     #    count; latency attributes the query encode vs the scene encode SEPARATELY (EVAL-11).
