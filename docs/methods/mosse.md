@@ -130,6 +130,12 @@ This is the "fine" half of a coarse-to-fine detector — `ncc`'s discriminative 
 It lifts CLUTTERED F1 0.61 → 0.82 and VARIED past `ncc`, at the cost of the small EASY chip-grid
 sidelobe dip above. `verify=False` recovers the pure single-stage filter response as a control.
 
+With `mirror=True` (**off** by default) the verify bank also correlates each angle's horizontally
+flipped exemplar (`cv2.flip`, template and mask together), scoped to this verify step only — a
+reflection is not in the rotation group, so no `train_angles_deg` bank, however wide, can ever
+reach it (the archetype: a floor-plan door drawn with the opposite swing hand). It is inert when
+`verify=False`, since there is then no local re-score for it to extend.
+
 ### 7. Calibrate the threshold
 
 Default **`repeat-aware`**. With `verify` on (the default) the accept score is the raw local NCC,
@@ -219,6 +225,7 @@ drift from the code.
 | `log_transform` | `true` | Apply `log1p` to filter patches and the scene (the MOSSE illumination step). Off = raw intensities (a control). |
 | `window` | `true` | Multiply each training patch by a 2-D Hann window before the FFT, so the circular FFT does not wrap an edge discontinuity into the filter. Off is a control that shows the artifact. |
 | `verify` | `true` | Coarse-to-fine re-scoring (step 6b): re-score each proposed peak by a local raw `TM_CCOEFF_NORMED` of the rotated exemplar and threshold on that, recovering `ncc`'s clutter discrimination and its `~1.0` self-anchor at O(#proposals) local cost. Off = the pure single-stage filter response (a control, and the original shipped behaviour). |
+| `mirror` | `false` | Also verify against the horizontally mirrored exemplar at every `train_angles_deg` angle. Off by default; scoped to the verify step only (inert when `verify=false`) — a reflection is not in the rotation group, so no rotation bank can ever reach it (the archetype: a floor-plan door drawn with the opposite swing hand). |
 | `threshold` | `null` | Fixed accept threshold on the normalized response. `null` ⇒ use the calibrator. |
 | `calibration` | `"repeat-aware"` | How the accept threshold is chosen when `threshold` is `null`. repeat-aware reads the score distribution (strict cut when ≥2 distinct locations sit near the self-response, else the permissive `self × retain_frac` tail), with `near` 0.9 tuned to the verified raw-NCC score. self-similarity / ratio / gmm are the controls. |
 | `peaks` | `"local-max"` | Peak-extraction strategy. local-max (default) separates touching instances that plain nms merges; nms is the control; watershed uses a distance transform. |
