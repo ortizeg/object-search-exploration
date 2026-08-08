@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "concrete",
+  "boxes": [
+    {
+      "h": 275,
+      "w": 294,
+      "x": 59,
+      "y": 84
+    },
+    {
+      "h": 72,
+      "w": 80,
+      "x": 622,
+      "y": 168
+    },
+    {
+      "h": 241,
+      "w": 235,
+      "x": 234,
+      "y": 450
+    },
+    {
+      "h": 67,
+      "w": 75,
+      "x": 50,
+      "y": 867
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 1024,
+  "image": "real-varied-tennis-ball.jpg",
+  "regime": "varied",
+  "requested_n": 4,
+  "seed": 984257796,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.2568320266739208,
+    "instance_scale_min": 0.3285172949464721,
+    "rotation_max_deg": 8.262162554066856,
+    "rotation_min_deg": -22.38907252632012,
+    "true_instance_count": 4
+  },
+  "target": "tennis-ball",
+  "width": 1024
+}

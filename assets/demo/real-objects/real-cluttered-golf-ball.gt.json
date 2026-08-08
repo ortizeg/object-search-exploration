@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "mosaic-tile",
+  "boxes": [
+    {
+      "h": 275,
+      "w": 252,
+      "x": 708,
+      "y": 191
+    },
+    {
+      "h": 201,
+      "w": 205,
+      "x": 619,
+      "y": 479
+    },
+    {
+      "h": 169,
+      "w": 155,
+      "x": 398,
+      "y": 567
+    },
+    {
+      "h": 103,
+      "w": 90,
+      "x": 251,
+      "y": 647
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 815,
+  "image": "real-cluttered-golf-ball.jpg",
+  "regime": "cluttered",
+  "requested_n": 4,
+  "seed": 1364786336,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.2057181313126653,
+    "instance_scale_min": 0.39176516511126286,
+    "rotation_max_deg": 15.891278225705214,
+    "rotation_min_deg": -19.169985566749208,
+    "true_instance_count": 4
+  },
+  "target": "golf-ball",
+  "width": 1024
+}

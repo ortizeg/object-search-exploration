@@ -82,7 +82,11 @@ Post-processing (exact)
   half of a coarse-to-fine detector (the FFT filter is the cheap full-scene PROPOSER); it lifts
   CLUTTERED F1 from ~0.61 to ~0.82 and VARIED past ``ncc``, at the cost of a small EASY precision
   dip (raw NCC has periodic sidelobes on an identical-chip grid that the whitened filter
-  suppressed). ``verify=False`` recovers the pure-filter response as a control.
+  suppressed). ``verify=False`` recovers the pure-filter response as a control. With
+  ``mirror=True`` (**off** by default) the verify bank also correlates each angle's horizontally
+  flipped exemplar (``cv2.flip``, template and mask together) -- scoped to this verify step only,
+  since a reflection is not in the rotation group and no ``train_angles_deg`` bank, however wide,
+  can ever reach it (the archetype: a floor-plan door drawn with the opposite swing hand).
 - **PSR.** The peak-to-sidelobe ratio (MOSSE's native confidence: ``(peak - mu_side) /
   sigma_side`` over an annulus around the peak) is carried in diagnostics for inspection; the
   accept decision is driven by the normalized response, which is comparable across images.
@@ -311,6 +315,20 @@ class MOSSEConfig(BaseModel):
             "PROPOSER, the local NCC is the accurate VERIFIER. It restores ncc's ~1.0 self-anchor "
             "and its clutter discrimination while keeping the filter's speed. off = the pure "
             "filter response (a control, and the original shipped behaviour)."
+        ),
+    )
+    mirror: bool = Field(
+        default=False,
+        description=(
+            "Also verify against the horizontally MIRRORED exemplar at every angle in "
+            "train_angles_deg. Off by default. Scoped to the coarse-to-fine VERIFY step only (a "
+            "local raw NCC re-score, ncc's own mirror mechanism) -- it does NOT fold mirrored "
+            "angles into the FFT filter's training warp, since the filter proposes candidates by "
+            "shape regardless of handedness and the verify step is what actually discriminates "
+            "them by score. A reflection is not in the rotation group, so no train_angles_deg bank "
+            "-- however wide -- can ever reach it; the archetype is a floor-plan door drawn with "
+            "the opposite swing hand. Inert (a no-op) when verify=False, since there is then no "
+            "local re-score for it to extend."
         ),
     )
     threshold: float | None = Field(
@@ -624,7 +642,7 @@ def _psr(response: npt.NDArray[np.float64], y: int, x: int) -> float:
 
 
 def _rotated_template_bank(
-    template: npt.NDArray[np.uint8], angles_deg: tuple[float, ...]
+    template: npt.NDArray[np.uint8], angles_deg: tuple[float, ...], *, mirror: bool = False
 ) -> list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]:
     """Raw (un-whitened) rotated exemplar crops + masks for the local NCC verify (step 6b).
 
@@ -634,28 +652,44 @@ def _rotated_template_bank(
     45 deg) are covered by a warped, eroded mask so ``matchTemplate`` scores only real pixels --
     the same corner-honesty ``ncc``'s rotation bank uses (PITFALLS.md 1.6). Built per proposal
     *size* so the exemplar is matched at the instance's detected scale.
+
+    With ``mirror=True`` every one of those variants also yields a horizontally flipped sibling
+    (``cv2.flip(..., 1)``), template and mask flipped **together**, after the rotation -- the same
+    mechanism ``ncc``'s own ``mirror`` field uses. Flipping the already-eroded mask is valid because
+    a flip is a pure reflection on the pixel lattice (it permutes pixels without resampling), so it
+    still marks exactly the real template pixels and the corner-honesty invariant carries over.
     """
     h, w = template.shape[:2]
     bank: list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]] = []
     for angle in angles_deg:
         if angle == 0.0:
-            bank.append((template, None))
-            continue
-        rot = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
-        cos, sin = abs(float(rot[0, 0])), abs(float(rot[0, 1]))
-        new_w, new_h = int(h * sin + w * cos), int(h * cos + w * sin)
-        rot[0, 2] += new_w / 2.0 - w / 2.0
-        rot[1, 2] += new_h / 2.0 - h / 2.0
-        warped = cv2.warpAffine(
-            template, rot, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=0
-        )
-        mask = cv2.warpAffine(
-            np.full((h, w), 255, np.uint8), rot, (new_w, new_h), flags=cv2.INTER_NEAREST
-        )
-        mask = cv2.erode(mask, np.ones((3, 3), np.uint8))
-        bank.append(
-            (np.ascontiguousarray(warped, dtype=np.uint8), np.asarray(mask, dtype=np.uint8))
-        )
+            warped: npt.NDArray[np.uint8] = template
+            mask: npt.NDArray[np.uint8] | None = None
+        else:
+            rot = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+            cos, sin = abs(float(rot[0, 0])), abs(float(rot[0, 1]))
+            new_w, new_h = int(h * sin + w * cos), int(h * cos + w * sin)
+            rot[0, 2] += new_w / 2.0 - w / 2.0
+            rot[1, 2] += new_h / 2.0 - h / 2.0
+            warped = np.ascontiguousarray(
+                cv2.warpAffine(
+                    template, rot, (new_w, new_h), flags=cv2.INTER_LINEAR, borderValue=0
+                ),
+                dtype=np.uint8,
+            )
+            eroded = cv2.erode(
+                cv2.warpAffine(
+                    np.full((h, w), 255, np.uint8), rot, (new_w, new_h), flags=cv2.INTER_NEAREST
+                ),
+                np.ones((3, 3), np.uint8),
+            )
+            mask = np.asarray(eroded, dtype=np.uint8)
+        bank.append((warped, mask))
+        if mirror:
+            flipped_mask: npt.NDArray[np.uint8] | None = None
+            if mask is not None:
+                flipped_mask = np.ascontiguousarray(cv2.flip(mask, 1), dtype=np.uint8)
+            bank.append((np.ascontiguousarray(cv2.flip(warped, 1), dtype=np.uint8), flipped_mask))
     return bank
 
 
@@ -667,6 +701,8 @@ def _verify_score(
     bank_cache: dict[
         tuple[int, int], list[tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]]
     ],
+    *,
+    mirror: bool = False,
 ) -> float:
     """Local raw ``TM_CCOEFF_NORMED`` of the rotated exemplar around ``box`` -- the 'fine' re-score.
 
@@ -674,11 +710,13 @@ def _verify_score(
     ``ncc`` uses, but only inside a small window grown from ``box`` (``_VERIFY_MARGIN_FRAC`` of the
     template on each side, so a proposal placed a few pixels off by the pyramid rounding can still
     re-localize). The exemplar is resized to the proposal's detected size so scale is handled by the
-    box, and correlated across the rotation bank so a rotated (VARIED) instance is not rejected; the
-    score is the max normalized correlation over the window and the bank, in ``[-1, 1]``. Cost is
-    ``O(window * template * angles)`` at the few proposal sites -- the cheap half of coarse-to-fine,
-    never ``ncc``'s full-scene sweep. Banks are cached by proposal size (the pyramid yields few
-    distinct sizes) so the warps are not rebuilt per peak.
+    box, and correlated across the rotation bank (plus its mirrored siblings when ``mirror=True``,
+    ``MOSSEConfig.mirror`` -- a reflection no rotation bank can reach, the archetype being a
+    floor-plan door drawn with the opposite swing hand) so a rotated (VARIED) instance is not
+    rejected; the score is the max normalized correlation over the window and the bank, in
+    ``[-1, 1]``. Cost is ``O(window * template * angles)`` at the few proposal sites -- the cheap
+    half of coarse-to-fine, never ``ncc``'s full-scene sweep. Banks are cached by proposal size (the
+    pyramid yields few distinct sizes) so the warps are not rebuilt per peak.
     """
     bw, bh = box.w, box.h
     if bw < _MIN_TEMPLATE_PX or bh < _MIN_TEMPLATE_PX:
@@ -695,7 +733,7 @@ def _verify_score(
         resized = np.ascontiguousarray(
             cv2.resize(exemplar_crop, (bw, bh), interpolation=cv2.INTER_AREA), dtype=np.uint8
         )
-        bank = _rotated_template_bank(resized, angles_deg)
+        bank = _rotated_template_bank(resized, angles_deg, mirror=mirror)
         bank_cache[(bw, bh)] = bank
     best = -1.0
     for tmpl, mask in bank:
@@ -880,8 +918,10 @@ def search(
     #     threshold drops them (measured: ~83% of cluttered instances are proposed, but only ~53%
     #     survive without this step). Re-score each proposal with a LOCAL raw TM_CCOEFF_NORMED of
     #     the rotated exemplar -- ncc's discriminative score, but evaluated only in a small window
-    #     around each of the few proposals, not over the whole scene. That raw score (self-match
-    #     ~1.0, the anchor the whitened filter lost) replaces the filter response for the threshold
+    #     around each of the few proposals, not over the whole scene -- plus its horizontally
+    #     mirrored sibling when config.mirror is set (off by default; a reflection no rotation bank
+    #     can reach). That raw score (self-match ~1.0, the anchor the whitened filter lost) replaces
+    #     the filter response for the threshold
     #     and the candidate log; the filter's z-score stays the cross-level NMS priority. Off = the
     #     pure filter response (the original shipped behaviour), a control.
     if config.verify and records:
@@ -892,7 +932,9 @@ def search(
         records = [
             _LevelPeak(
                 r.box,
-                _verify_score(gray, crop, r.box, config.train_angles_deg, bank_cache),
+                _verify_score(
+                    gray, crop, r.box, config.train_angles_deg, bank_cache, mirror=config.mirror
+                ),
                 r.z_score,
                 r.level,
             )

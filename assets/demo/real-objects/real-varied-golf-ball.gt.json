@@ -1,0 +1,59 @@
+{
+  "achieved_n": 6,
+  "background": "cardboard",
+  "boxes": [
+    {
+      "h": 90,
+      "w": 79,
+      "x": 747,
+      "y": 148
+    },
+    {
+      "h": 70,
+      "w": 75,
+      "x": 11,
+      "y": 287
+    },
+    {
+      "h": 332,
+      "w": 341,
+      "x": 530,
+      "y": 294
+    },
+    {
+      "h": 195,
+      "w": 178,
+      "x": 343,
+      "y": 438
+    },
+    {
+      "h": 64,
+      "w": 64,
+      "x": 59,
+      "y": 510
+    },
+    {
+      "h": 73,
+      "w": 72,
+      "x": 135,
+      "y": 616
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "real-varied-golf-ball.jpg",
+  "regime": "varied",
+  "requested_n": 6,
+  "seed": 1858412061,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.4044357378538905,
+    "instance_scale_min": 0.2714482633489138,
+    "rotation_max_deg": 26.899347785928803,
+    "rotation_min_deg": -16.108345796831575,
+    "true_instance_count": 6
+  },
+  "target": "golf-ball",
+  "width": 1024
+}

@@ -1,0 +1,53 @@
+{
+  "achieved_n": 5,
+  "background": "mosaic-tile",
+  "boxes": [
+    {
+      "h": 196,
+      "w": 275,
+      "x": 291,
+      "y": 61
+    },
+    {
+      "h": 94,
+      "w": 154,
+      "x": 159,
+      "y": 349
+    },
+    {
+      "h": 167,
+      "w": 263,
+      "x": 748,
+      "y": 364
+    },
+    {
+      "h": 170,
+      "w": 253,
+      "x": 304,
+      "y": 497
+    },
+    {
+      "h": 134,
+      "w": 227,
+      "x": 667,
+      "y": 629
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 815,
+  "image": "real-cluttered-c-clamp.jpg",
+  "regime": "cluttered",
+  "requested_n": 5,
+  "seed": 507637834,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.2192189730533383,
+    "instance_scale_min": 0.6881943395592023,
+    "rotation_max_deg": 19.17514485444993,
+    "rotation_min_deg": -15.386063390898617,
+    "true_instance_count": 5
+  },
+  "target": "c-clamp",
+  "width": 1024
+}
