@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Assemble the baseline-vs-fine-tuned OWLv2 comparison from the six pulled-back result files.
+"""Assemble the baseline-vs-fine-tuned OWLv2 comparison from the eight pulled-back result files.
 
 Reads ``docs/benchmark/owlv2-finetune/{dataset}-{arm}.json`` (written by ``run_domain_tuning`` on
 the vast.ai box, see ``scripts/gpu_finetune.sh``) for every (dataset, arm) pair, and emits:
@@ -29,7 +29,7 @@ from loguru import logger
 from object_search.provenance import repo_root
 
 _DATASETS = ("floorplans-door", "floorplans-window")
-_ARMS = ("baseline", "headonly", "full")
+_ARMS = ("baseline", "headonly", "full", "contrastive")
 _RESULTS_DIR = repo_root() / "docs" / "benchmark" / "owlv2-finetune"
 _OUT_PATH = repo_root() / "docs" / "benchmark" / "owlv2-finetune-comparison.json"
 

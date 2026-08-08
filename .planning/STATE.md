@@ -33,14 +33,19 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-04 — Quick task 260801-8zy: fine-tuned owlv2-oneshot's OWLv2 weights on the
-197-image floor-plans train split (text-conditioned proxy, both heads-only and full-unfreeze arms),
-exported to ONNX, measured on the full 28-plan test splits on a vast.ai RTX 3090. Negative result:
-fine-tuning does not close the gap to propose-retrieve (0.459 door F1) or ncc (0.403 window F1), and
-regresses doors vs. the pretrained baseline (0.154 → 0.087 → 0.083, monotonically worse with more
-unfrozen capacity). Fixed a real onnxruntime-gpu/CUDA-version bug along the way (silent CPU fallback,
-baked the fix into scripts/gpu_finetune.sh). Full suite green (751 passed, 92.44% coverage). Neither
-arm adopted as default; ncc/propose-retrieve remain the floor-plan recommendation.
+Last activity: 2026-08-08 — Quick task 260805-hg1: added a supervised-contrastive (SupCon) loss
+variant to the OWLv2 floor-plans fine-tune recipe, trained one headonly arm on a vast.ai RTX 3090,
+measured on the same 28-plan test splits. Sharper negative result than 260801-8zy: door/window F1
+0.010/0.009, worse than both the classification-loss recipe and the pretrained baseline, even though
+the loss demonstrably learns the intended property (val_cos_gap.gap_class/gap_background more than
+triple over training, in the exact cosine space owlv2-oneshot scores with). A follow-up offline
+diagnostic (second vast.ai instance) found the mechanism: SupCon only ever supervises scene-context
+forward passes, never the crop-context query-encoding path used at inference, so the two diverged —
+the exemplar's own self-similarity score goes cosine-negative, collapsing the calibration threshold
+and retaining ~86% of all scene patches instead of ~25-30%. Full suite green (831 passed, 93.81%
+coverage). Neither classification nor contrastive arm adopted as default; ncc/propose-retrieve remain
+the floor-plan recommendation. A crop-context-supervision fix was requested as follow-up scope, not
+yet started.
 
 Progress: [█████████░] 88%
 
@@ -52,6 +57,7 @@ Progress: [█████████░] 88%
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
 | 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
+| 260805-hg1 | SupCon contrastive loss for OWLv2 floor-plans fine-tune — sharper negative result, diagnosed crop/scene calibration break | 2026-08-08 | (pending) | [260805-hg1](./quick/260805-hg1-add-a-supervised-contrastive-loss-varian/) |
 
 ## Performance Metrics
 
