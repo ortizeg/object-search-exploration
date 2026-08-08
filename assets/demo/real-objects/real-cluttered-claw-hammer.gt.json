@@ -1,0 +1,71 @@
+{
+  "achieved_n": 8,
+  "background": "mosaic-tile",
+  "boxes": [
+    {
+      "h": 268,
+      "w": 191,
+      "x": 237,
+      "y": 13
+    },
+    {
+      "h": 111,
+      "w": 77,
+      "x": 82,
+      "y": 14
+    },
+    {
+      "h": 107,
+      "w": 84,
+      "x": 768,
+      "y": 101
+    },
+    {
+      "h": 167,
+      "w": 115,
+      "x": 83,
+      "y": 221
+    },
+    {
+      "h": 299,
+      "w": 197,
+      "x": 497,
+      "y": 234
+    },
+    {
+      "h": 159,
+      "w": 105,
+      "x": 91,
+      "y": 510
+    },
+    {
+      "h": 223,
+      "w": 161,
+      "x": 769,
+      "y": 518
+    },
+    {
+      "h": 98,
+      "w": 77,
+      "x": 494,
+      "y": 593
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 815,
+  "image": "real-cluttered-claw-hammer.jpg",
+  "regime": "cluttered",
+  "requested_n": 8,
+  "seed": 598725442,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.2537673625454413,
+    "instance_scale_min": 0.44493633526582643,
+    "rotation_max_deg": 0.6322001634619667,
+    "rotation_min_deg": -14.544473021706628,
+    "true_instance_count": 8
+  },
+  "target": "claw-hammer",
+  "width": 1024
+}

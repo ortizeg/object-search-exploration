@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 from scipy import fft
@@ -27,6 +28,8 @@ from object_search.search.mosse import (
     _bank_response,
     _build_filter_bank,
     _repeat_aware_threshold,
+    _rotated_template_bank,
+    _verify_score,
     search,
 )
 
@@ -334,3 +337,59 @@ def test_reproducible_same_input_same_output() -> None:
 def test_scipy_fft_available() -> None:
     # The method depends on scipy.fft (shared scene transform); guard the import contract.
     assert hasattr(fft, "rfft2") and hasattr(fft, "next_fast_len")
+
+
+# ------------------------------------------------------------- verify-step mirror (floor-plan)
+
+
+def test_mirror_defaults_off() -> None:
+    assert MOSSEConfig().mirror is False
+
+
+def test_rotated_template_bank_mirror_doubles_every_angle() -> None:
+    template = np.random.default_rng(0).integers(0, 256, (40, 40), np.uint8).astype(np.uint8)
+    angles = (0.0, 30.0)
+    plain = _rotated_template_bank(template, angles, mirror=False)
+    mirrored = _rotated_template_bank(template, angles, mirror=True)
+    assert len(plain) == len(angles)
+    assert len(mirrored) == 2 * len(angles)
+
+
+def test_rotated_template_bank_mirror_flips_template_and_mask_together() -> None:
+    template = np.random.default_rng(1).integers(0, 256, (40, 40), np.uint8).astype(np.uint8)
+    bank = _rotated_template_bank(template, (30.0,), mirror=True)
+    (_upright_tmpl, upright_mask), (flipped_tmpl, flipped_mask) = bank
+    assert upright_mask is not None and flipped_mask is not None
+    np.testing.assert_array_equal(flipped_tmpl, cv2.flip(_upright_tmpl, 1))
+    np.testing.assert_array_equal(flipped_mask, cv2.flip(upright_mask, 1))
+
+
+def test_verify_score_mirror_finds_a_reflected_instance() -> None:
+    """A local NCC of the plain bank cannot score a mirrored instance highly; mirror=True can."""
+    rng = np.random.default_rng(2)
+    # An asymmetric patch (left half bright, right half a distinct rough texture) -- its mirror
+    # is genuinely a different arrangement, not a near-symmetric one a plain rotation could match.
+    patch = np.zeros((50, 50), np.uint8)
+    patch[:, :25] = 220
+    patch[:, 25:] = rng.integers(0, 60, (50, 25), np.uint8)
+
+    scene = np.full((150, 150), 128, np.uint8)
+    scene[10:60, 10:60] = patch  # the exemplar's own region
+    mirrored = cv2.flip(patch, 1)
+    scene[90:140, 90:140] = mirrored  # a reflected instance elsewhere in the scene
+
+    box = BBox(x=90, y=90, w=50, h=50)
+    without_mirror = _verify_score(scene, patch, box, (0.0,), {}, mirror=False)
+    with_mirror = _verify_score(scene, patch, box, (0.0,), {}, mirror=True)
+    assert with_mirror > without_mirror + 0.3, "mirror=True should score the reflection far higher"
+    assert with_mirror > 0.9, "the reflected instance is an exact flip, so the score is near 1.0"
+
+
+def test_verify_score_mirror_is_a_noop_when_verify_is_off() -> None:
+    """mirror is scoped to the verify step; verify=False leaves the pure filter response used."""
+    scene, boxes = _textured_scene()
+    exemplar = ExemplarBox(box=boxes[0])
+    a = search(scene, exemplar, MOSSEConfig(verify=False, mirror=False))
+    b = search(scene, exemplar, MOSSEConfig(verify=False, mirror=True))
+    assert [m.score for m in a.matches] == [m.score for m in b.matches]
+    assert [m.box.xyxy for m in a.matches] == [m.box.xyxy for m in b.matches]

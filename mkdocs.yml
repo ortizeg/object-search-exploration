@@ -92,10 +92,11 @@ nav:
   - Evaluation:
       - Design: EVAL-DESIGN.md
       - Benchmark results: benchmark/results.md
-      - Limitations: LIMITATIONS.md
+      - Real-objects vs synthetic: reports/real-objects-findings.md
       - Datasets: DATASETS.md
       - Research datasets: eval/research-datasets.md
-      - "Floor plans — findings": eval/floorplans-findings.md
+      - Floor-plan findings: eval/floorplans-findings.md
+      - Limitations: LIMITATIONS.md
   - Explorations:
       - Marker-conditioned: explorations/marker-conditioned.md
       - Milestone 2: MILESTONE-2.md
@@ -109,5 +110,6 @@ nav:
       - MOSSE: reports/mosse-improvement.md
       - DINO dense: reports/dino-dense-improvement.md
       - OWLv2: reports/owlv2-improvement.md
+      - OWLv2 (real-objects): reports/owlv2-oneshot-real-objects-improvement.md
       - Propose–retrieve: reports/propose-retrieve-improvement.md
   - Robustness backlog: ROBUSTNESS-BACKLOG.md

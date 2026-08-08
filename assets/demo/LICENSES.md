@@ -117,19 +117,107 @@ same private-use posture under which the SuperPoint and FastSAM weights are acce
 
 ## Generic repeated-instance photos — TODO (revisited in Phase 8)
 
-The brief also wants permissively-licensed generic repeated-instance photos in four
-categories. **None are included in Phase 1**, deliberately: no clearly-licensed source could
-be obtained without a network fetch of unverifiable provenance, and downloading images of
-unknown licence to satisfy a requirement is exactly the mistake this file exists to prevent.
-The synthetic set, the chip benchmark, and the basketball frames carry Phase 1.
+The brief also wants permissively-licensed generic repeated-instance photos in four specific
+categories. **None of these four are included yet**, deliberately: no clearly-licensed source
+could be obtained without a network fetch of unverifiable provenance, and downloading images of
+unknown licence to satisfy a requirement is exactly the mistake this file exists to prevent. The
+real-objects set below addresses the same underlying gap — real, clearly-licensed
+repeated-instance photos — with a different, generic-object approach; these four remain open.
 
-Wanted, to be sourced with explicit licences in Phase 8 (see EVAL-02 for the ground-truth
+Wanted, to be sourced with explicit licences in a future phase (see EVAL-02 for the ground-truth
 labelling that pairs with them):
 
 - [ ] Retail **shelf** (repeated products)
 - [ ] **PCB** (repeated components)
 - [ ] **Parking lot** (repeated cars)
 - [ ] **Tiles / windows** (repeated architectural elements)
+
+---
+
+## Real-object insertion set — Wikimedia Commons source photos
+
+Source: `object_search.synthetic.real_insertion`, deterministic from a single master seed.
+Regenerate the raw downloads with `pixi run fetch-real-photos`, then the composited set with
+`pixi run real-objects` (needs the `fastsam-s` weight — `pixi run -e export fetch-models --only
+fastsam-s`). 10 object photos are segmented with FastSAM into RGBA cutouts and pasted onto
+backgrounds across three regimes (`real-plain-*` / `real-varied-*` / `real-cluttered-*`): `plain`/
+`varied` draw from 10 clean, uniform backgrounds; `cluttered` draws from 2 deliberately **busy**
+real backgrounds instead (leaf litter, a patterned mosaic tile floor), so it stacks genuine visual
+clutter on top of its jitter and distractor rather than reusing the same easy-to-separate backdrop.
+This produces 30 committed images, each with a `<id>.gt.json` sidecar recording the exact,
+by-construction ground truth (achieved count, target/background/regime, the AABB of every pasted
+instance). Composited as **JPEG (quality 92)**, not PNG — real photographic backgrounds carry
+genuine high-frequency detail that barely compresses losslessly, so PNG output routinely exceeded
+the repo's 2 MB pre-commit gate; this mirrors the basketball frames' JPEG q92 convention below.
+Licence for the **composited JPEGs**: our own output (the compositing arrangement),
+under the repository's licence — but every **source photo** pasted into them carries its own,
+individually recorded Wikimedia Commons licence below. Neither the raw downloads nor the cached
+per-object cutouts are committed (gitignored, regenerable); only the final composited images are.
+
+Every entry's licence and author were read from the Commons API's own `imageinfo.extmetadata`
+(`LicenseShortName` / `Artist`), not assumed from a search snippet, and every `file_url` was
+confirmed to resolve (HTTP 200, image content-type) before being recorded. Two background entries
+needed a framing substitution because no edge-to-edge, allowed-licence photo of the literal
+requested scene could be found — noted below; the substitution reasoning is also in the
+`real_insertion.py` module comments next to each entry.
+
+**Four sourced object photos were dropped after manual review** (a coffee mug, a padlock, a
+pinecone, a rubber duck), before the segmentation fixes below were in place: each is a low
+local-contrast photo where FastSAM's automatic mode produced a fragmented or wrong mask. A golf
+ball was sourced as a replacement to keep the set at ten categories. `extract_cutout` since gained
+three fixes measured against the real manifest, in `real_insertion.py`: `_select_object_proposal`
+weights FastSAM's `objectness` cubed (a plain product-photo backdrop routinely came back as the
+single *largest*, best-centred proposal, which pure area x centrality picked over the actual,
+smaller-but-far-more-confident object proposal); the thresholded mask is eroded one pass to trim
+the background-colour fringe a soft real edge leaves; and a frame-coverage ceiling catches
+"background included" masks that a fragmentation-only solidity floor cannot (a whole-frame mask is
+itself perfectly solid), retrying through a small confidence-threshold ladder before giving up.
+These fixed the `c-clamp`/`claw-hammer`/`screwdriver` cutouts, which were being shipped as their
+own near-full-frame product photo rather than a tight silhouette; the four dropped objects were not
+retried against the fixed pipeline.
+
+**Object photos:**
+
+| Category | Title | Author | Licence | Source |
+|---|---|---|---|---|
+| `tennis-ball` | Tennis ball 01.jpg | Fcb981 (English Wikipedia) | CC-BY-2.5 | [File:Tennis_ball_01.jpg](https://commons.wikimedia.org/wiki/File:Tennis_ball_01.jpg) |
+| `claw-hammer` | Stanley graphite claw hammer.jpg | J.C. Fields (Typhoon) | CC-BY-SA-3.0 | [File:Stanley_graphite_claw_hammer.jpg](https://commons.wikimedia.org/wiki/File:Stanley_graphite_claw_hammer.jpg) |
+| `screwdriver` | Big flat screwdriver.jpg | Jiří Sedláček (Frettie) | CC-BY-SA-4.0 | [File:Big_flat_screwdriver.jpg](https://commons.wikimedia.org/wiki/File:Big_flat_screwdriver.jpg) |
+| `c-clamp` | Carondelet Foundry Company C-Clamp.jpg | Carondelet Foundry Company | Public Domain | [File:Carondelet_Foundry_Company_C-Clamp.jpg](https://commons.wikimedia.org/wiki/File:Carondelet_Foundry_Company_C-Clamp.jpg) |
+| `apple` | Apple (1).jpg | Renee Comet (Photographer) | Public Domain | [File:Apple_(1).jpg](https://commons.wikimedia.org/wiki/File:Apple_(1).jpg) |
+| `orange` | Orange Fruit Close-up.jpg | freestock.ca | CC-BY-SA-3.0 | [File:Orange_Fruit_Close-up.jpg](https://commons.wikimedia.org/wiki/File:Orange_Fruit_Close-up.jpg) |
+| `hockey-puck` | Ice-hockey puck 2.JPG | Santeri Viinamäki | CC-BY-4.0 | [File:Ice-hockey_puck_2.JPG](https://commons.wikimedia.org/wiki/File:Ice-hockey_puck_2.JPG) |
+| `chess-pawn` | Chess piece - White pawn.JPG | MichaelMaggs | CC-BY-SA-2.5 | [File:Chess_piece_-_White_pawn.JPG](https://commons.wikimedia.org/wiki/File:Chess_piece_-_White_pawn.JPG) |
+| `ping-pong-ball` | Table Tennis Plastic Ball 40+ mm.jpg | Peter Porai-Koshits | CC-BY-SA-4.0 | [File:Table_Tennis_Plastic_Ball_40+_mm.jpg](https://commons.wikimedia.org/wiki/File:Table_Tennis_Plastic_Ball_40%2B_mm.jpg) — the deliberate low-texture/rotationally-symmetric stress object |
+| `golf-ball` | Golf-ball.jpg | Paolo Neo | CC-BY-SA-3.0 | [File:Golf-ball.jpg](https://commons.wikimedia.org/wiki/File:Golf-ball.jpg) |
+
+**Background photos:**
+
+| Category | Title | Author | Licence | Source |
+|---|---|---|---|---|
+| `wood-floor` | SibleySquareBareFloorboards.jpg | DanielPenfield | CC-BY-SA-4.0 | [File:SibleySquareBareFloorboards.jpg](https://commons.wikimedia.org/wiki/File:SibleySquareBareFloorboards.jpg) |
+| `concrete` | Grey moderately dirty worn grubby dusty poured concrete seamless floor texture.jpg | Sisters.seamless | CC0-1.0 | [File:...](https://commons.wikimedia.org/wiki/File:Grey_moderately_dirty_worn_grubby_dusty_poured_concrete_seamless_floor_texture.jpg) |
+| `grass` | 084 Green grass lawn background, green mowed grass free photo.jpg | Marek Ślusarczyk (Tupungato) | CC-BY-3.0 | [File:084_Green_grass_lawn_background,_green_mowed_grass_free_photo.jpg](https://commons.wikimedia.org/wiki/File:084_Green_grass_lawn_background,_green_mowed_grass_free_photo.jpg) |
+| `gravel` | Gravel Stones.jpg | Saral Shots | CC0-1.0 | [File:Gravel_Stones.jpg](https://commons.wikimedia.org/wiki/File:Gravel_Stones.jpg) |
+| `brick-wall` | Red-brick-wall-texture-clean.jpg | MartinThoma | CC0-1.0 | [File:Red-brick-wall-texture-clean.jpg](https://commons.wikimedia.org/wiki/File:Red-brick-wall-texture-clean.jpg) |
+| `sand` | Gfp-grainy-sand-texture.jpg | Yinan Chen (goodfreephotos.com) | Public Domain | [File:Gfp-grainy-sand-texture.jpg](https://commons.wikimedia.org/wiki/File:Gfp-grainy-sand-texture.jpg) |
+| `carpet` | Berber Carpet (macro).jpg | Pi_Guy_31415 | CC-BY-2.5 | [File:Berber_Carpet_(macro).jpg](https://commons.wikimedia.org/wiki/File:Berber_Carpet_(macro).jpg) — **substituted framing**: a macro shot of plain berber weave, not a wide room shot (every wide-angle carpet photo under an allowed licence was ornately patterned or a full cluttered room) |
+| `granite` | Blue Pearl Granite (larvikite) (Larvik Batholith, 292-298 Ma, Early Permian; near Larvik, Norway) 2.jpg | James St. John | CC-BY-2.0 | [File:...](https://commons.wikimedia.org/wiki/File:Blue_Pearl_Granite_(larvikite)_(Larvik_Batholith,_292-298_Ma,_Early_Permian;_near_Larvik,_Norway)_2.jpg) |
+| `asphalt` | New pedestrian way in Otaniemi.jpg | JIP | CC-BY-SA-4.0 | [File:New_pedestrian_way_in_Otaniemi.jpg](https://commons.wikimedia.org/wiki/File:New_pedestrian_way_in_Otaniemi.jpg) — **substituted framing**: the frame borders grass/gravel/trees around the paved path; no edge-to-edge asphalt photo under an allowed licence was found |
+| `cardboard` | Corrugated Cardboard.JPG | Richard Wheeler (Zephyris) | CC-BY-SA-3.0 | [File:Corrugated_Cardboard.JPG](https://commons.wikimedia.org/wiki/File:Corrugated_Cardboard.JPG) |
+
+**Busy background photos** (`real-cluttered-*` only — see `REAL_BUSY_BACKGROUND_MANIFEST`):
+
+| Category | Title | Author | Licence | Source |
+|---|---|---|---|---|
+| `leaf-litter` | Dülmen, Wildpark -- 2020 -- 3415.jpg | Dietmar Rabich | CC-BY-SA-4.0 | [File:Dülmen,_Wildpark_--_2020_--_3415.jpg](https://commons.wikimedia.org/wiki/File:D%C3%BClmen,_Wildpark_--_2020_--_3415.jpg) |
+| `mosaic-tile` | Historic American Buildings Survey ... Mosaic Tile Floor Pattern - Kamm Building, Mishawaka, HABS IND,71-MISH,1C-8.tif | Verlin Berry (NPS, Historic American Buildings Survey) | Public Domain | [File:...HABS_IND,71-MISH,1C-8.tif](https://commons.wikimedia.org/wiki/File:Historic_American_Buildings_Survey_Verlin_Berry,_Photographer_October_21,_1977_FIRST_FLOOR,_VIEW_OF_MOSAIC_TILE_FLOOR_PATTERN_-_Kamm_Building,_111_North_Main_Street,_Mishawaka,_HABS_IND,71-MISH,1C-8.tif) — a small archival negative border/catalogue number sits near one frame edge (a photographic-survey scan, left as-is rather than cropped) |
+
+All 22 source files come from 22 distinct photographers/uploaders; no two categories share a
+source file. The exact same tables (as structured data) are the `REAL_OBJECT_MANIFEST` /
+`REAL_BACKGROUND_MANIFEST` / `REAL_BUSY_BACKGROUND_MANIFEST` constants in `real_insertion.py` --
+these tables and the code are kept in sync by hand, since the code is the executable source of
+truth and these tables are what a human reads.
 
 ---
 

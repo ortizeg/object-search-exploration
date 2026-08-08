@@ -268,6 +268,54 @@ def textured(
     typer.echo(f"wrote {len(written)} textured image(s) to {out}")
 
 
+_REAL_OBJECTS_DIR = repo_root() / "assets" / "demo" / "real-objects"
+_REAL_RAW_DIR = repo_root() / "assets" / "demo" / "real-objects" / "_raw"
+_REAL_CUTOUTS_DIR = repo_root() / "assets" / "demo" / "real-objects" / "cutouts"
+
+
+@app.command("fetch-real-photos")
+def fetch_real_photos_cmd(
+    raw_dir: Annotated[Path, typer.Option("--raw-dir", help="Raw download directory.")] = (
+        _REAL_RAW_DIR
+    ),
+    force: Annotated[bool, typer.Option("--force", help="Re-download even if present.")] = False,
+) -> None:
+    """Download the real-object-insertion set's source photos from Wikimedia Commons.
+
+    Gitignored raw material for ``real-objects``; every file's title/author/licence/source URL
+    and SHA-256 is recorded in ``<raw-dir>/provenance.json``. A missing/renamed Commons file logs
+    a warning and is skipped rather than aborting the whole fetch.
+    """
+    from object_search.synthetic.real_insertion import fetch_real_photos
+
+    written = fetch_real_photos(raw_dir, force=force)
+    typer.echo(f"wrote {len(written)} raw photo(s) to {raw_dir}")
+
+
+@app.command("real-objects")
+def real_objects(
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")] = _REAL_OBJECTS_DIR,
+    raw_dir: Annotated[Path, typer.Option("--raw-dir", help="Raw photo directory.")] = (
+        _REAL_RAW_DIR
+    ),
+    cutouts_dir: Annotated[Path, typer.Option("--cutouts-dir", help="Cutout cache dir.")] = (
+        _REAL_CUTOUTS_DIR
+    ),
+    force: Annotated[bool, typer.Option("--force", help="Overwrite existing files.")] = False,
+) -> None:
+    """Generate the real-object-insertion benchmark set with exact ground truth.
+
+    Segments each raw object photo with FastSAM (``pixi run fetch-real-photos`` must have
+    populated ``raw-dir`` first, and ``pixi run -e export fetch-models --only fastsam-s`` must
+    have exported the weight), caches the cutout, then pastes it onto its background(s) at
+    known, non-overlapping positions. Images/cutouts with a missing input are logged and skipped.
+    """
+    from object_search.synthetic.real_insertion import write_real_insertion
+
+    written = write_real_insertion(out, raw_dir, cutouts_dir, force=force)
+    typer.echo(f"wrote {len(written)} real-object image(s) to {out}")
+
+
 _SAMPLES_DIR = repo_root() / "docs" / "samples"
 
 

@@ -1,0 +1,51 @@
+# The real-objects-only benchmark sweep. Hydra composes this into a DictConfig, which
+# object_search.eval.benchmark validates into a frozen BenchmarkConfig before anything runs --
+# same contract as conf/benchmark.yaml, just a different run set.
+#
+# Selected via `--config-name` (Hydra's @hydra.main binds one config_name at decoration time but
+# accepts a CLI override), so `object_search.eval.benchmark` needs no code branch to pick this
+# file up. Run with `pixi run bench-real-objects`.
+
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+# Same six-method sweep as the default full benchmark (conf/benchmark.yaml), so the two reports
+# are directly comparable method-for-method.
+methods:
+  - ncc
+  - mosse
+  - sparse-geo
+  - dino-dense
+  - propose-retrieve
+  - owlv2-oneshot
+
+# real_objects_only makes resolve_run_set() return exactly real_objects_image_ids() -- no
+# chipset/textured/synthetic ids unioned in. image_ids is left at its default and ignored.
+real_objects_only: true
+
+ci: false
+
+iou_threshold: 0.5
+
+# A separate output file from the default sweep's docs/benchmark/results.json, so the dedicated
+# real-objects-report.html and the general benchmark-report.html read independent artifacts.
+out: docs/benchmark/real-objects-results.json
+
+ci_image_limit: 6
+
+# Research-sweep dimensions -- unused here, same defaults as conf/benchmark.yaml.
+datasets: []
+splits: [val, test]
+exemplar_counts: [1, 3]
+seed: 0
+research_root: null
+research_out: docs/benchmark/research-results.json
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

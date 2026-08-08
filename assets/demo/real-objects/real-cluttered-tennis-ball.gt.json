@@ -1,0 +1,47 @@
+{
+  "achieved_n": 4,
+  "background": "leaf-litter",
+  "boxes": [
+    {
+      "h": 171,
+      "w": 177,
+      "x": 118,
+      "y": 173
+    },
+    {
+      "h": 138,
+      "w": 153,
+      "x": 658,
+      "y": 216
+    },
+    {
+      "h": 153,
+      "w": 170,
+      "x": 813,
+      "y": 439
+    },
+    {
+      "h": 180,
+      "w": 202,
+      "x": 102,
+      "y": 468
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 683,
+  "image": "real-cluttered-tennis-ball.jpg",
+  "regime": "cluttered",
+  "requested_n": 4,
+  "seed": 1688569861,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 0.884406069584739,
+    "instance_scale_min": 0.6057824084302479,
+    "rotation_max_deg": 11.538492811498964,
+    "rotation_min_deg": -10.72681748354347,
+    "true_instance_count": 4
+  },
+  "target": "tennis-ball",
+  "width": 1024
+}

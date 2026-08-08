@@ -168,3 +168,154 @@ millisecond path.
 coverage 92.69 %**. New tests cover the `repeat-aware` strict/permissive switch, the rotation-bank
 default, and the candidate-log deduplication invariant. Benchmark report and charts regenerated
 from a fresh `pixi run bench`; only `ncc` numbers changed.
+
+## Floor-plan domain follow-up (2026-07-30)
+
+A real target-domain eval (Roboflow floor-plans-500, [`../eval/floorplans-findings.md`](../eval/floorplans-findings.md))
+measured `ncc` doors F1 **0.248** on the 28-plan test split, with recall by symbol size (small/med/
+large) **0.31 / 0.31 / 0.29** — flat and low. Flat recall-by-size is the signature of an
+*orientation* problem, not a scale/texture one (recall should climb with symbol size if it were the
+latter). This section tests that hypothesis empirically rather than assuming it.
+
+### Root cause: CONFIRMED for doors, MIXED for windows
+
+`NCCConfig.angles_deg` defaults to a 7-step bank over only ±35°. A floor-plan door sits on
+whichever wall it is drawn on, so an instance on a perpendicular wall can be ~90° off the
+exemplar — entirely outside that bank. Four rotation-bank variants were swept on val (shipped
+±35° / cardinal-only 0°·90°·180°·270° / cardinal × the shipped ±35° sub-bank [~28 angles] /
+uniform 30° spacing [12 angles]), each crossed with `retain_frac`, at a fixed single scale:
+
+**Cardinal-only (0/90/180/270°) wins clearly on val for both classes** — not the wider continuous
+banks. Floor-plan walls are discretely orthogonal, not continuously rotated, so a small precise
+cardinal set beats a dense sweep (which throws more false peaks at more candidate angles on
+structured background without recovering more true recall).
+
+A separate, DEFAULT-OFF `mirror` field was added to `NCCConfig` (extends `_rotated_bank` to also
+yield a `cv2.flip`-mirrored template/mask sibling per angle — a reflection is not in the rotation
+group, so no bank width, however wide, can ever reach it; the archetype is a door drawn with the
+opposite swing hand). Measured *separately* from the rotation-bank result so the two effects are
+attributable independently:
+
+- **Doors**: a statistical tie (val F1 0.197 mirror-on vs 0.192 mirror-off — within noise on a
+  56-image val set). Mirror-on happened to win the argmax by the smallest possible margin.
+- **Windows**: a clear net-negative (val F1 0.276 mirror-on vs 0.299 mirror-off). Window symbols
+  in this dataset convention appear to carry much less of the bilateral-swing-direction variation
+  doors do, so the extra mirrored candidate templates mostly just add false-peak surface.
+
+Both `angles_deg` and `mirror` are additive to the existing `_TUNING_GRIDS["ncc"]` (the shipped
+bank and `mirror=False` stay available), landed as a **grid-only** change — no `NCCConfig` default
+was touched, so the synthetic regime cannot regress by construction. `run_domain_tuning` gained an
+additive `grids=` override (defaults to `_TUNING_GRIDS`, byte-identical when omitted) so this and a
+sibling `mosse` investigation could each sweep method-specific variants without shelling out to the
+full `tune-floorplans` CLI (which always tunes all six methods) on every iteration; the previously-
+aliased `ncc`/`mosse` grid objects were split into independent tuples in the same change (both
+config models are `extra="forbid"`, so a method-only key fed into the wrong model would raise).
+
+### Before / after — floor-plan domain (val 56 / test 28 plans, argmax F1 @ IoU 0.5)
+
+| dataset | config | P | R | F1 |
+|---|---|---|---|---|
+| floorplans-door | default (shipped) | 0.111 | 0.309 | 0.164 |
+| floorplans-door | tuned, pre-existing grid (no cardinal/mirror) | 0.569 | 0.159 | 0.248 |
+| floorplans-door | **tuned, cardinal + mirror=True, retain=0.65** | **0.340** | **0.378** | **0.358** |
+| floorplans-window | default (shipped) | 0.149 | 0.436 | 0.222 |
+| floorplans-window | tuned, pre-existing grid (no cardinal/mirror) | 0.428 | 0.378 | 0.401 |
+| floorplans-window | tuned, cardinal + mirror=False, retain=0.65 | 0.287 | 0.449 | 0.350 |
+
+**Doors: a clear, robust win** — F1 more than doubles over the shipped default (+0.194) and beats
+the pre-existing best-tuned grid entry by +0.110. This result reproduced consistently across three
+independent measurements (the rotation-bank sweep, the separate mirror sweep, and the final
+full-grid run all converged on test F1 0.355–0.358).
+
+**Windows: an honestly-disclosed generalization gap, not reverted.** Cardinal genuinely wins on val
+(F1 0.359 vs the old grid's 0.329), which is the *only* selection criterion the tuning protocol is
+allowed to use — but this time the val-argmax pick generalizes to test F1 0.350, slightly *below*
+what the pre-existing grid entry already achieved (0.401) on this particular test split. This is
+disclosed rather than hidden: per-image debugging (`scripts/ncc_debug_visualize.py`, below) found
+at least one plan where the cardinal config visibly regresses relative to the shipped default (P
+0.636→0.286, R 0.538→0.308 on one 13-window plan) alongside others where it likely helps — the net
+effect on this domain is genuinely more mixed for windows than for doors, and the grid is shared
+across both classes so there is no clean per-dataset revert available without a larger tuning-
+architecture change (out of scope here). Since the protocol forbids conditioning grid decisions on
+test outcomes, the additive option stays; a future pass could split the grid per-dataset if this
+gap matters enough to chase.
+
+### A new debug tool: `scripts/ncc_debug_visualize.py`
+
+Aggregate F1/P/R cannot say *which* instances are missed or *why* a false positive appears. This
+script (flag-driven: `--config {default,tuned-door,tuned-window}`, `--image`, `--exemplar-index`)
+runs `ncc.search()` on one floor-plan image and renders three per-step artifacts — `01_query.png`
+(the exemplar), `02_matches_vs_gt.png` (accepted matches in green, sub-threshold candidates in red
+with their score, ground truth colored by whether some match claimed it), `03_heatmap.png` (the
+representative similarity heatmap) — plus a console dump of the calibration reasoning, threshold,
+and self-score. It is a research/debug tool (`scripts/`, never touches shipped config or
+`docs/benchmark/`); `ncc.search()` itself carries no debug branch.
+
+Two illustrative runs:
+- **Door plan 4052** (17 doors): the shipped default's wide 7-angle × 5-scale bank throws **137**
+  false positives on this plan's structured background (dimension lines, wall hatching) — P
+  collapses to 0.068 despite R 0.588. The cardinal bank cuts that to 9 FPs (P 0.438, R 0.412, F1
+  0.122 → 0.425) — a concrete, visual instance of the aggregate door result.
+- **Window plan 16** (13 windows): the tuned-window config underperforms the shipped default here
+  (P 0.286/R 0.308 vs P 0.636/R 0.538) — a concrete instance of the windows generalization gap
+  above, and the specific case that motivated digging further into whether more recall was
+  available at all (next section).
+
+### Is there more recall available? Two more levers tested — both net negative
+
+Per-instance debugging showed **55% of missed doors (27/49 across a 10-image sample) have a
+correctly-localized candidate** (IoU > 0.5 with the missed ground truth) scoring just under the
+0.65 threshold — mostly clustered 0.53–0.65. `ncc` is finding the right location; the score just
+doesn't clear the cut. Two levers that could plausibly recover that recall were tested directly
+rather than assumed:
+
+- **Lowering `retain_frac`** (0.35–0.65 swept on val, cardinal + mirror bank): F1 rises
+  *monotonically* toward 0.65 (0.135 → 0.251) — there is no lower sweet spot within this range.
+  precision improves faster than recall degrades all the way up; the argmax already sits at the
+  best point tested.
+- **Widening the scale pyramid** (1 / 3 / 5 levels, crossed with `retain_frac`): recovers a little
+  recall (R 0.380 → 0.416 at `retain_frac=0.65`) but costs more precision than that is worth (P
+  0.187 → 0.155) — F1 gets *worse* every time (0.251 → 0.216–0.226), confirming `scales=(1.0,)` is
+  the right choice despite measured within-image door-size variance (~19% coefficient of variation
+  on box area across a plan's own instances).
+
+**Both levers fail for the same reason**: any change that gives `ncc` more candidate templates to
+try (more scales, more angles, a looser cutoff) also gives structured floor-plan background more
+chances to throw a false peak in the *same* 0.5–0.65 score range genuine instances occupy. This is
+qualitatively different from the synthetic regime, where a genuine instance is a literal (or
+affine-transformed) copy of the exemplar's exact pixels and correlates near the ~1.0 self-match —
+a wide, clean separation from background noise that no floor-plan symbol (with its natural small
+rendering differences — line weight, anti-aliasing offset, minor proportion drift between "the
+same" symbol drawn at different locations) reproduces. Raw-intensity correlation has a real ceiling
+here: when the true-positive and false-positive score distributions genuinely overlap, no single
+threshold or search-bank change can separate them. (This is exactly the gap the `mosse` filter's
+whitening — see `docs/reports/mosse-improvement.md` — exists to attack, since it is trained to
+suppress background rather than just correlating raw pixels; a natural next step, not attempted in
+this ncc-scoped investigation.)
+
+### Fairness
+
+`grids=` and the `_TUNING_GRIDS["ncc"]` cardinal/mirror block are argmax-F1-on-val selections —
+the tuning protocol's normal, allowed use of labels (train/test split hygiene, never a test peek).
+The `repeat-aware` threshold calibrator itself is untouched and still reads the score
+*distribution* shape, never the ground-truth boxes, on every dataset. The windows generalization
+gap above was deliberately NOT resolved by conditioning the grid on test performance, which would
+have crossed that line.
+
+### Verification
+
+`$HOME/.pixi/bin/pixi run lint` and `$HOME/.pixi/bin/pixi run typecheck` clean. Full suite:
+**767 passed / 20 skipped, 92.36 % coverage** (floor held; counts grew after rebasing onto latest
+`main`, which landed an unrelated real-objects eval set and its own tests in parallel).
+Synthetic regression guard: `pixi run bench-ci` unchanged (`ncc` F1 1.000 on the model-free
+chipset subset) — this check is exact both before and after the rebase, since it always exercises
+the same fixed 6-image chipset subset. A full `pixi run bench "methods=[ncc,mosse]"` re-run on the
+rebased branch now measures **overall F1 0.7244** (fixed 0.9307, varied 0.4414) over **90** images,
+not the 60 originally reported here — a separate, parallel PR added a 30-image real-object-insertion
+set to the default full-sweep image pool between when this investigation started and when it was
+rebased onto `main` for merge, which is why the pooled number moved (real photographic pixels are
+harder for raw-intensity correlation than clean synthetic renders). This is NOT a regression from
+this change: `NCCConfig`'s shipped defaults (`mirror=False`, `angles_deg` unchanged) were never
+touched by this investigation, so `bench-ci`'s byte-identical result is the correct, sufficient
+regression check; the pooled full-sweep number simply reflects a larger, harder, unrelated
+benchmark pool as of the merge, not a change caused by this PR.
