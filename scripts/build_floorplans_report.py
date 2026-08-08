@@ -166,12 +166,7 @@ def _classify(pred: list[BBox], gt: list[BBox], iou: float = 0.5) -> tuple[list[
 def _draw_overlay(
     scene: npt.NDArray[np.uint8], gt: list[BBox], pred: list[BBox], exemplar: BBox
 ) -> npt.NDArray[np.uint8]:
-    """TP=green (matched GT), FN=yellow (missed GT), FP=red (unmatched pred), exemplar=azure blue.
-
-    Colours are OpenCV **BGR** tuples, so ``(255, 200, 0)`` is azure blue (RGB ``0,200,255``), not
-    orange. The exemplar is drawn last and thicker (3px) so it stays visible on top of the green TP
-    box it usually also earns -- it is itself a ground-truth instance, not a separate detection.
-    """
+    """TP=green (matched GT), FN=yellow (missed GT), FP=red (unmatched pred), exemplar=cyan."""
     img = scene.copy()
     tp_pred, matched_gt = _classify(pred, gt)
     matched_set, tp_set = set(matched_gt), set(tp_pred)
@@ -283,103 +278,6 @@ def main() -> None:
     logger.info("wrote {}", _OUT_DIR / "floorplans-report.html")
 
 
-def _crowding_bucket(count: int) -> str:
-    """Instances-per-plan bucket -- identical cuts to the eval's ``by_crowding`` slice."""
-    if count <= 1:
-        return "1"
-    if count <= 5:
-        return "2-5"
-    if count <= 15:
-        return "6-15"
-    return "16+"
-
-
-def _resolution_bucket(long_side: int) -> str:
-    """Plan long-side bucket -- identical cuts to the eval's ``by_plan_resolution`` slice."""
-    if long_side <= 800:
-        return "<=800"
-    if long_side <= 1600:
-        return "<=1600"
-    return ">1600"
-
-
-def _table(headers: list[str], rows: list[list[str]]) -> str:
-    """Render one HTML table from headers + already-formatted cells."""
-    head = "".join(f"<th>{c}</th>" for c in headers)
-    body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
-    return f"<table><tr>{head}</tr>{body}</table>"
-
-
-def _leaderboard(dataset: str, fmt: Any) -> str:
-    """Tuned-vs-default leaderboard for one dataset, read from its tuning-results file."""
-    path = _OUT_DIR / f"{dataset}-tuning-results.json"
-    if not path.is_file():
-        return "<p style='color:#999'>no tuning-results file for this dataset</p>"
-    data = json.loads(path.read_text())
-    rows = []
-    for e in data.get("methods", []):
-        t, d = e["tuned_test"], e["default_test"]
-        rows.append(
-            (
-                t.get("f1"),
-                [
-                    f"<code>{e['method']}</code>",
-                    f"<b>{fmt(t.get('f1'))}</b>",
-                    fmt(d.get("f1")),
-                    fmt(e.get("delta_f1")),
-                    fmt(t.get("precision")),
-                    fmt(t.get("recall")),
-                    fmt(t.get("ap50")),
-                    fmt(t.get("mae"), 1),
-                    f"{t.get('n_scored')}/{t.get('n_images')}",
-                    f"<code>{e.get('tuned_overrides')}</code>",
-                ],
-            )
-        )
-    rows.sort(key=lambda r: (r[0] is None, -(r[0] or 0)))
-    return _table(
-        [
-            "method",
-            "tuned F1",
-            "default F1",
-            "Δ",
-            "P",
-            "R",
-            "AP50",
-            "MAE",
-            "coverage",
-            "tuned config",
-        ],
-        [r[1] for r in rows],
-    )
-
-
-def _slice_table(dataset: str, slice_key: str, metric: str, fmt: Any) -> str:
-    """Per-method slice table (e.g. recall by symbol size) from the per-method sweep dumps."""
-    data: dict[str, dict[str, Any]] = {}
-    buckets: list[str] = []
-    for fp in sorted((_OUT_DIR / "permethod").glob("rr-*.json")):
-        for c in json.loads(fp.read_text()).get("cells", []):
-            if (
-                c.get("dataset") == dataset
-                and c.get("split") == "test"
-                and c.get("exemplar_count") == 1
-            ):
-                sl = (c.get("slices") or {}).get(slice_key) or {}
-                if not sl:
-                    continue
-                data[c["method"]] = {k: v.get(metric) for k, v in sl.items()}
-                for b in sl:
-                    if b not in buckets:
-                        buckets.append(b)
-    if not data:
-        return "<p style='color:#999'>no slice data (per-method sweep dumps absent)</p>"
-    preferred = ["small", "medium", "large", "1", "2-5", "6-15", "16+", "<=800", "<=1600", ">1600"]
-    order = [b for b in preferred if b in buckets] + [b for b in buckets if b not in preferred]
-    rows = [[f"<code>{m}</code>"] + [fmt(data[m].get(b), 2) for b in order] for m in sorted(data)]
-    return _table(["method", *order], rows)
-
-
 def _write_html(
     stats: dict[str, Any], size_chart: Path, counts_chart: Path, overlays: dict[str, list[Any]]
 ) -> None:
@@ -403,10 +301,7 @@ def _write_html(
         "<p class='legend'><span style='background:#0c8'>TP (matched GT)</span>"
         "<span style='background:#dd0;color:#222'>FN (missed GT)</span>"
         "<span style='background:#e00'>FP (spurious pred)</span>"
-        "<span style='background:#00c8ff;color:#222'>exemplar (the query box, drawn thicker)</span>"
-        "</p><p style='font-size:13px;color:#555'>The exemplar is the one box handed to the method as "
-        "the query; it is also a ground-truth instance, so it is normally re-found and its GREEN TP "
-        "box sits underneath the thicker blue outline.</p>"
+        "<span style='background:#fc0;color:#222'>exemplar (query)</span></p>"
     )
 
     h.append("<h2>Dataset statistics</h2>")
@@ -427,56 +322,8 @@ def _write_html(
             + "</tr>"
         )
     h.append("</table>")
-    h.append(
-        "<p style='font-size:13px;color:#555'>Size buckets are box-area ÷ plan-area: "
-        "<b>small &lt;0.4%</b>, <b>medium &lt;1.6%</b>, <b>large ≥1.6%</b> — the same cuts the "
-        "per-slice evaluation uses. Both classes come from the same plans, so only the kept boxes "
-        "differ between door and window.</p>"
-    )
-
-    # instances-per-plan (crowding) distribution
-    h.append("<h3>Crowding — instances per plan</h3>")
-    crowd_order = ["1", "2-5", "6-15", "16+"]
-    rows = []
-    for k in ("door/val", "door/test", "window/val", "window/test"):
-        per = stats[k]["per_plan"]
-        c = Counter(_crowding_bucket(n) for n in per)
-        med = sorted(per)[len(per) // 2] if per else 0
-        rows.append(
-            [k]
-            + [f"{c.get(b, 0)}" for b in crowd_order]
-            + [f"{min(per) if per else 0} / {med} / {max(per) if per else 0}"]
-        )
-    h.append(_table(["class / split"] + [f"{b} inst" for b in crowd_order] + ["min/med/max"], rows))
-
-    # plan-resolution distribution
-    h.append("<h3>Plan resolution — long side</h3>")
-    res_order = ["<=800", "<=1600", ">1600"]
-    rows = []
-    for k in ("door/val", "door/test", "window/val", "window/test"):
-        ls = stats[k]["longsides"]
-        c = Counter(_resolution_bucket(v) for v in ls)
-        rows.append(
-            [k]
-            + [f"{c.get(b, 0)}" for b in res_order]
-            + [f"{min(ls) if ls else 0}–{max(ls) if ls else 0} px"]
-        )
-    h.append(_table(["class / split", *res_order, "range"], rows))
-
     h.append(f"<img src='data:image/png;base64,{_b64(size_chart)}'>")
     h.append(f"<img src='data:image/png;base64,{_b64(counts_chart)}'>")
-
-    # ---- results: leaderboard + per-slice breakdowns, per dataset
-    for dataset in ("floorplans-door", "floorplans-window"):
-        h.append(f"<h2>{dataset} — results</h2>")
-        h.append("<h3>Tuned-vs-default leaderboard (test, 1 exemplar)</h3>")
-        h.append(_leaderboard(dataset, f))
-        h.append("<h3>Recall by symbol size</h3>")
-        h.append(_slice_table(dataset, "by_symbol_size", "recall", f))
-        h.append("<h3>F1 by crowding (instances per plan)</h3>")
-        h.append(_slice_table(dataset, "by_crowding", "f1", f))
-        h.append("<h3>F1 by plan resolution</h3>")
-        h.append(_slice_table(dataset, "by_plan_resolution", "f1", f))
 
     for dataset in ("floorplans-door", "floorplans-window"):
         h.append(f"<h2>{dataset} — qualitative overlays</h2>")
