@@ -434,10 +434,19 @@ section for the identical principle applied to its own windows gap.
 ### Verification
 
 `$HOME/.pixi/bin/pixi run lint` and `$HOME/.pixi/bin/pixi run typecheck` clean. Full suite:
-**707 passed / 20 skipped, 92.34 % coverage** (floor held). Synthetic regression guard: `models/`
-is empty in this worktree, so `mosse` (needing no ONNX weights) was checked via a full `pixi run
-bench "methods=[mosse]"` re-run rather than `bench-ci` (which excludes `mosse`) — it reproduced the
-pre-change numbers **exactly** byte-for-byte (overall F1 0.7989, fixed 0.9283, varied 0.5963),
-including the VARIED/CLUTTERED win over `ncc` this report's v1 established. The `mirror` field and
-the `_rotated_template_bank`/`_verify_score` extension that carries it are fully behavior-preserving
-when `mirror=False` (the default).
+**767 passed / 20 skipped, 92.36 % coverage** (floor held; counts grew after rebasing onto latest
+`main`, which landed an unrelated real-objects eval set and its own tests in parallel). Synthetic
+regression guard: `models/` is empty in this worktree, so `mosse` (needing no ONNX weights) was
+checked via a full `pixi run bench "methods=[mosse]"` re-run rather than `bench-ci` (which excludes
+`mosse`). On the rebased branch this now measures **overall F1 0.7363** (fixed 0.9220, varied
+0.4985) over **90** images, not the 60 originally reported here — a separate, parallel PR added a
+30-image real-object-insertion set to the default full-sweep image pool between when this
+investigation started and when it was rebased onto `main` for merge (real photographic pixels are
+harder for a correlation filter than clean synthetic renders, moving the pooled number). This is
+NOT a regression from this change: `MOSSEConfig`'s shipped defaults (`mirror=False`,
+`train_angles_deg`/`n_angle_groups` unchanged) were never touched by this investigation, so the
+`mirror`/`_rotated_template_bank`/`_verify_score` extension that carries the new field is
+behavior-preserving by construction when `mirror=False` — the pooled full-sweep number simply
+reflects a larger, harder, unrelated benchmark pool as of the merge, not a change caused by this
+PR. The VARIED/CLUTTERED win over `ncc` this report's v1 established is preserved on the
+same (now larger) pool: `mosse` varied F1 0.4985 vs `ncc`'s 0.4414 on the identical 90-image sweep.

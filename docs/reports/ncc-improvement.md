@@ -305,9 +305,17 @@ have crossed that line.
 ### Verification
 
 `$HOME/.pixi/bin/pixi run lint` and `$HOME/.pixi/bin/pixi run typecheck` clean. Full suite:
-**705 passed / 20 skipped, 92.34 % coverage** (floor held). Synthetic regression guard: `pixi run
-bench-ci` unchanged (`ncc` F1 1.000 on the model-free chipset subset); a full `pixi run bench
-"methods=[ncc]"` re-run reproduced the committed EASY/TEXTURED/VARIED/CLUTTERED numbers **exactly**
-byte-for-byte (overall F1 0.7878, fixed 0.9503, varied 0.5063) — the `mirror` field and the
-`_rotated_bank` refactor that carries it are fully behavior-preserving when `mirror=False`
-(the default).
+**767 passed / 20 skipped, 92.36 % coverage** (floor held; counts grew after rebasing onto latest
+`main`, which landed an unrelated real-objects eval set and its own tests in parallel).
+Synthetic regression guard: `pixi run bench-ci` unchanged (`ncc` F1 1.000 on the model-free
+chipset subset) — this check is exact both before and after the rebase, since it always exercises
+the same fixed 6-image chipset subset. A full `pixi run bench "methods=[ncc,mosse]"` re-run on the
+rebased branch now measures **overall F1 0.7244** (fixed 0.9307, varied 0.4414) over **90** images,
+not the 60 originally reported here — a separate, parallel PR added a 30-image real-object-insertion
+set to the default full-sweep image pool between when this investigation started and when it was
+rebased onto `main` for merge, which is why the pooled number moved (real photographic pixels are
+harder for raw-intensity correlation than clean synthetic renders). This is NOT a regression from
+this change: `NCCConfig`'s shipped defaults (`mirror=False`, `angles_deg` unchanged) were never
+touched by this investigation, so `bench-ci`'s byte-identical result is the correct, sufficient
+regression check; the pooled full-sweep number simply reflects a larger, harder, unrelated
+benchmark pool as of the merge, not a change caused by this PR.
