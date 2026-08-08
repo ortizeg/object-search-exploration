@@ -20,6 +20,7 @@ from object_search.search.ncc import (
     _REPEAT_STRICT_FRAC,
     NCCConfig,
     _repeat_aware_threshold,
+    _rotated_bank,
     search,
 )
 from object_search.synthetic.generator import DEMO_SPECS, synthesize
@@ -273,6 +274,79 @@ def test_candidate_log_is_deduplicated_across_the_bank() -> None:
     for cand in result.candidates:
         for match in result.matches:
             assert cand.box.iou(match.box) < iou
+
+
+# ------------------------------------------------------------------- mirrored template bank
+
+
+def _asymmetric_template() -> np.ndarray:
+    """A deliberately left/right-asymmetric pattern: an L whose foot points right."""
+    tmpl = np.zeros((16, 16), np.uint8)
+    tmpl[2:14, 3:6] = 255  # the vertical stroke, left of centre
+    tmpl[11:14, 3:13] = 255  # the foot, running RIGHT from it
+    return tmpl
+
+
+def test_mirror_defaults_off_and_yields_no_flipped_variant() -> None:
+    """Default behaviour is byte-for-byte what it was: one variant per angle, none mirrored."""
+    assert NCCConfig().mirror is False
+    tmpl = _asymmetric_template()
+    variants = list(_rotated_bank(tmpl, (0.0, 20.0)))
+    assert len(variants) == 2
+    assert [mirrored for _, mirrored, _, _ in variants] == [False, False]
+
+
+def test_mirror_yields_a_flipped_sibling_for_every_angle() -> None:
+    tmpl = _asymmetric_template()
+    angles = (0.0, 20.0)
+    variants = list(_rotated_bank(tmpl, angles, mirror=True))
+
+    # Every angle gains exactly one mirrored sibling, ordered (upright, mirrored) per angle.
+    assert len(variants) == 2 * len(angles)
+    assert [(a, m) for a, m, _, _ in variants] == [
+        (0.0, False),
+        (0.0, True),
+        (20.0, False),
+        (20.0, True),
+    ]
+
+    for i in range(0, len(variants), 2):
+        (_, _, upright, up_mask), (_, _, flipped, flip_mask) = variants[i], variants[i + 1]
+        # The flip is a pure reflection of the warped template ...
+        assert np.array_equal(flipped, cv2.flip(upright, 1))
+        assert flipped.dtype == np.uint8
+        # ... and the mask travels WITH it, so the eroded corner-honesty invariant survives
+        # (PITFALLS 1.6): flipping permutes pixels without resampling, so the mask still marks
+        # exactly the real template pixels. Same mask presence, same marked pixel COUNT.
+        assert (flip_mask is None) == (up_mask is None)
+        if up_mask is not None and flip_mask is not None:
+            assert np.array_equal(flip_mask, cv2.flip(up_mask, 1))
+            assert int(flip_mask.sum()) == int(up_mask.sum())
+
+
+def test_mirror_finds_the_mirrored_instance_a_rotation_bank_cannot() -> None:
+    """The knob's whole point: a reflection is unreachable by any rotation, reachable by a flip."""
+    tmpl = _asymmetric_template()
+    scene = np.zeros((80, 160), np.uint8)
+    scene[10:26, 10:26] = tmpl  # the exemplar itself
+    scene[40:56, 100:116] = cv2.flip(tmpl, 1)  # its mirror image, elsewhere
+    scene_bgr = cv2.cvtColor(scene, cv2.COLOR_GRAY2BGR)
+    exemplar = ExemplarBox(box=BBox(x=10, y=10, w=16, h=16))
+
+    # A dense rotation bank alone: the mirrored instance is not in the rotation group.
+    dense = tuple(float(a) for a in range(0, 360, 15))
+    without = search(scene_bgr, exemplar, NCCConfig(scales=(1.0,), angles_deg=dense, mirror=False))
+    with_mirror = search(
+        scene_bgr, exemplar, NCCConfig(scales=(1.0,), angles_deg=(0.0,), mirror=True)
+    )
+
+    def found_mirror(result: object) -> bool:
+        matches = getattr(result, "matches", ())
+        target = BBox(x=100, y=40, w=16, h=16)
+        return any(m.box.iou(target) >= 0.5 for m in matches)
+
+    assert not found_mirror(without), "a rotation bank should NOT reach a reflected instance"
+    assert found_mirror(with_mirror), "the mirrored template should find the reflected instance"
 
 
 def test_diagnostics_carry_heatmap_and_metrics() -> None:

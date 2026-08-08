@@ -14,7 +14,11 @@ from object_search.eval.converters import convert_floorplans
 from object_search.eval.labels import GroundTruth
 from object_search.eval.sampling import sample_exemplars
 from object_search.eval.splits import NativeSplits, build_manifest, write_split_manifest
-from object_search.eval.tuning import _TUNING_GRIDS, run_domain_tuning, tune_method
+from object_search.eval.tuning import (
+    _TUNING_GRIDS,
+    run_domain_tuning,
+    tune_method,
+)
 from object_search.provenance import repo_root
 from object_search.schemas.geometry import BBox
 
@@ -114,9 +118,16 @@ def test_broadened_multi_knob_grid_runs_and_selects_an_in_grid_argmax(tmp_path: 
 
 
 def test_real_ncc_grid_is_multi_knob() -> None:
-    # The committed ncc grid now sweeps three knobs (scales + retain_frac + nms_iou), not one.
+    # The committed ncc grid sweeps three knobs (scales + retain_frac + nms_iou) in its base
+    # block, PLUS an additive cardinal-rotation-bank x mirror block (angles_deg + mirror on top of
+    # scales/retain_frac/nms_iou) from the floor-plan domain investigation (260730-vx4) -- every
+    # entry is one or the other, never a mix of unrelated keys.
+    base_keys = {"scales", "retain_frac", "nms_iou"}
+    cardinal_keys = base_keys | {"angles_deg", "mirror"}
     for overrides in _TUNING_GRIDS["ncc"]:
-        assert set(overrides) == {"scales", "retain_frac", "nms_iou"}
+        assert set(overrides) in (base_keys, cardinal_keys)
+    # The additive cardinal block is present (not accidentally dropped).
+    assert any(set(overrides) == cardinal_keys for overrides in _TUNING_GRIDS["ncc"])
     # sparse-geo / propose-retrieve / owlv2 each pair a primary knob with a second one.
     for overrides in _TUNING_GRIDS["sparse-geo"]:
         assert set(overrides) == {"min_inliers", "nms_iou"}
@@ -124,6 +135,84 @@ def test_real_ncc_grid_is_multi_knob() -> None:
         assert set(overrides) == {"similarity_floor", "nms_iou"}
     for overrides in _TUNING_GRIDS["owlv2-oneshot"]:
         assert set(overrides) == {"max_box_area_frac", "query_iou_frac"}
+
+
+# ------------------------------------------------ per-method grid override (grids=)
+
+
+def test_ncc_and_mosse_grids_are_independent_objects() -> None:
+    """The two correlation grids started aliased and must not be the same object.
+
+    Both config models are ``extra="forbid"``, so a method-only key added to a shared grid would
+    be fed into the other method's validator and raise -- this pins the split. ``ncc``'s grid is
+    now a strict superset of ``mosse``'s (the base scales x retain_frac x nms_iou block is
+    byte-identical, plus ``ncc``'s additive cardinal-rotation-bank x mirror block from the
+    floor-plan investigation, which has no ``mosse`` equivalent -- ``mosse``'s own floor-plan
+    grid entries are added independently by a sibling quick task).
+    """
+    ncc_grid, mosse_grid = _TUNING_GRIDS["ncc"], _TUNING_GRIDS["mosse"]
+    assert ncc_grid is not mosse_grid
+    assert len(ncc_grid) > len(mosse_grid)
+    # The shared base block (mosse's whole grid) is byte-identical and present verbatim in ncc's.
+    base = [dict(o) for o in mosse_grid]
+    assert [dict(o) for o in ncc_grid[: len(mosse_grid)]] == base
+    # ...and no individual override dict in the shared prefix is aliased either.
+    assert all(a is not b for a, b in zip(ncc_grid[: len(mosse_grid)], mosse_grid, strict=True))
+
+
+def test_grids_override_replaces_the_committed_grid(tmp_path: Path) -> None:
+    base = _stage(tmp_path)
+    override = [
+        {"scales": (1.0,), "angles_deg": (0.0,), "retain_frac": 0.30},
+        {"scales": (1.0,), "angles_deg": (0.0, 90.0), "retain_frac": 0.60},
+    ]
+    report = run_domain_tuning(
+        "floorplans-door",
+        base,
+        methods=("ncc",),
+        manifest_root=base,
+        grids={"ncc": override},
+        out=None,
+    )
+    (entry,) = report["methods"]
+    # Exactly the supplied grid was swept -- the committed 20-entry grid was NOT used.
+    assert [t["overrides"] for t in entry["trials"]] == [dict(o) for o in override]
+    assert entry["tuned_overrides"] in [dict(o) for o in override]
+
+
+def _without_latency(value: object) -> object:
+    """Strip the wall-clock ``latency_ms`` blocks so two reports can be compared for equality.
+
+    Everything else in the report is deterministic (fixed grids, seeded sampler, committed
+    manifest); latency is the one field that legitimately differs between two identical runs.
+    """
+    if isinstance(value, dict):
+        return {k: _without_latency(v) for k, v in value.items() if k != "latency_ms"}
+    if isinstance(value, list):
+        return [_without_latency(v) for v in value]
+    return value
+
+
+def test_grids_omitted_or_missing_a_method_falls_back_to_the_committed_grid(
+    tmp_path: Path,
+) -> None:
+    """Regression pin: the default path is unchanged, with or without an unrelated ``grids`` key."""
+    base = _stage(tmp_path)
+    without = run_domain_tuning(
+        "floorplans-door", base, methods=("ncc",), manifest_root=base, out=None
+    )
+    # `grids` given but with no entry for ncc -> same fallback to _TUNING_GRIDS["ncc"].
+    with_empty = run_domain_tuning(
+        "floorplans-door",
+        base,
+        methods=("ncc",),
+        manifest_root=base,
+        grids={"mosse": [{"retain_frac": 0.5}]},
+        out=None,
+    )
+    assert _without_latency(without) == _without_latency(with_empty)
+    (entry,) = without["methods"]
+    assert len(entry["trials"]) == len(_TUNING_GRIDS["ncc"])
 
 
 # ------------------------------------------------ size-representative exemplar selection
