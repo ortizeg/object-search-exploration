@@ -15,6 +15,9 @@
 #                  260801-8zy's committed numbers byte-for-byte in intent, if not in bits (GPU
 #                  floating point is not bit-identical across physical hardware -- verify a
 #                  regenerated checkpoint by its train_log.json loss curve, never by sha256).
+#   contrastive-crop -- same as contrastive, plus --supcon-crop-context (crop-context SupCon
+#                  anchors, see 260808-dla). Added as its own row so it cannot collide with or
+#                  overwrite the `contrastive` arm's already-committed artifacts.
 # The text tower stays frozen in EVERY arm -- it is not part of the exported graph, see
 # scripts/finetune_owlv2.py.
 #
@@ -40,6 +43,7 @@
 #   models/owlv2_base_patch16_floorplans_ft.onnx            -- headonly (registered artifact)
 #   models/owlv2_base_patch16_floorplans_ft_full.onnx       -- full (unregistered comparison)
 #   models/owlv2_base_patch16_floorplans_ft_contrastive.onnx -- contrastive (unregistered comparison)
+#   models/owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx -- contrastive-crop (260808-dla)
 set -euo pipefail
 
 export HF_HUB_DISABLE_XET=1
@@ -62,17 +66,20 @@ declare -A TRAIN_FLAGS=(
   [headonly]=""
   [full]="--unfreeze-all"
   [contrastive]="--loss-mode contrastive"
+  [contrastive-crop]="--loss-mode contrastive --supcon-crop-context"
 )
 declare -A CKPT_DIR=(
   [headonly]="models/finetune/owlv2-floorplans-headonly"
   [full]="models/finetune/owlv2-floorplans-full"
   [contrastive]="models/finetune/owlv2-floorplans-contrastive"
+  [contrastive-crop]="models/finetune/owlv2-floorplans-contrastive-crop"
 )
 declare -A ONNX_NAME=(
   [baseline]="owlv2_base_patch16.onnx"
   [headonly]="owlv2_base_patch16_floorplans_ft.onnx"
   [full]="owlv2_base_patch16_floorplans_ft_full.onnx"
   [contrastive]="owlv2_base_patch16_floorplans_ft_contrastive.onnx"
+  [contrastive-crop]="owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx"
 )
 
 echo "== 1/8  install envs (default + export) and assert BOTH CUDA paths =="
@@ -209,6 +216,7 @@ onnx_names = {
     "headonly": "owlv2_base_patch16_floorplans_ft.onnx",
     "full": "owlv2_base_patch16_floorplans_ft_full.onnx",
     "contrastive": "owlv2_base_patch16_floorplans_ft_contrastive.onnx",
+    "contrastive-crop": "owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx",
 }
 arms = sys.argv[1].split()
 for arm in arms:
