@@ -339,6 +339,46 @@ def _iou_with_unit_box(boxes_cxcywh: npt.NDArray[np.float32]) -> npt.NDArray[np.
     return np.asarray(inter / np.maximum(union, _EPS), dtype=np.float32)
 
 
+def select_query_patch_index(
+    class_embeds: npt.NDArray[np.float32],
+    boxes_cxcywh: npt.NDArray[np.float32],
+    iou_frac: float,
+) -> int:
+    """Pick the index of the single most-distinctive covering patch (HuggingFace's heuristic).
+
+    This is the index-selection half of :func:`select_query_embedding`, pulled out (D-dla-04) so
+    both ``owlv2-oneshot``'s inference-time query selection AND the crop-context SupCon anchor
+    built during training (``scripts/finetune_owlv2.py``) call the exact SAME function rather than
+    two independently-written implementations that could silently drift. NOT L2-normalizing the
+    input here (unlike :func:`select_query_embedding`, which normalizes before selecting) means a
+    caller holding a differentiable torch tensor can index the ORIGINAL row after calling this on a
+    detached NumPy view, keeping the gradient path intact.
+
+    Among the crop patches whose predicted box covers the crop (IoU with the full ``[0, 1]`` box
+    at least ``iou_frac`` of the maximum), returns the index of the single patch whose embedding is
+    **least similar to the mean patch embedding** -- the most *distinctive* one, which is the
+    actual object rather than the generic "whole-frame / background" direction. Mean-pooling those
+    patches instead (the naive first cut) yields exactly that generic embedding, which then matches
+    scene patches predicting whole-image boxes -- the method scored ~0 F1 until this selection was
+    fixed (see docs/reports/owlv2-improvement.md).
+
+    Falls back to the index of the single largest-area patch if no box overlaps the unit box at all.
+
+    This is an independently callable, model-free unit -- tests exercise it with synthetic tensors.
+    """
+    normed = _l2_normalize(class_embeds, axis=1)
+    ious = _iou_with_unit_box(boxes_cxcywh)
+    max_iou = float(ious.max()) if ious.size else 0.0
+    if max_iou <= 0.0:
+        return int(np.argmax(boxes_cxcywh[:, 2] * boxes_cxcywh[:, 3]))
+    selected = np.nonzero(ious >= iou_frac * max_iou)[0]
+    # Distinctiveness: the covering patch LEAST similar to the mean patch embedding is the object,
+    # not the background. sims is minimized -> the most distinctive covering patch is chosen.
+    mean_embed = _l2_normalize(normed.mean(axis=0)[None, :], axis=1)[0]
+    sims = np.asarray(normed[selected] @ mean_embed, dtype=np.float32)
+    return int(selected[int(np.argmin(sims))])
+
+
 def select_query_embedding(
     class_embeds: npt.NDArray[np.float32],
     boxes_cxcywh: npt.NDArray[np.float32],
@@ -347,30 +387,13 @@ def select_query_embedding(
     """Select one ``(D,)`` L2-normalized query embedding: HuggingFace's distinctiveness heuristic.
 
     This mirrors ``Owlv2ForObjectDetection.embed_image_query``, and it is a **correctness
-    requirement**, not a refinement. Among the crop patches whose predicted box covers the crop
-    (IoU with the full ``[0, 1]`` box at least ``iou_frac`` of the maximum), it picks the single
-    patch whose embedding is **least similar to the mean patch embedding** -- the most
-    *distinctive* one, which is the actual object rather than the generic "whole-frame /
-    background" direction. Mean-pooling those patches instead (the naive first cut) yields exactly
-    that generic embedding, which then matches scene patches predicting whole-image boxes -- the
-    method scored ~0 F1 until this selection was fixed (see docs/reports/owlv2-improvement.md).
-
-    Falls back to the single largest-area patch if no box overlaps the unit box at all.
+    requirement**, not a refinement. A thin wrapper over :func:`select_query_patch_index`: get the
+    index, then return that row of the L2-normalized embedding matrix.
 
     This is an independently callable, model-free unit -- tests exercise it with synthetic tensors.
     """
     normed = _l2_normalize(class_embeds, axis=1)
-    ious = _iou_with_unit_box(boxes_cxcywh)
-    max_iou = float(ious.max()) if ious.size else 0.0
-    if max_iou <= 0.0:
-        best = int(np.argmax(boxes_cxcywh[:, 2] * boxes_cxcywh[:, 3]))
-        return np.asarray(normed[best], dtype=np.float32)
-    selected = np.nonzero(ious >= iou_frac * max_iou)[0]
-    # Distinctiveness: the covering patch LEAST similar to the mean patch embedding is the object,
-    # not the background. sims is minimized -> the most distinctive covering patch is chosen.
-    mean_embed = _l2_normalize(normed.mean(axis=0)[None, :], axis=1)[0]
-    sims = np.asarray(normed[selected] @ mean_embed, dtype=np.float32)
-    best = int(selected[int(np.argmin(sims))])
+    best = select_query_patch_index(class_embeds, boxes_cxcywh, iou_frac)
     return np.asarray(normed[best], dtype=np.float32)
 
 

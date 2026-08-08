@@ -322,6 +322,71 @@ def cosine_gap_report(
     }
 
 
+def crop_scene_agreement(
+    crop_embeddings: npt.NDArray[np.floating],
+    scene_embeddings: npt.NDArray[np.floating],
+) -> dict[str, float | None]:
+    """Instance-level cosine agreement between crop-context and scene-context embeddings.
+
+    Quick task 260808-dla's diagnostic (D-dla-06): measures the exact property calibration
+    depends on and plain scene-to-scene SupCon never touched (see the 260805-hg1 follow-up
+    referenced in ``scripts/finetune_owlv2.py``'s module docstring) -- whether a crop-encoded
+    query embedding of a ground-truth object agrees, in cosine, with the SCENE-context embedding
+    of that SAME instance. This is the training-time analogue of ``owlv2-oneshot``'s inference-time
+    ``self_score``: both compare a crop-derived embedding against the scene patch covering the same
+    physical object, in the identical L2-normalized cosine space.
+
+    Unlike :func:`cosine_gap_report` (a pooled, unpaired statistic over many anchors), the two
+    inputs here are **ALIGNED pairs**: row ``i`` of ``crop_embeddings`` is compared only against
+    row ``i`` of ``scene_embeddings`` -- never a pairwise matrix -- because the question is "does
+    THIS crop agree with THIS scene patch", not "how do crops in general compare to scenes in
+    general".
+
+    Args:
+        crop_embeddings: ``(n, d)`` crop-context query embeddings, one per instance.
+        scene_embeddings: ``(n, d)`` scene-context embeddings for the SAME instances, aligned by
+            row with ``crop_embeddings``.
+
+    Returns:
+        ``{"self_score_mean", "self_score_min", "self_score_max", "n_pairs"}``. The three float
+        keys are ``None`` when ``n_pairs == 0`` -- never ``0.0`` (the repo's nullable-metric rule:
+        see the module docstring). ``n_pairs`` is always an ``int``-valued float, never ``None``.
+
+    Raises:
+        ValueError: If either input is not ``(n, d)``, or the two disagree on ``n`` or ``d``.
+    """
+    crop = np.asarray(crop_embeddings, dtype=np.float64)
+    scene = np.asarray(scene_embeddings, dtype=np.float64)
+    if crop.ndim != 2:
+        raise ValueError(f"crop_embeddings must be (n, d), got shape {crop.shape}")
+    if scene.ndim != 2:
+        raise ValueError(f"scene_embeddings must be (n, d), got shape {scene.shape}")
+    if crop.shape != scene.shape:
+        raise ValueError(
+            f"crop_embeddings {crop.shape} and scene_embeddings {scene.shape} must match exactly "
+            "(aligned pairs, row i against row i)"
+        )
+
+    n_pairs = crop.shape[0]
+    if n_pairs == 0:
+        return {
+            "self_score_mean": None,
+            "self_score_min": None,
+            "self_score_max": None,
+            "n_pairs": 0.0,
+        }
+
+    # L2-normalize both sides (the same shared helper the loss and the pooled diagnostic use), then
+    # row-wise cosine -- an ALIGNED dot product, never a matmul against the whole other side.
+    cosines = np.sum(_l2_normalize(crop) * _l2_normalize(scene), axis=1)
+    return {
+        "self_score_mean": float(cosines.mean()),
+        "self_score_min": float(cosines.min()),
+        "self_score_max": float(cosines.max()),
+        "n_pairs": float(n_pairs),
+    }
+
+
 def supcon_loss(
     embeddings: npt.NDArray[np.floating],
     labels: npt.NDArray[np.integer],

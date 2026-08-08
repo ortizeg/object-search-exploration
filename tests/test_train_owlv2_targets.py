@@ -281,6 +281,18 @@ def test_every_advertised_loss_mode_is_accepted(loss_mode: str) -> None:
     assert FinetuneConfig(loss_mode=loss_mode).loss_mode == loss_mode  # type: ignore[arg-type]
 
 
+def test_the_crop_context_defaults_are_off_and_match_inference() -> None:
+    """D-dla-03/05: off by default, and the IoU threshold is pinned to the inference default."""
+    config = FinetuneConfig()
+    assert config.supcon_crop_context is False
+    assert config.supcon_query_iou_frac == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_supcon_crop_context_accepts_both_bools(value: bool) -> None:
+    assert FinetuneConfig(supcon_crop_context=value).supcon_crop_context is value
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -301,6 +313,8 @@ def test_every_advertised_loss_mode_is_accepted(loss_mode: str) -> None:
         ("supcon_temperature", -0.07),
         ("w_contrast", -1.0),
         ("supcon_background_negatives", -1),
+        ("supcon_query_iou_frac", -0.01),
+        ("supcon_query_iou_frac", 1.01),
     ],
 )
 def test_finetune_config_rejects_out_of_range_values(field: str, value: float | str) -> None:

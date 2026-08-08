@@ -28,6 +28,7 @@ import pytest
 from object_search.train.supcon import (
     background_patch_mask,
     cosine_gap_report,
+    crop_scene_agreement,
     patch_grid_size,
     sample_background_indices,
     supcon_loss,
@@ -526,3 +527,73 @@ def test_cosine_gap_report_rejects_mismatched_inputs(
 ) -> None:
     with pytest.raises(ValueError):
         cosine_gap_report(anchors, labels, background)
+
+
+# ------------------------------------------------------------------- crop/scene self-score (dla)
+
+
+def test_crop_scene_agreement_hand_computed_two_pair_case() -> None:
+    """Pair 0: identical vectors -> cosine 1.0. Pair 1: orthogonal -> cosine 0.0."""
+    crop = np.array([[1.0, 0.0], [1.0, 0.0]])
+    scene = np.array([[1.0, 0.0], [0.0, 1.0]])
+
+    report = crop_scene_agreement(crop, scene)
+
+    assert report["n_pairs"] == 2.0
+    assert report["self_score_mean"] == pytest.approx(0.5)
+    assert report["self_score_min"] == pytest.approx(0.0)
+    assert report["self_score_max"] == pytest.approx(1.0)
+
+
+def test_crop_scene_agreement_is_invariant_to_a_permutation_of_the_pool() -> None:
+    rng = np.random.default_rng(0)
+    crop = rng.normal(size=(6, 8))
+    scene = rng.normal(size=(6, 8))
+    order = np.random.default_rng(1).permutation(6)
+
+    baseline = crop_scene_agreement(crop, scene)
+    permuted = crop_scene_agreement(crop[order], scene[order])
+
+    assert permuted["self_score_mean"] == pytest.approx(baseline["self_score_mean"])
+    assert permuted["self_score_min"] == pytest.approx(baseline["self_score_min"])
+    assert permuted["self_score_max"] == pytest.approx(baseline["self_score_max"])
+    assert permuted["n_pairs"] == baseline["n_pairs"]
+
+
+def test_crop_scene_agreement_is_invariant_to_independent_positive_rescaling() -> None:
+    """L2 normalization happens INSIDE, independently on each side -- as at inference."""
+    rng = np.random.default_rng(2)
+    crop = rng.normal(size=(5, 4))
+    scene = rng.normal(size=(5, 4))
+
+    baseline = crop_scene_agreement(crop, scene)
+    rescaled = crop_scene_agreement(crop * 11.0, scene * 0.02)
+
+    assert rescaled["self_score_mean"] == pytest.approx(baseline["self_score_mean"])
+    assert rescaled["self_score_min"] == pytest.approx(baseline["self_score_min"])
+    assert rescaled["self_score_max"] == pytest.approx(baseline["self_score_max"])
+
+
+@pytest.mark.parametrize(
+    ("crop", "scene"),
+    [
+        (np.zeros(4), np.zeros((1, 4))),  # crop not 2-D
+        (np.zeros((1, 4)), np.zeros(4)),  # scene not 2-D
+        (np.zeros((3, 4)), np.zeros((2, 4))),  # n disagrees
+        (np.zeros((3, 4)), np.zeros((3, 5))),  # d disagrees
+    ],
+)
+def test_crop_scene_agreement_rejects_mismatched_shapes(
+    crop: np.ndarray, scene: np.ndarray
+) -> None:
+    with pytest.raises(ValueError):
+        crop_scene_agreement(crop, scene)
+
+
+def test_crop_scene_agreement_of_two_empty_pools_reports_every_key_none_not_zero() -> None:
+    report = crop_scene_agreement(np.zeros((0, 4)), np.zeros((0, 4)))
+
+    assert report["n_pairs"] == 0.0
+    assert report["self_score_mean"] is None
+    assert report["self_score_min"] is None
+    assert report["self_score_max"] is None

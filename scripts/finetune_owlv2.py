@@ -123,6 +123,64 @@ shuffler, and the background-negative sampler; the epoch record holds numbers on
 or a timestamp), so the log files of two same-seed runs compare equal. Validation draws its
 background patches from a generator re-seeded at the start of **every** evaluation, so an
 epoch-to-epoch change in ``val_cos_gap`` is the model moving and never the sample moving.
+
+The third objective: ``--supcon-crop-context`` (quick task 260808-dla)
+------------------------------------------------------------------------
+``--loss-mode contrastive`` (above) trains SupCon over **scene-context** forward passes only. A
+follow-up diagnostic (a second vast.ai instance, 260805-hg1's disposition) found the mechanism
+behind its sharp negative result: ``owlv2-oneshot``'s inference-time self-similarity calibration
+depends on a **crop**-context query embedding (the exemplar crop encoded alone) agreeing, in
+cosine, with the **scene**-context embedding of that same region (``self_score``) -- and plain
+scene-to-scene SupCon never touches the crop-context forward pass at all. For the contrastive
+checkpoint, ``self_score`` went from +0.71 (pretrained) to -0.297, flipping the calibration
+threshold negative and retaining ~86% of all scene patches instead of ~25-30%.
+
+``--supcon-crop-context`` adds a crop-encoded anchor to the SupCon pool, explicitly teaching the
+model that crop-context and scene-context embeddings of the same object should be cosine-close --
+the exact property calibration depends on.
+
+**D-dla-01 -- crop-context anchors are ORDINARY same-class positives. Zero changes to
+``supcon_loss``/``supcon_loss_torch``'s math.** The crop-context embedding for a training image's
+picked ground-truth box is appended to ``ContrastiveRows.anchors``/``.labels`` alongside the
+existing scene-context matched anchors. The existing label-based positive/negative machinery
+already pulls same-labeled rows together and pushes different-labeled/background rows apart --
+exactly "pulled toward its own scene-context ground-truth-box patch and other same-class scene
+patches, pushed away from different-class and background scene patches." No special-casing.
+
+**D-dla-02 -- ONE crop-context anchor per training image per micro-batch pass, not one per
+ground-truth box.** The box is chosen by ``rng.integers(0, n_boxes)`` from the SAME seeded
+generator already threaded through ``_contrastive_rows``, consumed AFTER background sampling so a
+``--supcon-crop-context``-disabled run's rng stream (and therefore its background samples) is
+byte-identical to before this task. Floor plans average ~20 boxes/image; a crop-context forward is
+a full independent 960x960 ViT pass (unlike scene anchors, which piggyback for free on the one
+scene forward already computed), so one crop per box would roughly 10-20x the model's forward-pass
+compute per step. One crop per image roughly DOUBLES it instead, and pooling across
+``--grad-accum`` micro-batches (D-hg1-04) plus multiple epochs of re-sampling gives broad box/class
+coverage across the run without the 10-20x cost.
+
+**D-dla-03 -- crop-context supervision is OPT-IN, layered on ``--loss-mode contrastive``/``both``,
+never changing their default meaning.** ``supcon_crop_context: bool = False`` and
+``--supcon-crop-context``. The already-committed ``contrastive`` numbers and artifacts must remain
+reproducible from the current script state -- the same behavior-preservation discipline
+``--loss-mode focal`` already gets (D-hg1-05).
+
+**D-dla-04 -- the crop query-patch selection reuses ``owlv2_oneshot.py``'s OWN selection logic via
+a shared, refactored function, not a training-side reimplementation.**
+``select_query_patch_index(class_embeds, boxes_cxcywh, iou_frac) -> int`` is extracted from
+``select_query_embedding`` (which becomes a thin wrapper over it); training imports and calls the
+SAME function. This is the strongest available guarantee against the crop-preprocessing/selection-
+fidelity risk this task exists to close: literal code reuse, not "written to be equivalent."
+Training also reuses ``owlv2_preprocess_tensor`` and ``boxes_to_pixels`` for the same reason.
+
+**D-dla-05 -- ``supcon_query_iou_frac`` (default 0.8) is a separate ``FinetuneConfig`` field
+mirroring ``Owlv2OneshotConfig.query_iou_frac``'s default, not a hard-coded constant.** So the
+training-time selection threshold is visible in ``train_log.json``'s logged config and
+independently sweepable -- but its default is pinned EQUAL to the inference config's default,
+because training must select the query patch the way inference does.
+
+A degenerate ground-truth box never crashes training: ``_crop_context_rows`` retries a different
+box (up to 3 attempts) when ``boxes_to_pixels`` rejects one after pixel rounding, then skips that
+image's crop-context anchor for the step and logs at DEBUG -- never an exception, never a NaN.
 """
 
 from __future__ import annotations
@@ -151,6 +209,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from object_search.inference.owlv2 import owlv2_preprocess_tensor  # noqa: E402
+from object_search.schemas import BBox  # noqa: E402
+from object_search.search.owlv2_oneshot import (  # noqa: E402
+    boxes_to_pixels,
+    select_query_patch_index,
+)
 from object_search.train.owlv2_targets import (  # noqa: E402
     FLOORPLAN_CLASSES,
     OWLV2_NUM_PATCHES,
@@ -163,6 +226,7 @@ from object_search.train.owlv2_targets import (  # noqa: E402
 )
 from object_search.train.supcon import (  # noqa: E402
     cosine_gap_report,
+    crop_scene_agreement,  # noqa: F401 -- unused by the loss here; Task 2 wires it into _evaluate
     patch_grid_size,
     sample_background_indices,
     supcon_loss,
@@ -387,6 +451,32 @@ def _load_pixel_values(image_path: Path) -> torch.Tensor:
     return torch.from_numpy(tensor)
 
 
+def _load_crop_pixel_values(image_path: Path, box: BBox) -> torch.Tensor:
+    """Read one scene PNG, crop it to ``box`` in RAW pixel space, and preprocess -> ``[1,3,960,960]``.
+
+    Mirrors :func:`_load_pixel_values` exactly, but on the cropped sub-array rather than the whole
+    image -- and mirrors ``owlv2-oneshot``'s OWN inference-time exemplar-crop encode
+    (``search/owlv2_oneshot.py``: ``image[crop_box.y:y2, crop_box.x:x2]`` then
+    ``owlv2_preprocess_tensor``) line for line (D-dla-04, verified-fact 2): the crop gets its own
+    independent pad-to-square-then-resize based on the CROP's own aspect ratio, never the scene's.
+    """
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise SystemExit(f"could not read {image_path}")
+    crop = image[box.y : box.y2, box.x : box.x2]
+    tensor, _side = owlv2_preprocess_tensor(crop)
+    return torch.from_numpy(tensor)
+
+
+def _pick_crop_box_index(target: ImageTargets, rng: np.random.Generator) -> int:
+    """Pick ONE ground-truth box index at random for this image's crop-context anchor (D-dla-02).
+
+    One per image per micro-batch pass, not one per box -- see the module docstring's
+    "crop-context extension" section for the cost tradeoff this pins.
+    """
+    return int(rng.integers(0, target.boxes.shape[0]))
+
+
 def _batch_targets(
     batch: list[ImageTargets], device: torch.device
 ) -> list[dict[str, torch.Tensor]]:
@@ -588,15 +678,141 @@ class ContrastiveRows:
 
     Attributes:
         anchors: ``(n_boxes, 512)`` ``class_embeds`` rows at the patch indices the Hungarian
-            matcher assigned to this micro-batch's ground-truth boxes.
+            matcher assigned to this micro-batch's ground-truth boxes. In
+            ``--supcon-crop-context`` mode this ALSO includes the crop-context anchors (D-dla-01):
+            ordinary same-class positives, appended alongside the scene-matched rows.
         labels: ``(n_boxes,)`` int64 class labels, aligned with ``anchors``.
         background: ``(n_background, 512)`` rows sampled from patches whose grid-cell centre lies
             in no ground-truth box -- denominator-only negatives (D-hg1-03).
+        crop_diag_crop: ``(n_crop, 512)`` crop-context embeddings, DETACHED -- diagnostic only,
+            never fed to the loss (D-dla-06). ``(0, 512)`` when crop-context is off or an image's
+            crop anchor was skipped this step.
+        crop_diag_scene: ``(n_crop, 512)`` the SAME instances' matched scene-context embeddings,
+            DETACHED and aligned row-for-row with ``crop_diag_crop`` -- the pairing
+            :func:`object_search.train.supcon.crop_scene_agreement` measures (Task 2).
     """
 
     anchors: torch.Tensor
     labels: torch.Tensor
     background: torch.Tensor
+    crop_diag_crop: torch.Tensor
+    crop_diag_scene: torch.Tensor
+
+
+def _crop_context_rows(
+    runtime: Runtime,
+    class_embeds: torch.Tensor,
+    indices: list[tuple[torch.Tensor, torch.Tensor]],
+    batch: list[ImageTargets],
+    image_dir: Path,
+    rng: np.random.Generator,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    """Build ONE crop-context SupCon anchor per image in this micro-batch (D-dla-01/02/04).
+
+    For each image: pick one ground-truth box (:func:`_pick_crop_box_index`, consuming ``rng``
+    AFTER the caller's background sampling -- see the module docstring's "crop-context extension"
+    section for why that ordering keeps a flag-off run's rng stream byte-identical), convert it to
+    scene PIXEL coordinates (:func:`~object_search.search.owlv2_oneshot.boxes_to_pixels`, verified
+    fact 3), retrying a different box up to 3 times if it degenerates after pixel rounding, then
+    skip that image's crop anchor for this step (logged at DEBUG, never an exception -- the
+    must-have degenerate-box guarantee).
+
+    All of this micro-batch's valid crops are batched into ONE extra ``_forward_batch`` call. Each
+    crop's query patch is then picked by :func:`~object_search.search.owlv2_oneshot.
+    select_query_patch_index` -- the SAME function ``owlv2-oneshot`` calls at inference (D-dla-04)
+    -- on a DETACHED NumPy view, and the TORCH row at that index is gathered (keeping the gradient
+    path into ``class_head.dense0``) and returned as an ordinary same-class positive.
+
+    Also returns the DETACHED ``(crop, scene)`` diagnostic pair for each successfully-built anchor,
+    by looking up the box's matched scene patch in the ALREADY-COMPUTED Hungarian ``indices`` (no
+    second matcher call, D-dla-06) -- silently skipping the diagnostic pairing (never the anchor
+    itself) if the Hungarian solve did not happen to match that particular box this step.
+
+    Returns:
+        ``(anchor_rows, label_rows, diag_crop_rows, diag_scene_rows)`` -- four lists of tensors for
+        the caller to ``torch.cat``. All empty when no image in the micro-batch produced a valid
+        crop-context row.
+    """
+    max_retries = 3
+    crop_targets: list[tuple[int, int, Path, BBox]] = []
+    for image_index, target in enumerate(batch):
+        if target.boxes.shape[0] == 0:  # guaranteed non-empty by coco_to_owlv2_targets; defensive
+            continue
+        image_path = image_dir / target.file_name
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            logger.debug("crop-context: could not read {}, skipping its crop anchor", image_path)
+            continue
+        orig_h, orig_w = int(image.shape[0]), int(image.shape[1])
+
+        pixel_box: BBox | None = None
+        chosen_box_idx = -1
+        for _attempt in range(max_retries):
+            box_idx = _pick_crop_box_index(target, rng)
+            candidate = boxes_to_pixels(target.boxes[box_idx : box_idx + 1], orig_w, orig_h)[0]
+            if candidate is not None:
+                pixel_box, chosen_box_idx = candidate, box_idx
+                break
+            logger.debug(
+                "crop-context: box {} of {} degenerated after pixel rounding, retrying",
+                box_idx,
+                target.file_name,
+            )
+        if pixel_box is None:
+            logger.debug(
+                "crop-context: no valid GT box for {} after {} attempt(s); skipping its crop "
+                "anchor for this step",
+                target.file_name,
+                max_retries,
+            )
+            continue
+        crop_targets.append((image_index, chosen_box_idx, image_path, pixel_box))
+
+    anchor_rows: list[torch.Tensor] = []
+    label_rows: list[torch.Tensor] = []
+    diag_crop_rows: list[torch.Tensor] = []
+    diag_scene_rows: list[torch.Tensor] = []
+    if not crop_targets:
+        return anchor_rows, label_rows, diag_crop_rows, diag_scene_rows
+
+    crop_pixel_values = torch.cat(
+        [_load_crop_pixel_values(path, box) for _, _, path, box in crop_targets]
+    ).to(runtime.device)
+    with torch.autocast(
+        device_type=runtime.device.type, dtype=torch.bfloat16, enabled=runtime.use_bf16
+    ):
+        _crop_logits, crop_pred_boxes, crop_class_embeds = _forward_batch(
+            runtime, crop_pixel_values
+        )
+    crop_class_embeds = crop_class_embeds.float()
+    crop_pred_boxes_np = crop_pred_boxes.float().detach().cpu().numpy()
+
+    for row, (image_index, box_idx, _path, _box) in enumerate(crop_targets):
+        selected = select_query_patch_index(
+            crop_class_embeds[row].detach().cpu().numpy(),
+            crop_pred_boxes_np[row],
+            runtime.config.supcon_query_iou_frac,
+        )
+        crop_row = crop_class_embeds[row, selected]  # torch, differentiable
+
+        target = batch[image_index]
+        anchor_rows.append(crop_row.unsqueeze(0))
+        label_rows.append(
+            torch.tensor(
+                [int(target.class_labels[box_idx])],
+                dtype=torch.int64,
+                device=class_embeds.device,
+            )
+        )
+
+        source_idx, target_idx = indices[image_index]
+        matched = target_idx == box_idx
+        if bool(matched.any()):
+            scene_patch_idx = int(source_idx[matched][0].item())
+            diag_crop_rows.append(crop_row.detach().unsqueeze(0))
+            diag_scene_rows.append(class_embeds[image_index, scene_patch_idx].detach().unsqueeze(0))
+
+    return anchor_rows, label_rows, diag_crop_rows, diag_scene_rows
 
 
 def _contrastive_rows(
@@ -605,6 +821,7 @@ def _contrastive_rows(
     class_embeds: torch.Tensor,
     targets: list[dict[str, torch.Tensor]],
     batch: list[ImageTargets],
+    image_dir: Path,
     rng: np.random.Generator,
 ) -> ContrastiveRows:
     """Gather this micro-batch's SupCon rows: the matched anchors, plus background negatives.
@@ -624,6 +841,12 @@ def _contrastive_rows(
     specification and its coordinate frame is the frame those boxes are already in. The grid side is
     derived from the tensor the model actually returned, so a re-export at another resolution is
     caught here instead of silently mis-indexing every negative.
+
+    AFTER the scene-anchor and background-negative gather (D-dla-02) -- so a
+    ``supcon_crop_context=False`` run's ``rng`` stream and background samples stay byte-identical
+    to before this task -- optionally gathers one crop-context anchor per image
+    (:func:`_crop_context_rows`), when ``config.supcon_crop_context`` is set and the mode is not
+    ``focal``.
     """
     indices = runtime.criterion.matcher(outputs, targets)
     num_patches = int(class_embeds.shape[1])
@@ -658,6 +881,15 @@ def _contrastive_rows(
             )
 
     empty = class_embeds.new_zeros((0, class_embeds.shape[-1]))
+    diag_crop: list[torch.Tensor] = []
+    diag_scene: list[torch.Tensor] = []
+    if runtime.config.supcon_crop_context and runtime.config.loss_mode != "focal":
+        crop_anchors, crop_labels, diag_crop, diag_scene = _crop_context_rows(
+            runtime, class_embeds, indices, batch, image_dir, rng
+        )
+        anchors.extend(crop_anchors)
+        labels.extend(crop_labels)
+
     return ContrastiveRows(
         anchors=torch.cat(anchors) if anchors else empty,
         labels=(
@@ -666,6 +898,8 @@ def _contrastive_rows(
             else torch.zeros(0, dtype=torch.int64, device=class_embeds.device)
         ),
         background=torch.cat(background) if background else empty,
+        crop_diag_crop=torch.cat(diag_crop) if diag_crop else empty,
+        crop_diag_scene=torch.cat(diag_scene) if diag_scene else empty,
     )
 
 
@@ -723,7 +957,9 @@ def _batch_loss(
 
     rows = None
     if runtime.config.loss_mode != "focal":
-        rows = _contrastive_rows(runtime, outputs, class_embeds.float(), targets, batch, rng)
+        rows = _contrastive_rows(
+            runtime, outputs, class_embeds.float(), targets, batch, image_dir, rng
+        )
     return loss_dict, rows
 
 
@@ -1086,6 +1322,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Weight of the supervised-contrastive term in the total loss.",
     )
     parser.add_argument(
+        "--supcon-crop-context",
+        action="store_true",
+        help="Quick task 260808-dla: ALSO build one crop-context SupCon anchor per training "
+        "image, encoded via the SAME preprocessing/query-selection path owlv2-oneshot's inference "
+        "runs for its exemplar crop (D-dla-01/02/04). Opt-in, layered on --loss-mode "
+        "contrastive/both; ignored in focal mode. Default off leaves focal and flag-off "
+        "contrastive byte-identical to before this flag existed (D-dla-03).",
+    )
+    parser.add_argument(
+        "--supcon-query-iou-frac",
+        type=float,
+        default=defaults.supcon_query_iou_frac,
+        help="Crop-context anchor's query-patch selection threshold, pinned equal to "
+        "Owlv2OneshotConfig.query_iou_frac's default so training selects the query patch the way "
+        "inference does (D-dla-05). Only read when --supcon-crop-context is set.",
+    )
+    parser.add_argument(
         "--self-check",
         action="store_true",
         help="Assert the torch SupCon mirror agrees with the NumPy specification in "
@@ -1127,6 +1380,8 @@ def _config_from_args(args: argparse.Namespace) -> FinetuneConfig:
         supcon_temperature=args.supcon_temperature,
         w_contrast=args.w_contrast,
         supcon_background_negatives=args.supcon_background_negatives,
+        supcon_crop_context=args.supcon_crop_context,
+        supcon_query_iou_frac=args.supcon_query_iou_frac,
         max_steps=args.max_steps,
         limit_images=args.limit_images,
     )

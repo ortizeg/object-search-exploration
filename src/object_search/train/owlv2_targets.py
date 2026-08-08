@@ -217,6 +217,28 @@ class FinetuneConfig(BaseModel):
             "which an anchor-only SupCon cannot address. 0 disables them."
         ),
     )
+    supcon_crop_context: bool = Field(
+        default=False,
+        description=(
+            "Quick task 260808-dla: also build ONE crop-context SupCon anchor per training image "
+            "(D-dla-02), by cropping a ground-truth box's RAW scene pixels and running it through "
+            "the crop-context forward pass -- the same query-encoding path owlv2-oneshot's "
+            "inference runs for its exemplar crop. Opt-in and layered on contrastive/both "
+            "(D-dla-03): default False leaves the already-measured `focal` and flag-off "
+            "`contrastive` arms byte-identical to before this flag existed. Ignored in focal mode."
+        ),
+    )
+    supcon_query_iou_frac: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The crop-context anchor's query-patch selection threshold (D-dla-05), passed to "
+            "select_query_patch_index exactly as Owlv2OneshotConfig.query_iou_frac is at "
+            "inference. Pinned equal to that field's default so training selects the query patch "
+            "the way inference does; only read when supcon_crop_context is True."
+        ),
+    )
     max_steps: int | None = Field(
         default=None,
         ge=1,

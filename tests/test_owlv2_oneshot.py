@@ -3,8 +3,9 @@
 Two tiers, deliberately (mirroring ``test_propose_retrieve.py``):
 
 * **Model-free logic** -- the config schema, the pure helpers (``_l2_normalize``,
-  ``_iou_with_unit_box``, ``select_query_embedding``, ``boxes_to_pixels``, the OWLv2 preprocessing
-  tensor), the full ``search`` path driven by an **injected stub inferencer** (so the compose /
+  ``_iou_with_unit_box``, ``select_query_patch_index``, ``select_query_embedding``,
+  ``boxes_to_pixels``, the OWLv2 preprocessing tensor), the full ``search`` path driven by an
+  **injected stub inferencer** (so the compose /
   threshold / NMS / exemplar-labelling logic is gated with no weight), the "runtime imports no
   torch" constraint, and the model-absent error path. These **run in CI**.
 * **Real-model behaviour** -- the end-to-end search on the real ONNX graph. Needs the gitignored
@@ -37,6 +38,7 @@ from object_search.search.owlv2_oneshot import (
     reset_inferencer_cache,
     search,
     select_query_embedding,
+    select_query_patch_index,
 )
 
 _MODEL_PATH: Path = models.models_dir() / models.MODEL_REGISTRY["owlv2-base-patch16"].dest
@@ -215,6 +217,44 @@ def test_select_query_embedding_picks_the_most_distinctive_covering_patch() -> N
     assert q.shape == (3,)
     assert np.linalg.norm(q) == pytest.approx(1.0, abs=1e-5)
     assert q[1] > q[0]  # the distinctive [0,1,0] patch, NOT the generic [1,0,0] one
+
+
+def test_select_query_patch_index_agrees_with_select_query_embedding() -> None:
+    """The extracted index-selection helper must never drift from the wrapper that uses it.
+
+    Same fixture as ``test_select_query_embedding_picks_the_most_distinctive_covering_patch``:
+    the index :func:`select_query_patch_index` returns must be the row whose L2-normalized
+    embedding equals what :func:`select_query_embedding` returns (D-dla-04).
+    """
+    class_embeds = np.array(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32
+    )
+    boxes = np.array(
+        [
+            [0.5, 0.5, 1.0, 1.0],
+            [0.5, 0.5, 1.0, 1.0],
+            [0.05, 0.05, 0.02, 0.02],
+            [0.05, 0.05, 0.02, 0.02],
+        ],
+        dtype=np.float32,
+    )
+    index = select_query_patch_index(class_embeds, boxes, iou_frac=0.8)
+    assert index == 1
+
+    expected = select_query_embedding(class_embeds, boxes, iou_frac=0.8)
+    normed = _l2_normalize(class_embeds, axis=1)
+    assert np.allclose(normed[index], expected)
+
+
+def test_select_query_patch_index_falls_back_to_largest_area_when_no_box_overlaps() -> None:
+    """Mirrors the existing zero-max-IoU fallback branch in ``select_query_embedding``."""
+    class_embeds = np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float32)
+    # None of these boxes overlaps the unit [0,1]x[0,1] box at all (all far outside it).
+    boxes = np.array(
+        [[5.0, 5.0, 0.5, 0.5], [5.0, 5.0, 0.1, 0.1], [5.0, 5.0, 2.0, 2.0]], dtype=np.float32
+    )
+    index = select_query_patch_index(class_embeds, boxes, iou_frac=0.8)
+    assert index == 2  # box 2 has the largest area (2.0 * 2.0)
 
 
 def test_boxes_to_pixels_maps_and_drops_degenerate() -> None:
