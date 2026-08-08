@@ -178,6 +178,20 @@ training-time selection threshold is visible in ``train_log.json``'s logged conf
 independently sweepable -- but its default is pinned EQUAL to the inference config's default,
 because training must select the query patch the way inference does.
 
+**D-dla-06 -- a new torch-free diagnostic, ``crop_scene_agreement``
+(:mod:`object_search.train.supcon`), measures the property this fix targets DIRECTLY and
+INSTANCE-LEVEL.** For each instance where a crop-context anchor was built, its cosine similarity
+against the SPECIFIC scene-context patch the Hungarian matcher assigned to that SAME ground-truth
+box (not a class average) -- the same instance-level pairing ``self_score`` measures at inference.
+Logged per-epoch on val ONLY (mirroring ``val_cos_gap``/D-hg1-06), including an epoch-0
+pre-training reference, as ``val_crop_scene_agreement`` in ``train_log.json``'s ``epochs`` array,
+entirely ABSENT (never ``null``) when ``supcon_crop_context`` is ``False`` or the mode is
+``focal`` -- preserving both existing modes' ``epochs`` array shape exactly (verified by the
+preflight/postflight fixture diff in ``.planning/quick/260808-dla-.../preflight-*-train-log.json``).
+The pooling granularity mirrors ``val_cos_gap``'s: measured over the WHOLE val split rather than
+per ``grad_accum`` pool, because it is a summary statistic reported once per epoch, not a training
+signal computed at the accumulation boundary.
+
 A degenerate ground-truth box never crashes training: ``_crop_context_rows`` retries a different
 box (up to 3 attempts) when ``boxes_to_pixels`` rejects one after pixel rounding, then skips that
 image's crop-context anchor for the step and logs at DEBUG -- never an exception, never a NaN.
@@ -226,7 +240,7 @@ from object_search.train.owlv2_targets import (  # noqa: E402
 )
 from object_search.train.supcon import (  # noqa: E402
     cosine_gap_report,
-    crop_scene_agreement,  # noqa: F401 -- unused by the loss here; Task 2 wires it into _evaluate
+    crop_scene_agreement,
     patch_grid_size,
     sample_background_indices,
     supcon_loss,
@@ -1163,8 +1177,8 @@ def _optimizer_step(
 @torch.no_grad()
 def _evaluate(
     runtime: Runtime, targets: list[ImageTargets], image_dir: Path
-) -> tuple[dict[str, float], dict[str, float | None] | None]:
-    """The identical loss over a held-out split, plus the cosine diagnostic. No optimizer step.
+) -> tuple[dict[str, float], dict[str, float | None] | None, dict[str, float | None] | None]:
+    """The identical loss over a held-out split, plus the cosine diagnostics. No optimizer step.
 
     No shuffle: the val number must depend only on the weights, so that an epoch-to-epoch change is
     the model moving and not the batch composition moving. For the same reason the background
@@ -1177,8 +1191,11 @@ def _evaluate(
     similarity matrix, which pooling the whole split would not.
 
     Returns:
-        ``(mean losses, cosine gap report)``. The report is ``None`` in ``focal`` mode, which is
-        what keeps a focal run's ``epochs`` array exactly the shape the already-measured arms have.
+        ``(mean losses, cosine gap report, crop/scene agreement report)``. The cosine gap report is
+        ``None`` in ``focal`` mode, exactly as before this task. The crop/scene agreement report
+        (D-dla-06, quick task 260808-dla) is ``None`` whenever ``config.supcon_crop_context`` is
+        ``False`` -- including in ``focal`` mode -- which is what keeps a flag-off run's ``epochs``
+        array exactly the shape it had before this task existed.
     """
     config = runtime.config
     contrastive = config.loss_mode != "focal"
@@ -1193,6 +1210,8 @@ def _evaluate(
     anchor_chunks: list[np.ndarray] = []
     label_chunks: list[np.ndarray] = []
     background_chunks: list[np.ndarray] = []
+    diag_crop_chunks: list[np.ndarray] = []
+    diag_scene_chunks: list[np.ndarray] = []
 
     def pool_pending() -> None:
         """Score one pool's worth of held rows -- the val counterpart of the accumulation boundary.
@@ -1223,6 +1242,9 @@ def _evaluate(
             anchor_chunks.append(rows.anchors.cpu().numpy())
             label_chunks.append(rows.labels.cpu().numpy())
             background_chunks.append(rows.background.cpu().numpy())
+            if config.supcon_crop_context:
+                diag_crop_chunks.append(rows.crop_diag_crop.cpu().numpy())
+                diag_scene_chunks.append(rows.crop_diag_scene.cpu().numpy())
             if len(pending_rows) == config.grad_accum:
                 pool_pending()
 
@@ -1231,7 +1253,7 @@ def _evaluate(
 
     losses = _epoch_means(sums, batches, supcon_sum, supcon_pools, config)
     if not contrastive:
-        return losses, None
+        return losses, None, None
 
     # The gap IS measured over the whole split, unlike the loss: it is a summary statistic rather
     # than a training signal, and pooling it is what makes it comparable epoch to epoch.
@@ -1241,7 +1263,16 @@ def _evaluate(
         np.concatenate(label_chunks) if label_chunks else np.zeros(0, dtype=np.int64),
         np.concatenate(background_chunks) if background_chunks else np.zeros((0, width)),
     )
-    return losses, gap
+
+    # Same pooling discipline as the gap above: measured over the WHOLE split (never fabricated,
+    # None components thread through crop_scene_agreement untouched -- D-dla-06).
+    crop_scene: dict[str, float | None] | None = None
+    if config.supcon_crop_context:
+        crop_scene = crop_scene_agreement(
+            np.concatenate(diag_crop_chunks) if diag_crop_chunks else np.zeros((0, width)),
+            np.concatenate(diag_scene_chunks) if diag_scene_chunks else np.zeros((0, width)),
+        )
+    return losses, gap, crop_scene
 
 
 # ---------------------------------------------------------------------------------- 5. the CLI
@@ -1496,12 +1527,17 @@ def _epoch_record(
     *,
     saved: bool,
     cos_gap: dict[str, float | None] | None,
+    crop_scene: dict[str, float | None] | None = None,
 ) -> dict[str, object]:
     """One row of the ``epochs`` array. Numbers only -- no timestamp, no duration.
 
     Built in one place so the epoch-0 reference row (D-hg1-06) and the per-epoch rows cannot drift
     into different shapes, and so a ``focal`` run provably emits exactly the keys it always has:
-    ``loss_keys`` excludes ``loss_supcon`` there and ``cos_gap`` is ``None``.
+    ``loss_keys`` excludes ``loss_supcon`` there and both ``cos_gap`` and ``crop_scene`` are
+    ``None``. ``crop_scene`` (D-dla-06, quick task 260808-dla) mirrors ``cos_gap``'s optional-key
+    handling exactly: present only when ``config.supcon_crop_context`` is ``True``, absent (not
+    ``null``) otherwise -- so a ``--supcon-crop-context``-disabled run's ``epochs`` array shape is
+    unchanged by this task.
     """
     record: dict[str, object] = {
         "epoch": epoch,
@@ -1514,6 +1550,8 @@ def _epoch_record(
     }
     if cos_gap is not None:
         record["val_cos_gap"] = cos_gap
+    if crop_scene is not None:
+        record["val_crop_scene_agreement"] = crop_scene
     return record
 
 
@@ -1627,21 +1665,32 @@ def main(argv: list[str] | None = None) -> None:
     #     entirely and stay comparable, row for row, with the three already-measured arms.
     if config.loss_mode != "focal":
         logger.info("epoch 0: measuring the pre-training reference point (no optimizer step)")
-        zero_train, _ = _evaluate(runtime, train_targets, train_dir)
-        zero_val, zero_gap = _evaluate(runtime, val_targets, val_dir)
+        zero_train, _, _ = _evaluate(runtime, train_targets, train_dir)
+        zero_val, zero_gap, zero_crop_scene = _evaluate(runtime, val_targets, val_dir)
         logger.info(
             f"epoch 0: train {zero_train['loss']:.4f} val {zero_val['loss']:.4f} "
             f"(supcon {zero_val[_SUPCON_KEY]:.4f}) cos-gap {_format_gap(zero_gap)}"
         )
+        if zero_crop_scene is not None:
+            logger.info(f"epoch 0: val crop/scene self-score {_format_gap(zero_crop_scene)}")
         epochs.append(
-            _epoch_record(0, 0, zero_train, zero_val, loss_keys, saved=False, cos_gap=zero_gap)
+            _epoch_record(
+                0,
+                0,
+                zero_train,
+                zero_val,
+                loss_keys,
+                saved=False,
+                cos_gap=zero_gap,
+                crop_scene=zero_crop_scene,
+            )
         )
 
     for epoch in range(1, config.epochs + 1):
         train_losses, steps_taken = _train_one_epoch(
             runtime, train_targets, train_dir, optimizer, scheduler, rng, steps_taken
         )
-        val_losses, cos_gap = _evaluate(runtime, val_targets, val_dir)
+        val_losses, cos_gap, crop_scene = _evaluate(runtime, val_targets, val_dir)
 
         improved = val_losses["loss"] < best_val
         if improved:
@@ -1658,6 +1707,8 @@ def main(argv: list[str] | None = None) -> None:
         )
         if cos_gap is not None:
             logger.info(f"epoch {epoch}: val cos-gap {_format_gap(cos_gap)}")
+        if crop_scene is not None:
+            logger.info(f"epoch {epoch}: val crop/scene self-score {_format_gap(crop_scene)}")
 
         epochs.append(
             _epoch_record(
@@ -1668,6 +1719,7 @@ def main(argv: list[str] | None = None) -> None:
                 loss_keys,
                 saved=improved,
                 cos_gap=cos_gap,
+                crop_scene=crop_scene,
             )
         )
         # Rewritten every epoch so a long GPU run that dies at hour three still leaves its curve.

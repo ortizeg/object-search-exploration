@@ -25,6 +25,7 @@ import math
 import numpy as np
 import pytest
 
+from object_search.search.owlv2_oneshot import boxes_to_pixels
 from object_search.train.supcon import (
     background_patch_mask,
     cosine_gap_report,
@@ -597,3 +598,28 @@ def test_crop_scene_agreement_of_two_empty_pools_reports_every_key_none_not_zero
     assert report["self_score_mean"] is None
     assert report["self_score_min"] is None
     assert report["self_score_max"] is None
+
+
+# ---------------------- degenerate-box retry-then-skip (finetune_owlv2._crop_context_rows)
+
+
+def test_a_box_that_boxes_to_pixels_rejects_at_every_retry_never_raises() -> None:
+    """The primitive `_crop_context_rows`'s retry loop depends on: pins that ``boxes_to_pixels``
+    itself never raises on a box that degenerates after pixel rounding -- REGARDLESS of how many
+    times it is retried -- which is the property that makes the training-side retry-then-skip
+    loop (up to 3 attempts, then skip the image's crop anchor for the step, logged at DEBUG) safe.
+
+    ``scripts/finetune_owlv2.py`` lives in the torch-only ``export`` pixi environment (``pytest``
+    is not installed there), so its ``_crop_context_rows`` retry loop itself is not directly
+    importable here; this test exercises the torch-free primitive it is built on, imported from
+    ``object_search.search.owlv2_oneshot`` (already gated by ``pixi run test`` with no torch).
+    ``_crop_context_rows``'s own retry-then-skip integration was additionally verified by a manual
+    script-level run against the real function in the export environment (recorded in the task's
+    SUMMARY), per the plan's "or a script-level test if more appropriate" allowance.
+    """
+    # A zero-width, zero-height box degenerates after pixel rounding at ANY image side.
+    degenerate = np.array([[0.5, 0.5, 0.0, 0.0]], dtype=np.float32)
+
+    for _attempt in range(5):  # more than the training retry budget (3) -- never raises, ever
+        result = boxes_to_pixels(degenerate, orig_w=300, orig_h=300)
+        assert result == [None]

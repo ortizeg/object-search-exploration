@@ -87,6 +87,18 @@ contributing pair is ``None``, **never** ``0.0``: a pool with one anchor per cla
 pair at all, and reporting ``0.0`` there would read as "measured, no separation" when the truth is
 "not measurable". The same distinction the repo's nullable human-count rule makes, for the same
 reason -- a fabricated zero is indistinguishable from a real one once it is in a table.
+
+A second, instance-level diagnostic (quick task 260808-dla, D-dla-06): ``crop_scene_agreement``
+------------------------------------------------------------------------------------------------
+:func:`cosine_gap_report` above is a **pooled, unpaired** statistic over the whole SCENE-context
+anchor set. It cannot answer a different, later question: does a CROP-context query embedding of a
+ground-truth object agree, in cosine, with the SCENE-context embedding of that SAME instance --
+the exact property ``owlv2-oneshot``'s inference-time self-similarity calibration depends on, and
+plain scene-to-scene SupCon never touches. :func:`crop_scene_agreement` measures that directly,
+over ALIGNED ``(crop, scene)`` pairs rather than a pairwise matrix. It is a pure read on
+``scripts/finetune_owlv2.py``'s crop-context anchors -- ``supcon_loss``/``supcon_loss_torch``
+themselves are unchanged by this diagnostic. See that script's module docstring for the full
+decision record (D-dla-01 through D-dla-06) behind why the crop-context anchor exists at all.
 """
 
 from __future__ import annotations
