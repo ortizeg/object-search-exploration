@@ -18,6 +18,12 @@
 #   contrastive-crop -- same as contrastive, plus --supcon-crop-context (crop-context SupCon
 #                  anchors, see 260808-dla). Added as its own row so it cannot collide with or
 #                  overwrite the `contrastive` arm's already-committed artifacts.
+#   contrastive-crop-v2 -- same as contrastive-crop, plus --supcon-crop-augment (rotation/mirror
+#                  crop-positive augmentation, see 260808-w8c) and, if OWLV2_MARGIN_FRAC is
+#                  nonzero, --supcon-crop-margin-frac. The 260808-w8c margin sweep found no margin
+#                  value beats 0.0 on both classes, so the default invocation trains augmentation
+#                  alone; OWLV2_MARGIN_FRAC exists so a future re-run can revisit that with a
+#                  different verdict without editing this script.
 # The text tower stays frozen in EVERY arm -- it is not part of the exported graph, see
 # scripts/finetune_owlv2.py.
 #
@@ -44,6 +50,7 @@
 #   models/owlv2_base_patch16_floorplans_ft_full.onnx       -- full (unregistered comparison)
 #   models/owlv2_base_patch16_floorplans_ft_contrastive.onnx -- contrastive (unregistered comparison)
 #   models/owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx -- contrastive-crop (260808-dla)
+#   models/owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx -- contrastive-crop-v2 (260808-w8c)
 set -euo pipefail
 
 export HF_HUB_DISABLE_XET=1
@@ -61,18 +68,28 @@ EPOCHS="${EPOCHS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-4}"
 ARMS="${ARMS:-baseline headonly full}"
+# Only read for the contrastive-crop-v2 arm's training flags and step 6's eval-time grids override
+# (see 260808-w8c's margin-verdict.md -- 0.0 by default since no margin beat it on both classes).
+OWLV2_MARGIN_FRAC="${OWLV2_MARGIN_FRAC:-0.0}"
+
+_CONTRASTIVE_CROP_V2_FLAGS="--loss-mode contrastive --supcon-crop-context --supcon-crop-augment"
+if [ "$OWLV2_MARGIN_FRAC" != "0.0" ] && [ "$OWLV2_MARGIN_FRAC" != "0" ]; then
+  _CONTRASTIVE_CROP_V2_FLAGS="$_CONTRASTIVE_CROP_V2_FLAGS --supcon-crop-margin-frac $OWLV2_MARGIN_FRAC"
+fi
 
 declare -A TRAIN_FLAGS=(
   [headonly]=""
   [full]="--unfreeze-all"
   [contrastive]="--loss-mode contrastive"
   [contrastive-crop]="--loss-mode contrastive --supcon-crop-context"
+  [contrastive-crop-v2]="$_CONTRASTIVE_CROP_V2_FLAGS"
 )
 declare -A CKPT_DIR=(
   [headonly]="models/finetune/owlv2-floorplans-headonly"
   [full]="models/finetune/owlv2-floorplans-full"
   [contrastive]="models/finetune/owlv2-floorplans-contrastive"
   [contrastive-crop]="models/finetune/owlv2-floorplans-contrastive-crop"
+  [contrastive-crop-v2]="models/finetune/owlv2-floorplans-contrastive-crop-v2"
 )
 declare -A ONNX_NAME=(
   [baseline]="owlv2_base_patch16.onnx"
@@ -80,6 +97,7 @@ declare -A ONNX_NAME=(
   [full]="owlv2_base_patch16_floorplans_ft_full.onnx"
   [contrastive]="owlv2_base_patch16_floorplans_ft_contrastive.onnx"
   [contrastive-crop]="owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx"
+  [contrastive-crop-v2]="owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx"
 )
 
 echo "== 1/8  install envs (default + export) and assert BOTH CUDA paths =="
@@ -196,11 +214,20 @@ for ds in floorplans-door floorplans-window; do
   for arm in $ARMS; do
     MODEL="${ONNX_NAME[$arm]}"
     echo "--- tune $ds / $arm ($MODEL) ---"
-    OS_OWLV2_MODEL="$MODEL" "$PYBIN" - "$ds" "$arm" <<'PYEOF' || echo "TUNE_FAIL $arm $ds"
+    OS_OWLV2_MODEL="$MODEL" "$PYBIN" - "$ds" "$arm" "$OWLV2_MARGIN_FRAC" <<'PYEOF' || echo "TUNE_FAIL $arm $ds"
 import sys
-from object_search.eval.tuning import run_domain_tuning
-ds, arm = sys.argv[1], sys.argv[2]
-run_domain_tuning(ds, "datasets", methods=("owlv2-oneshot",), exemplar_count=1,
+from object_search.eval.tuning import _TUNING_GRIDS, run_domain_tuning
+ds, arm, margin_frac = sys.argv[1], sys.argv[2], float(sys.argv[3])
+# The contrastive-crop-v2 arm is scored with the crop it was trained to expect (D-w8c-03/D-w8c-10):
+# only when margin is nonzero does this differ from every other arm's plain tuning grid.
+grids = None
+if arm == "contrastive-crop-v2" and margin_frac != 0.0:
+    grids = {
+        "owlv2-oneshot": tuple(
+            {**dict(g), "crop_context_margin_frac": margin_frac} for g in _TUNING_GRIDS["owlv2-oneshot"]
+        )
+    }
+run_domain_tuning(ds, "datasets", methods=("owlv2-oneshot",), exemplar_count=1, grids=grids,
                   out=f"docs/benchmark/owlv2-finetune/{ds}-{arm}.json")
 PYEOF
   done
@@ -217,6 +244,7 @@ onnx_names = {
     "full": "owlv2_base_patch16_floorplans_ft_full.onnx",
     "contrastive": "owlv2_base_patch16_floorplans_ft_contrastive.onnx",
     "contrastive-crop": "owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx",
+    "contrastive-crop-v2": "owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx",
 }
 arms = sys.argv[1].split()
 for arm in arms:
