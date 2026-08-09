@@ -79,6 +79,21 @@ doors, 1st on windows, full 28/28 coverage, and (below) uniformly robust to symb
 > though the untuned default is now real ground gained) and moves up to #4 on windows. The other
 > five methods' rows are unchanged from the original sweep, not re-run in these passes.
 
+> **`sparse-geo`'s rows above are unchanged, and a later dedicated pass confirms they should be**
+> ([`docs/reports/sparse-geo-improvement.md`](../reports/sparse-geo-improvement.md)). That pass
+> reproduced this table's `sparse-geo` numbers to three decimals (doors 0.2194 / 0.4416 / 0.1459,
+> windows 0.3092 / 0.6275 / 0.2051), then tested two structural hypotheses against the flat door
+> recall-by-size below — **mirror acceptance** (door symbols drawn with the opposite hinge hand) and
+> a **learned SuperPoint backend** (line-art carries little DoG texture for SIFT). **Both were
+> measured and both were disproven**: mirror lost F1 in 4/4 class × voting-mode cells and was fully
+> reverted (commit `8ab99a2`); SuperPoint lost F1 in 4/4 cells, dropped window coverage to 26/28 on
+> an ONNX/CoreML crash when zero keypoints are detected, and cost 5.3–6.9× latency, so it was never
+> committed. `sparse-geo`'s config, defaults and recommended floor-plan tuning
+> (`min_inliers=3, nms_iou=0.3`) are therefore **unchanged** — no improvement is being claimed here.
+> The flat door recall-by-size remains an **open question**; the report records what is now ruled
+> out and where the funnel actually collapses (55 Hough peaks hypothesized for 157 ground-truth
+> doors, from 2 664 correspondences).
+
 ## What the tuning + fixes bought
 
 - **Domain tuning matters most for `ncc`/`mosse`:** `ncc` window F1 nearly doubled vs default

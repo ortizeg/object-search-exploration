@@ -108,6 +108,7 @@ nav:
   - Improvement reports:
       - NCC: reports/ncc-improvement.md
       - MOSSE: reports/mosse-improvement.md
+      - Sparse-geo: reports/sparse-geo-improvement.md
       - DINO dense: reports/dino-dense-improvement.md
       - OWLv2: reports/owlv2-improvement.md
       - OWLv2 (real-objects): reports/owlv2-oneshot-real-objects-improvement.md
