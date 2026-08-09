@@ -73,6 +73,10 @@ docs/benchmark/floorplans-results.md
 # (The checkpoints and .onnx artifacts themselves are already covered by the models/ rule.)
 docs/benchmark/owlv2-finetune-*.json
 docs/benchmark/owlv2-finetune/
+# OWLv2 crop context-margin sweep (quick task 260808-w8c): the local/vast.ai margin-sweep dumps.
+# Regenerable via .planning/quick/260808-w8c-.../margin_sweep.py; the COMMITTED deliverable is
+# margin-verdict.md plus the report section it feeds.
+docs/benchmark/owlv2-margin-sweep/
 # Hydra's job-logging sink (disabled in conf/benchmark.yaml, ignored as a belt-and-braces).
 benchmark.log
 
