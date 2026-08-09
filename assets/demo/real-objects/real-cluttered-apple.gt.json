@@ -1,0 +1,53 @@
+{
+  "achieved_n": 5,
+  "background": "leaf-litter",
+  "boxes": [
+    {
+      "h": 264,
+      "w": 257,
+      "x": 677,
+      "y": 27
+    },
+    {
+      "h": 341,
+      "w": 315,
+      "x": 323,
+      "y": 94
+    },
+    {
+      "h": 112,
+      "w": 111,
+      "x": 85,
+      "y": 138
+    },
+    {
+      "h": 206,
+      "w": 187,
+      "x": 43,
+      "y": 278
+    },
+    {
+      "h": 228,
+      "w": 238,
+      "x": 745,
+      "y": 359
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 683,
+  "image": "real-cluttered-apple.jpg",
+  "regime": "cluttered",
+  "requested_n": 5,
+  "seed": 1781359676,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.4170168771745908,
+    "instance_scale_min": 0.4930288420825222,
+    "rotation_max_deg": 14.996538435202478,
+    "rotation_min_deg": -16.564065744844424,
+    "true_instance_count": 5
+  },
+  "target": "apple",
+  "width": 1024
+}

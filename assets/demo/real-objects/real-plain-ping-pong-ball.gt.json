@@ -1,0 +1,65 @@
+{
+  "achieved_n": 7,
+  "background": "carpet",
+  "boxes": [
+    {
+      "h": 220,
+      "w": 212,
+      "x": 515,
+      "y": 45
+    },
+    {
+      "h": 220,
+      "w": 212,
+      "x": 67,
+      "y": 155
+    },
+    {
+      "h": 220,
+      "w": 212,
+      "x": 761,
+      "y": 225
+    },
+    {
+      "h": 220,
+      "w": 212,
+      "x": 530,
+      "y": 274
+    },
+    {
+      "h": 220,
+      "w": 212,
+      "x": 782,
+      "y": 467
+    },
+    {
+      "h": 220,
+      "w": 212,
+      "x": 215,
+      "y": 474
+    },
+    {
+      "h": 220,
+      "w": 212,
+      "x": 528,
+      "y": 531
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "real-plain-ping-pong-ball.jpg",
+  "regime": "plain",
+  "requested_n": 7,
+  "seed": 85898972,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 7
+  },
+  "target": "ping-pong-ball",
+  "width": 1024
+}

@@ -1,0 +1,53 @@
+{
+  "achieved_n": 5,
+  "background": "carpet",
+  "boxes": [
+    {
+      "h": 117,
+      "w": 220,
+      "x": 24,
+      "y": 53
+    },
+    {
+      "h": 117,
+      "w": 220,
+      "x": 538,
+      "y": 56
+    },
+    {
+      "h": 117,
+      "w": 220,
+      "x": 709,
+      "y": 188
+    },
+    {
+      "h": 117,
+      "w": 220,
+      "x": 58,
+      "y": 246
+    },
+    {
+      "h": 117,
+      "w": 220,
+      "x": 465,
+      "y": 619
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "real-plain-c-clamp.jpg",
+  "regime": "plain",
+  "requested_n": 5,
+  "seed": 1664475878,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 5
+  },
+  "target": "c-clamp",
+  "width": 1024
+}

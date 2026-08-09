@@ -49,6 +49,20 @@ two floor-plans datasets needed. Full suite green (859 passed, 93.89% coverage).
 remains opt-in, not the shipped default; the choice between contrastive-crop and contrastive-crop-v2
 is itself class-dependent (v2 better for door, v1 marginally better for window).
 
+Prior activity: 2026-08-07 — Quick tasks 260730-vx4 (ncc) + 260730-w9s (mosse): floor-plan
+orientation/mirror follow-up, merged together into one PR against a rebased main. Both confirmed
+the rotation-bank-too-narrow hypothesis via a cardinal 0/90/180/270 bank (+ mirror), additive
+_TUNING_GRIDS entries, no shipped defaults touched. ncc doors F1 0.164->0.358 (windows: a disclosed
+val/test generalization gap, 0.401->0.350, not reverted); ncc also tested two further recall levers
+(lower retain_frac, wider scale pyramid) and found both net-negative -- its real ceiling on this
+domain (true/false-positive scores overlap, unlike synthetic's clean separation). mosse confirmed
+the hypothesis more cleanly for BOTH classes (doors F1 0.201->0.408, beating ncc; windows
+0.077->0.155, no generalization gap but still behind ncc's tuned window number), via a cardinal
+bank with n_angle_groups scaled to match (the angles-per-group invariant) plus a verify-side-only
+mirror knob; mosse also has a disclosed doors val/test nuance (narrower sweep found F1 0.509,
+honest full-grid argmax ships 0.408 instead). Zero synthetic-regime regression on either method.
+New scripts/ncc_debug_visualize.py debug tool. Full suite green.
+
 Progress: [█████████░] 88%
 
 ### Quick Tasks Completed
@@ -58,7 +72,9 @@ Progress: [█████████░] 88%
 | 260726-lct | MkDocs Material docs site + GitHub Pages + UI walkthrough | 2026-07-26 | (pending) | [260726-lct](./quick/260726-lct-set-up-mkdocs-material-docs-site-github-/) |
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
+| 260730-vx4 | ncc floor-plan orientation/mirror follow-up: cardinal bank + mirror, doors F1 0.164->0.358 | 2026-08-01 | 357abe3 | [260730-vx4](./quick/260730-vx4-improve-ncc-on-floor-plan-door-window-do/) |
 | 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
+| 260730-w9s | mosse floor-plan orientation/mirror follow-up: cardinal bank + verify-mirror, doors F1 0.201->0.408, windows 0.077->0.155 | 2026-08-07 | c84428b | [260730-w9s](./quick/260730-w9s-improve-mosse-on-floor-plan-door-window-/) |
 | 260805-hg1 | SupCon contrastive loss for OWLv2 floor-plans fine-tune — sharper negative result, diagnosed crop/scene calibration break | 2026-08-08 | (pending) | [260805-hg1](./quick/260805-hg1-add-a-supervised-contrastive-loss-varian/) |
 | 260808-dla | Crop-context SupCon fix — closes the calibration break, best fine-tuned OWLv2 arm measured (door F1 0.229, window F1 0.216) | 2026-08-08 | (pending) | [260808-dla](./quick/260808-dla-add-crop-context-supervision-to-the-owlv/) |
 | 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |

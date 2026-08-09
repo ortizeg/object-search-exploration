@@ -43,7 +43,21 @@ _RESULTS: dict = {
                     "320x240": {"latency_ms": {"p50": 20.0}},
                     "800x600": {"latency_ms": {"p50": 75.0}},
                 },
+                "by_symbol_size": {
+                    "small": {"n_gt": 4, "n_matched": 3, "recall": 0.75},
+                    "medium": {"n_gt": 2, "n_matched": 2, "recall": 1.0},
+                    "large": {"n_gt": 0, "n_matched": 0, "recall": None},
+                },
             },
+            # One row per regime (EASY/TEXTURED/VARIED/CLUTTERED) so the per-regime section has
+            # something to pool, plus a real-objects row that must be EXCLUDED from that section.
+            "per_image": [
+                {"image_id": "chipset-01", "tp": 5, "fp": 0, "fn": 0, "ap": 1.0},
+                {"image_id": "textured-plain-01", "tp": 4, "fp": 1, "fn": 0, "ap": 0.9},
+                {"image_id": "textured-varied-01", "tp": 2, "fp": 1, "fn": 2, "ap": 0.4},
+                {"image_id": "textured-cluttered-01", "tp": 3, "fp": 2, "fn": 1, "ap": 0.6},
+                {"image_id": "real-plain-apple", "tp": 6, "fp": 0, "fn": 0, "ap": 1.0},
+            ],
         },
         "sparse-geo": {
             "overall": {
@@ -64,7 +78,18 @@ _RESULTS: dict = {
                     "320x240": {"latency_ms": {"p50": 5.0}},
                     "800x600": {"latency_ms": {"p50": 25.0}},
                 },
+                "by_symbol_size": {
+                    "small": {"n_gt": 4, "n_matched": 0, "recall": 0.0},
+                    "medium": {"n_gt": 2, "n_matched": 1, "recall": 0.5},
+                    "large": {"n_gt": 0, "n_matched": 0, "recall": None},
+                },
             },
+            "per_image": [
+                {"image_id": "chipset-01", "tp": None, "fp": None, "fn": None, "ap": None},
+                {"image_id": "textured-plain-01", "tp": 1, "fp": 3, "fn": 4, "ap": 0.1},
+                {"image_id": "textured-varied-01", "tp": 0, "fp": 0, "fn": 5, "ap": 0.0},
+                {"image_id": "textured-cluttered-01", "tp": 1, "fp": 1, "fn": 5, "ap": 0.05},
+            ],
         },
     },
 }
@@ -124,6 +149,37 @@ def test_results_md_prints_abstention_as_na(results_file: Path, tmp_path: Path) 
     assert "n/a" in text
     assert "| `ncc` |" in text
     assert "| `sparse-geo` |" in text
+
+
+def test_results_md_has_per_regime_and_size_tables(results_file: Path, tmp_path: Path) -> None:
+    """The expanded results.md has per-regime scoreboards, a size-bucket table, and Insight."""
+    out = tmp_path / "out"
+    results = charts.load_results(results_file)
+    md_path = charts.write_results_markdown(results, out)
+    text = md_path.read_text(encoding="utf-8")
+
+    for heading in (
+        "## Results by regime",
+        "### EASY",
+        "### TEXTURED",
+        "### VARIED",
+        "### CLUTTERED",
+    ):
+        assert heading in text
+    assert "## Recall by ground-truth box size" in text
+    assert "## Insight" in text
+    # Computed, not fixed: ncc wins every regime in the fixture, so the "unusual" branch fires.
+    assert "wins every regime here" in text
+
+
+def test_results_md_regime_section_excludes_real_objects(results_file: Path) -> None:
+    """A real-objects row must never be pooled into the synthetic per-regime EASY table."""
+    results = charts.load_results(results_file)
+    grouped = charts._rows_by_regime(results, "ncc")
+    easy_ids = {r["image_id"] for r in grouped.get("EASY", [])}
+    assert easy_ids == {"chipset-01"}
+    all_grouped_ids = {r["image_id"] for rows in grouped.values() for r in rows}
+    assert "real-plain-apple" not in all_grouped_ids
 
 
 def test_thumbs_empty_state_when_no_ratings(tmp_path: Path) -> None:

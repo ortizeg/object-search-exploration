@@ -149,6 +149,8 @@ docs = "mkdocs serve --dev-addr 127.0.0.1:8001"
 docs-build = "mkdocs build --strict"
 samples = "python -m object_search.cli render-samples"
 report = "python scripts/build_report.py"
+# Dedicated real-objects report from the real-objects-only sweep (pixi run bench-real-objects).
+report-real-objects = "python scripts/build_real_objects_report.py"
 # Render the committed research-dataset report table from the (gitignored, regenerable)
 # docs/benchmark/research-results.json produced by run_research_sweep. Fails with an actionable
 # message when that file is absent (the numbers depend on the licence-gated fetched archives).
@@ -159,6 +161,10 @@ report-research = "python scripts/build_research_report.py"
 # model-free chipset subset (ncc + classical sparse-geo) with no ONNX weights.
 bench = "python -m object_search.eval.benchmark"
 bench-ci = "python -m object_search.eval.benchmark ci=true"
+# Real-objects-only sweep (dedicated conf/benchmark-real-objects.yaml): every configured method
+# over exactly real_objects_image_ids(), no chipset/textured/synthetic ids unioned in. Feeds the
+# separate real-objects-report.html rather than the general benchmark-report.html.
+bench-real-objects = "python -m object_search.eval.benchmark --config-name=benchmark-real-objects"
 # The RESEARCH sweep (EVAL-23/24): method x dataset x {1,3} x {val,test} over the fetched datasets/
 # tree. Gated on fetch-datasets (+ fetched models for the learned methods), never in CI. Needs
 # research_root + datasets on the CLI, e.g.:
@@ -170,3 +176,7 @@ synth = "python -m object_search.cli synth"
 chipset = "python -m object_search.cli chipset"
 textured = "python -m object_search.cli textured"
 markers = "python -m object_search.cli markers"
+# Real-object-insertion set: download the licensed Wikimedia Commons source photos, then segment
+# + composite them (needs the fastsam-s weight: `pixi run -e export fetch-models --only fastsam-s`).
+fetch-real-photos = "python -m object_search.cli fetch-real-photos"
+real-objects = "python -m object_search.cli real-objects"

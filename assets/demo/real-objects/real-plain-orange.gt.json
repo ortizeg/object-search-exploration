@@ -1,0 +1,71 @@
+{
+  "achieved_n": 8,
+  "background": "wood-floor",
+  "boxes": [
+    {
+      "h": 220,
+      "w": 220,
+      "x": 231,
+      "y": 3
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 516,
+      "y": 31
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 523,
+      "y": 262
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 286,
+      "y": 303
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 18,
+      "y": 343
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 430,
+      "y": 528
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 14,
+      "y": 571
+    },
+    {
+      "h": 220,
+      "w": 220,
+      "x": 323,
+      "y": 775
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 1024,
+  "image": "real-plain-orange.jpg",
+  "regime": "plain",
+  "requested_n": 8,
+  "seed": 79265016,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 8
+  },
+  "target": "orange",
+  "width": 768
+}

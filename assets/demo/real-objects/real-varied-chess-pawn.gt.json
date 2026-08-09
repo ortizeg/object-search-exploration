@@ -1,0 +1,59 @@
+{
+  "achieved_n": 6,
+  "background": "sand",
+  "boxes": [
+    {
+      "h": 252,
+      "w": 179,
+      "x": 527,
+      "y": 83
+    },
+    {
+      "h": 293,
+      "w": 193,
+      "x": 249,
+      "y": 258
+    },
+    {
+      "h": 274,
+      "w": 153,
+      "x": 14,
+      "y": 475
+    },
+    {
+      "h": 75,
+      "w": 58,
+      "x": 623,
+      "y": 677
+    },
+    {
+      "h": 104,
+      "w": 77,
+      "x": 179,
+      "y": 737
+    },
+    {
+      "h": 74,
+      "w": 52,
+      "x": 375,
+      "y": 842
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 1024,
+  "image": "real-varied-chess-pawn.jpg",
+  "regime": "varied",
+  "requested_n": 6,
+  "seed": 501173684,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.3058633833186466,
+    "instance_scale_min": 0.32297060523307636,
+    "rotation_max_deg": 25.144578206701013,
+    "rotation_min_deg": -26.994247892669062,
+    "true_instance_count": 6
+  },
+  "target": "chess-pawn",
+  "width": 777
+}

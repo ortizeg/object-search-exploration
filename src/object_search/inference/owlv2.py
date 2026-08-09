@@ -41,9 +41,16 @@ Output (defined by the export wrapper in ``scripts/export_owlv2.py`` -- names ar
   * ``pred_boxes`` f32 ``[batch, num_patches, 4]`` -- per-patch boxes as ``(cx, cy, w, h)``
     **normalized to ``[0, 1]``** over the padded square. At ``960`` with patch ``16``,
     ``num_patches == 60 * 60 == 3600``.
+  * ``logit_shift`` / ``logit_scale`` f32 ``[batch, num_patches, 1]`` -- OWLv2's own learned,
+    **query-independent** per-patch score-calibration terms (the ``Owlv2ClassPredictionHead``
+    ``logit_shift``/``logit_scale`` Linear(1) layers applied to the pre-projection 768-dim vision
+    features -- the same tensor HF's own class head feeds them when a query IS present, so this is
+    not a repurposing). The method applies ``(cosine + logit_shift) * logit_scale`` to recalibrate
+    raw cosine before thresholding -- HF's own formula, computed from the SCENE alone, never the
+    query crop.
 
 Only the **input** is validated at load (INFRA-09): ``num_patches`` is a fixed property of the
-960/16 grid, but the two outputs' patch dim exports as symbolic, so no output-shape assertion is
+960/16 grid, but the four outputs' patch dim exports as symbolic, so no output-shape assertion is
 made here. Mapping a normalized box back to scene pixels (multiply by ``max(H, W)``, clip) and
 selecting the query embedding are pure arithmetic and live in ``search/owlv2_oneshot.py`` so CI
 gates them with synthetic tensors -- no gitignored weight required.
@@ -98,7 +105,7 @@ OWLV2_INPUT_SPEC: ONNXInputSpec = ONNXInputSpec(
 
 @dataclass(frozen=True, eq=False)
 class Owlv2Embeddings:
-    """One image's per-patch OWLv2 outputs: class embeddings and normalized boxes.
+    """One image's per-patch OWLv2 outputs: class embeddings, boxes, and score calibration.
 
     ``eq=False`` because the fields are NumPy arrays (element-wise ``==`` has no single truth
     value); these are never compared for equality.
@@ -109,10 +116,18 @@ class Owlv2Embeddings:
         boxes_cxcywh: ``(num_patches, 4)`` predicted boxes as ``(cx, cy, w, h)`` normalized to
             ``[0, 1]`` over the padded square. Map to scene pixels by multiplying by
             ``max(orig_h, orig_w)`` (the padded-square side), then clipping.
+        logit_shift: ``(num_patches,)`` OWLv2's learned, query-independent additive calibration
+            term per patch (already through the export wrapper's Linear(1); see the module
+            docstring). Computed from this image's own vision features only.
+        logit_scale: ``(num_patches,)`` OWLv2's learned, query-independent multiplicative
+            calibration term per patch (already through Linear(1) + ELU + 1 in the export wrapper,
+            so it is always ``> 0``). Computed from this image's own vision features only.
     """
 
     class_embeds: npt.NDArray[np.float32]
     boxes_cxcywh: npt.NDArray[np.float32]
+    logit_shift: npt.NDArray[np.float32]
+    logit_scale: npt.NDArray[np.float32]
 
 
 def owlv2_preprocess_tensor(image: npt.NDArray[np.uint8]) -> tuple[npt.NDArray[np.float32], int]:
@@ -157,8 +172,8 @@ class OWLv2Inferencer(ONNXInferencer[Owlv2Embeddings]):
 
     The base :class:`ONNXInferencer` validates the input dtype/shape at construction (INFRA-09).
     This subclass overrides :meth:`preprocess` with OWLv2's pad-bottom-right-then-resize policy and
-    returns per-patch class embeddings + normalized boxes. No output shape is asserted: the two
-    outputs' patch dim exports as symbolic.
+    returns per-patch class embeddings, normalized boxes, and score-calibration terms. No output
+    shape is asserted: the four outputs' patch dim exports as symbolic.
 
     Args:
         model_path: Path to ``owlv2_base_patch16.onnx`` (produced by
@@ -208,17 +223,30 @@ class OWLv2Inferencer(ONNXInferencer[Owlv2Embeddings]):
 
     def _named_outputs(
         self, outputs: list[npt.NDArray[np.generic]]
-    ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-        """Map ``outputs`` to ``(class_embeds, pred_boxes)`` by name, falling back to order."""
+    ) -> tuple[
+        npt.NDArray[np.float32],
+        npt.NDArray[np.float32],
+        npt.NDArray[np.float32],
+        npt.NDArray[np.float32],
+    ]:
+        """Map ``outputs`` to ``(class_embeds, pred_boxes, logit_shift, logit_scale)``.
+
+        Falls back to the documented export order if a re-export renamed the outputs.
+        """
         named = dict(zip(self.output_names, outputs, strict=True))
         try:
             class_embeds = named["class_embeds"]
             pred_boxes = named["pred_boxes"]
+            logit_shift = named["logit_shift"]
+            logit_scale = named["logit_scale"]
         except KeyError:  # a re-export renamed the outputs -- fall back to the documented order
             class_embeds, pred_boxes = outputs[0], outputs[1]
+            logit_shift, logit_scale = outputs[2], outputs[3]
         return (
             np.asarray(class_embeds, dtype=np.float32),
             np.asarray(pred_boxes, dtype=np.float32),
+            np.asarray(logit_shift, dtype=np.float32),
+            np.asarray(logit_scale, dtype=np.float32),
         )
 
     def _pack_embeddings(
@@ -230,16 +258,20 @@ class OWLv2Inferencer(ONNXInferencer[Owlv2Embeddings]):
         """Post-processor for the base ``predict`` path: drop the batch dim and package outputs.
 
         ``orig_w``/``orig_h`` are unused because ``pred_boxes`` are normalized (resolution-free);
-        the method maps them to scene pixels with the image it already holds.
+        the method maps them to scene pixels with the image it already holds. ``logit_shift``/
+        ``logit_scale`` arrive as ``(num_patches, 1)``; squeezed to ``(num_patches,)`` here so the
+        method scores against a plain 1-D array, matching ``class_embeds``' patch-major layout.
         """
-        class_embeds, pred_boxes = self._named_outputs(outputs)
+        class_embeds, pred_boxes, logit_shift, logit_scale = self._named_outputs(outputs)
         return Owlv2Embeddings(
             class_embeds=np.ascontiguousarray(class_embeds[0], dtype=np.float32),
             boxes_cxcywh=np.ascontiguousarray(pred_boxes[0], dtype=np.float32),
+            logit_shift=np.ascontiguousarray(logit_shift[0, :, 0], dtype=np.float32),
+            logit_scale=np.ascontiguousarray(logit_scale[0, :, 0], dtype=np.float32),
         )
 
     def embed_image(self, image: npt.NDArray[np.uint8]) -> Owlv2Embeddings:
-        """Encode one BGR image to per-patch ``(class_embeds, boxes_cxcywh)``.
+        """Encode one BGR image to per-patch ``(class_embeds, boxes_cxcywh, shift, scale)``.
 
         The single-image unit used twice by ``owlv2-oneshot`` (query crop, then scene). It knows
         nothing about exemplars or scoring -- the two-image image-guided logic lives in the method.

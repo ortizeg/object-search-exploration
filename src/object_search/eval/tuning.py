@@ -79,16 +79,112 @@ _DEFAULT_METHODS: tuple[str, ...] = (
 _NCC_SCALE_SETS: tuple[tuple[float, ...], ...] = ((1.0,), (0.9, 1.0, 1.1))
 _NCC_MOSSE_RETAIN: tuple[float, ...] = (0.25, 0.35, 0.45, 0.55, 0.65)
 _NCC_MOSSE_NMS: tuple[float, ...] = (0.3, 0.5)
-_ncc_mosse_grid: tuple[dict[str, object], ...] = tuple(
-    {"scales": scales, "retain_frac": retain, "nms_iou": nms}
-    for scales in _NCC_SCALE_SETS
-    for retain in _NCC_MOSSE_RETAIN
-    for nms in _NCC_MOSSE_NMS
-)
+
+
+def _correlation_grid() -> tuple[dict[str, object], ...]:
+    """Build a FRESH scales x retain_frac x nms_iou grid for one correlation method.
+
+    ``ncc`` and ``mosse`` start from the same three knobs but must NOT share one grid object.
+    Both config models are ``extra="forbid"``, so the moment either method grows a method-only
+    knob (an ``ncc`` rotation-bank variant, a ``mosse`` filter knob) a shared grid would feed
+    that key into the *other* method's validator and raise. Each call returns independent
+    tuples and dicts, so the two grids below can diverge freely.
+    """
+    return tuple(
+        {"scales": scales, "retain_frac": retain, "nms_iou": nms}
+        for scales in _NCC_SCALE_SETS
+        for retain in _NCC_MOSSE_RETAIN
+        for nms in _NCC_MOSSE_NMS
+    )
+
+
+# ``ncc``-only ADDITIVE block from the floor-plan domain investigation (quick task 260730-vx4,
+# see EXPERIMENTS.md in that quick task's directory). A floor-plan door/window symbol sits on
+# whichever wall it is drawn on, so an instance on a perpendicular wall can be ~90 deg off the
+# exemplar -- outside the shipped +/-35 deg bank (`NCCConfig.angles_deg`'s default). A pure
+# 4-angle CARDINAL bank (0/90/180/270) measured a clear win over both the shipped bank and wider
+# continuous banks (a 28-angle cardinal-x-fine sub-bank, a uniform 30 deg spacing) on this domain:
+# floorplans-door test F1 0.164 -> 0.355, floorplans-window 0.222 -> 0.272 -- floor-plan walls are
+# discretely orthogonal, not continuously rotated, so a small precise cardinal set beats a dense
+# sweep. `mirror` (a horizontally-flipped template sibling, for domains with bilateral symmetry
+# like door swing direction) is included as its own axis rather than a fixed choice because its
+# effect measured genuinely mixed: a statistical tie for doors (test F1 0.357 vs 0.355, trading
+# precision for recall) and a net-negative for windows (val F1 0.276 vs 0.299) -- argmax-on-val
+# lets each dataset pick honestly instead of hand-picking one global default. Fixed at a single
+# scale (the floor-plan symbols are near-fixed-scale, matched by the existing (1.0,) scale option)
+# and the tighter nms_iou (0.3), since the investigation swept those two independently of scale/nms
+# and widening this block's own scale x nms cross would balloon the grid for no measured benefit.
+_NCC_CARDINAL_BANK: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0)
+_NCC_MIRROR_OPTIONS: tuple[bool, ...] = (False, True)
+
+
+def _ncc_grid() -> tuple[dict[str, object], ...]:
+    """``ncc``'s grid: the original scales x retain_frac x nms_iou sweep, PLUS an additive
+    cardinal-rotation-bank x mirror block (see the module comment above `_NCC_CARDINAL_BANK`).
+
+    Additive, not a replacement: the shipped angle bank (mirror off) stays available as before, so
+    this can only match or beat the pre-existing grid on any dataset, never regress it.
+    """
+    return _correlation_grid() + tuple(
+        {
+            "scales": (1.0,),
+            "retain_frac": retain,
+            "nms_iou": 0.3,
+            "angles_deg": _NCC_CARDINAL_BANK,
+            "mirror": mirror,
+        }
+        for retain in _NCC_MOSSE_RETAIN
+        for mirror in _NCC_MIRROR_OPTIONS
+    )
+
+
+# ``mosse``-only ADDITIVE block from the floor-plan domain investigation (quick task 260730-w9s,
+# see EXPERIMENTS.md in that quick task's directory). Mirrors the sibling `ncc` investigation's
+# finding: a pure 4-angle CARDINAL bank (0/90/180/270 deg), with `n_angle_groups` scaled to match
+# (4 groups -- one per cardinal, so each sub-filter stays sharp), beat both the shipped +/-35 deg
+# bank and wider continuous banks on BOTH floor-plan classes -- floorplans-door test F1 0.201 ->
+# 0.414, floorplans-window 0.077 -> 0.141. Widening the bank WITHOUT scaling groups proportionally
+# (the naive "28 angles, still 4 groups" trial) reproduces the already-measured-bad one-blurry-
+# filter failure mode and must not be mistaken for a fair test -- see EXPERIMENTS.md E1.
+# `mirror` (a horizontally-flipped verify-side re-score template, for domains with bilateral
+# symmetry like door swing direction) is included as its own axis: unlike `ncc`'s near-tie, it is a
+# STRONG additional win for doors (F1 0.414 -> 0.509 val-argmax) and a mild net-negative for
+# windows (mirror stays off there) -- argmax-on-val lets each dataset pick honestly. Fixed at a
+# single scale and the tighter nms_iou, matching the investigation's own sweep (which held those
+# fixed while varying the bank/groups/mirror axes).
+_MOSSE_CARDINAL_BANK: tuple[float, ...] = (0.0, 90.0, 180.0, 270.0)
+_MOSSE_CARDINAL_GROUPS = 4
+_MOSSE_MIRROR_OPTIONS: tuple[bool, ...] = (False, True)
+
+
+def _mosse_grid() -> tuple[dict[str, object], ...]:
+    """``mosse``'s grid: the original scales x retain_frac x nms_iou sweep, PLUS an additive
+    cardinal-rotation-bank (with matched `n_angle_groups`) x mirror block (see the module comment
+    above `_MOSSE_CARDINAL_BANK`).
+
+    Additive, not a replacement: the shipped bank/groups (mirror off) stay available as before, so
+    this can only match or beat the pre-existing grid on any dataset, never regress it.
+    """
+    return _correlation_grid() + tuple(
+        {
+            "scales": (1.0,),
+            "retain_frac": retain,
+            "nms_iou": 0.3,
+            "train_angles_deg": _MOSSE_CARDINAL_BANK,
+            "n_angle_groups": _MOSSE_CARDINAL_GROUPS,
+            "mirror": mirror,
+        }
+        for retain in _NCC_MOSSE_RETAIN
+        for mirror in _MOSSE_MIRROR_OPTIONS
+    )
+
+
+_NCC_GRID: tuple[dict[str, object], ...] = _ncc_grid()
+_MOSSE_GRID: tuple[dict[str, object], ...] = _mosse_grid()
 
 _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
-    "ncc": _ncc_mosse_grid,
-    "mosse": _ncc_mosse_grid,
+    "ncc": _NCC_GRID,
+    "mosse": _MOSSE_GRID,
     # sparse-geo -- min_inliers (RANSAC inliers to accept; higher -> stricter, the primary knob,
     # widened down to 2 and up to 10) crossed with nms_iou (duplicate-instance suppression).
     "sparse-geo": tuple(
@@ -109,9 +205,14 @@ _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
     # owlv2-oneshot -- max_box_area_frac (drop boxes bigger than this fraction of the image; the
     # whole-frame-box filter) crossed with query_iou_frac (how wide the query-patch set is), the two
     # knobs that most move floor-plan precision/recall. retain_frac stays at the method default.
+    # The grid was widened DOWN from {0.1, 0.25, 0.5} after a debug-image inspection (see
+    # docs/reports/owlv2-floorplans-improvement.md) showed the residual floor-plan false positives
+    # are large room/wall-sized rectangles, not small symbol-sized boxes -- CAD-symbol scale is a
+    # few percent of the plan at most (docs/eval/floorplans-findings.md's dataset statistics), so
+    # 0.1 (10%) was still far too generous a cap for this domain and the old grid never tried lower.
     "owlv2-oneshot": tuple(
         {"max_box_area_frac": area, "query_iou_frac": query}
-        for area in (0.1, 0.25, 0.5)
+        for area in (0.005, 0.007, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5)
         for query in (0.6, 0.8, 0.9)
     ),
 }
@@ -258,8 +359,11 @@ def _tune_methods_at_count(
     duplicating the loop.
 
     ``grids``, when given, overrides :data:`_TUNING_GRIDS` for the named method(s) only (a method
-    absent from ``grids`` still uses its built-in grid). ``None`` (every call site before this
-    parameter existed) reproduces today's exact behavior byte-for-byte.
+    absent from ``grids`` still uses its built-in grid), threaded straight to :func:`tune_method`'s
+    own ``grid=`` parameter. ``None`` (every call site before this parameter existed) reproduces
+    today's exact behavior byte-for-byte. It exists so a research script can sweep a method-specific
+    variant (e.g. a floor-plan rotation-bank sweep, or a fine-tune's crop-margin fraction) without
+    shelling out to the full ``tune-floorplans`` CLI, which always tunes every registered method.
     """
     per_method: list[dict[str, Any]] = []
     for method in methods:
@@ -273,8 +377,8 @@ def _tune_methods_at_count(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
-            exemplar_selection=exemplar_selection,
             grid=method_grid,
+            exemplar_selection=exemplar_selection,
         )
         best = tuned["best"]
         tuned_config = spec.config_model(**best["overrides"]) if best else None
@@ -372,11 +476,13 @@ def run_domain_tuning(
             median-area box).
         exemplar_counts: Optional sequence of counts to nest per-count blocks for; ``None`` keeps
             the flat single-count report.
-        grids: Optional per-method grid override, keyed by method name. A method absent from this
-            mapping still uses its built-in :data:`_TUNING_GRIDS` entry. ``None`` (every call site
-            before this parameter existed) reproduces today's exact behavior byte-for-byte -- this
-            exists so a caller can sweep an extra config field (e.g. a fine-tune's crop-margin
-            fraction) crossed with a method's existing grid without forking the tuning loop.
+        grids: Optional per-method grid override, e.g. ``{"ncc": ({"angles_deg": (...)}, ...)}``,
+            keyed by method name. A method present here is tuned over the supplied grid INSTEAD of
+            its :data:`_TUNING_GRIDS` entry; a method absent from the mapping (and the ``None``
+            default) keeps its committed grid, so omitting this argument reproduces the previous
+            report byte for byte. This is the seam an offline experiment script uses to sweep a
+            candidate knob (e.g. a floor-plan rotation-bank sweep, or a fine-tune's crop-margin
+            fraction) without editing the committed grids or forking the tuning loop.
         out: Where to write the JSON report (resolved against the repo root when relative). ``None``
             skips the write and only returns the report.
 

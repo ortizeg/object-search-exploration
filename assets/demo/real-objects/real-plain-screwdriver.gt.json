@@ -1,0 +1,71 @@
+{
+  "achieved_n": 8,
+  "background": "brick-wall",
+  "boxes": [
+    {
+      "h": 59,
+      "w": 220,
+      "x": 336,
+      "y": 44
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 563,
+      "y": 103
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 285,
+      "y": 150
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 623,
+      "y": 223
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 364,
+      "y": 275
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 200,
+      "y": 527
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 684,
+      "y": 550
+    },
+    {
+      "h": 59,
+      "w": 220,
+      "x": 212,
+      "y": 621
+    }
+  ],
+  "exemplar_index": 0,
+  "height": 768,
+  "image": "real-plain-screwdriver.jpg",
+  "regime": "plain",
+  "requested_n": 8,
+  "seed": 16762846,
+  "slice_metadata": {
+    "clutter_level": null,
+    "exemplar_keypoint_count": null,
+    "instance_scale_max": 1.0,
+    "instance_scale_min": 1.0,
+    "rotation_max_deg": 0.0,
+    "rotation_min_deg": 0.0,
+    "true_instance_count": 8
+  },
+  "target": "screwdriver",
+  "width": 1024
+}
