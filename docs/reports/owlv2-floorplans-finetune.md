@@ -1,27 +1,33 @@
 # Fine-tuning `owlv2-oneshot` on floor plans — measured result
 
-**Verdict, stated up front: three fine-tuning objectives were tried. The first two fail outright; the
-third — supervising the exact training/inference mismatch the second one exposed — works, closing most
-of the gap to the pretrained baseline without reaching `propose-retrieve`/`ncc`.** Classification-loss
-fine-tuning (first experiment) makes doors worse than the pretrained baseline and barely moves windows.
-A directly-matched supervised-contrastive (SupCon) objective (second experiment) is worse still: door
-F1 0.010, window F1 0.009. Diagnosis found why: `owlv2-oneshot` computes two embeddings of the same
-object through two different forward passes — a **crop-context** query embedding (the small cropped
-exemplar alone) and a **scene-context** embedding of that object inside the full scene — and
-calibration depends on them agreeing, but the SupCon batches were built entirely from scene-context
-forward passes. Training never touched the crop-context path at all, and it drifted so far that the
-exemplar's own self-similarity score went cosine-**negative**, collapsing the calibration threshold and
-retaining ~86% of all scene patches instead of ~25–30%. **The third experiment fixes exactly this**:
-adding crop-context anchors to the SupCon pool (reusing `owlv2-oneshot`'s own query-encoding functions,
-not a reimplementation, to guarantee train/inference fidelity) restores a healthy, strongly positive
-self-similarity score and lifts door F1 to 0.229–0.391 and window F1 to 0.216 — roughly **2–24× every
-other fine-tuned arm** and clearly ahead of the pretrained baseline (0.154 door / 0.023 window) on both
-classes. It still falls short of `propose-retrieve`'s 0.459 door F1 and `ncc`'s 0.403 window F1, so
-`ncc`/`propose-retrieve` remain the floor-plan recommendation — but the headline changes from "fine-
-tuning is a dead end on this method" to "fine-tuning works once the training objective supervises the
-same cross-context comparison the method actually runs at inference." All three experiments train
-cleanly (loss falls monotonically, no sign of a wiring bug); the difference between them is entirely
-about what the training objective supervises, not how it optimizes.
+**Verdict, stated up front: four fine-tuning objectives were tried. The first two fail outright; the
+third — supervising the exact training/inference mismatch the second one exposed — works, and the
+fourth pushes it further on doors specifically, at a small cost on windows. None reach
+`propose-retrieve`/`ncc`.** Classification-loss fine-tuning (first experiment) makes doors worse than
+the pretrained baseline and barely moves windows. A directly-matched supervised-contrastive (SupCon)
+objective (second experiment) is worse still: door F1 0.010, window F1 0.009. Diagnosis found why:
+`owlv2-oneshot` computes two embeddings of the same object through two different forward passes — a
+**crop-context** query embedding (the small cropped exemplar alone) and a **scene-context** embedding
+of that object inside the full scene — and calibration depends on them agreeing, but the SupCon
+batches were built entirely from scene-context forward passes. Training never touched the crop-context
+path at all, and it drifted so far that the exemplar's own self-similarity score went
+cosine-**negative**, collapsing the calibration threshold and retaining ~86% of all scene patches
+instead of ~25–30%. **The third experiment fixes exactly this**: adding crop-context anchors to the
+SupCon pool (reusing `owlv2-oneshot`'s own query-encoding functions, not a reimplementation, to
+guarantee train/inference fidelity) restores a healthy, strongly positive self-similarity score and
+lifts door F1 to 0.229–0.391 and window F1 to 0.216. **The fourth experiment tried two further, cheap
+levers**: crop context-margin padding (tested first, at zero GPU cost, against the already-trained
+third-experiment checkpoint) helps doors at one margin value but hurts windows at every margin tried,
+so no margin was carried into training; rotation/mirror-augmented crop positives in SupCon training
+then push door F1 further, to **0.253 tuned / 0.433 default** (the best door numbers of any arm
+measured), while window F1 dips slightly to 0.204. All four fine-tuned arms with a working objective
+(third and fourth experiments) sit clearly ahead of the pretrained baseline (0.154 door / 0.023 window)
+on both classes, but none reach `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403 window F1, so
+`ncc`/`propose-retrieve` remain the floor-plan recommendation. The through-line across all four
+experiments: fine-tuning `owlv2-oneshot` works once the training objective supervises the same
+cross-context comparison the method actually runs at inference, and further, cheap levers on top of
+that fixed objective move the numbers in real but class-asymmetric ways worth measuring individually
+rather than assuming a shared direction.
 
 ## Why this was tried
 
@@ -96,7 +102,8 @@ method config and tuning grid — the only difference between rows is which ONNX
 | headonly (classification) | 0.034 | 0.421 | 0.062 | 0.048 | 0.464 | 0.087 |
 | full (classification) | 0.022 | 0.343 | 0.041 | 0.045 | 0.481 | 0.083 |
 | headonly (contrastive) | 0.006 | 0.086 | 0.011 | 0.005 | 0.090 | 0.010 |
-| headonly (contrastive-crop) | 0.261 | 0.785 | 0.391 | 0.138 | 0.674 | **0.229** |
+| headonly (contrastive-crop) | 0.261 | 0.785 | 0.391 | 0.138 | 0.674 | 0.229 |
+| headonly (contrastive-crop-v2) | 0.299 | 0.785 | **0.433** | 0.151 | 0.773 | **0.253** |
 
 **Windows** (`floorplans-window`, test, 28/28 plans scored in every arm):
 
@@ -106,18 +113,21 @@ method config and tuning grid — the only difference between rows is which ONNX
 | headonly (classification) | 0.014 | 0.346 | 0.027 | 0.015 | 0.353 | **0.028** |
 | full (classification) | 0.005 | 0.192 | 0.011 | 0.005 | 0.167 | 0.010 |
 | headonly (contrastive) | 0.005 | 0.090 | 0.009 | 0.005 | 0.096 | 0.009 |
-| headonly (contrastive-crop) | 0.124 | 0.846 | 0.216 | 0.124 | 0.846 | **0.216** |
+| headonly (contrastive-crop) | 0.124 | 0.846 | **0.216** | 0.124 | 0.846 | **0.216** |
+| headonly (contrastive-crop-v2) | 0.116 | 0.846 | 0.204 | 0.116 | 0.846 | 0.204 |
 
 **The crop-context-free classification and contrastive arms all regress below baseline** (doors:
 0.154 → 0.087 → 0.083 → 0.010; windows: 0.023 → 0.028 → 0.010 → 0.009), and the crop-context-free
 contrastive arm regresses furthest on both classes — consistent with the diagnostic finding below: it
 retains far more scene patches than any other checkpoint, so it is not failing to find candidates, it
 is failing to reject almost anything. **`contrastive-crop` reverses this pattern entirely**: door F1
-0.229 tuned / 0.391 default and window F1 0.216 (default and tuned select the same config) are the
-best numbers of any fine-tuned arm by a wide margin, and beat the pretrained baseline on both classes.
-Neither `contrastive-crop` cell reaches `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403 window
-F1 — those remain the methods to ship on this domain — but this is the first fine-tuning arm where the
-answer to "does fine-tuning help this method" is genuinely yes.
+0.229 tuned / 0.391 default and window F1 0.216 (default and tuned select the same config) beat the
+pretrained baseline on both classes. **`contrastive-crop-v2`** (the fourth experiment, below) pushes
+door further to **0.253 tuned / 0.433 default** — the best door numbers of any fine-tuned arm — at a
+small cost on window (0.204, −0.012 vs. `contrastive-crop`). No cell across any arm reaches
+`propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403 window F1 — those remain the methods to ship on
+this domain — but `contrastive-crop`/`contrastive-crop-v2` are the fine-tuning arms where the answer
+to "does fine-tuning help this method" is genuinely yes.
 
 > **Baseline reproduction note.** The pretrained-baseline numbers measured here (0.154 door / 0.023
 > window, tuned) are close to but not bit-identical with the already-committed
@@ -297,6 +307,101 @@ than a same-context proxy.
 `--loss-mode both --supcon-crop-context` is implemented and smoke-tested (sanity-check.md), not
 measured on GPU — the same disclosure as `both`-mode in the second experiment.
 
+## Fourth experiment: crop-context margin + rotation/mirror augmentation
+
+Two further, independently-motivated levers on the `contrastive-crop` recipe, sequenced so the cheap
+one is genuinely measured before spending any GPU time on the second.
+
+### Lever A: crop context-margin padding — tested first, at zero GPU cost
+
+**Hypothesis.** `owlv2-oneshot`'s exemplar crop is sliced from the RAW, tight exemplar box, then
+padded to a square and resized to 960×960 — for a small door/window symbol (tens of pixels), this is
+a large upsample of an isolated symbol on synthetic pad color, possibly missing the surrounding-wall
+context the model sees when matching in the full scene. A margin — growing the crop box by a fraction
+of its own size before slicing, via a new shared `expand_box_with_margin` function used by both this
+inference path and (opt-in) training — might recover some of that context.
+
+This was tested **before any retraining**: a local sweep of `crop_context_margin_frac` (0.0, 0.15,
+0.3, 0.5) against the *already-exported* `contrastive-crop` checkpoint, through the same
+tune-on-val/freeze/report-on-test harness every other arm's numbers came from (a new backward-
+compatible `grids` override on `object_search.eval.tuning.run_domain_tuning` made this possible
+without forking the tuning loop). The margin=0.0 cell reproduces `contrastive-crop`'s already-
+committed tuned F1 exactly on both datasets — the live regression check that the new plumbing is
+trustworthy before trusting any nonzero-margin number.
+
+| margin | door tuned F1 | window tuned F1 |
+|---|---|---|
+| 0.0 | 0.229 | 0.216 |
+| 0.15 | **0.277** | 0.186 |
+| 0.3 | 0.230 | 0.158 |
+| 0.5 | 0.151 | 0.153 |
+
+Door peaks at margin=0.15 (+21%); window degrades monotonically at every nonzero margin (−14% at
+0.15, worse beyond). **No margin beats 0.0 on both classes** — a genuine split result. Plausibly,
+door symbols benefit from surrounding wall context while window symbols are already distinctive
+enough that added context pulls in confusable neighboring geometry instead of useful signal. Per the
+plan's own decision rule, the final GPU arm trains and evaluates at **margin 0.0** and tests the
+second lever alone — margin padding is a real, measured finding in its own right (full sweep in
+`.planning/quick/260808-w8c-.../margin-verdict.md`), just not one that survived the free screen.
+
+### Lever B: rotation/mirror-augmented crop positives in SupCon training
+
+**Hypothesis.** Floor-plan symbols appear in arbitrary orientations, but `contrastive-crop`'s
+crop-context anchor only ever showed the model one canonical-orientation crop per ground-truth box.
+Adding one additional randomly-augmented view (rotate 90/180/270 or mirror, chosen per step) of the
+SAME crop as a second same-class SupCon positive should teach the crop embedding to be
+orientation-robust — reusing the exact "ordinary same-class positive" mechanism the third experiment
+already established (zero changes to `supcon_loss`'s math). This is a different mechanism from the
+report's earlier, already-reverted "rotation/mirror query-embedding augmentation" mitigation
+(inference-time manipulation of the query embedding itself, which zeroed a near-symmetric window's
+only true positive) — this lever augments TRAINING-time SupCon positives, never the shipped inference
+query.
+
+The `contrastive-crop-v2` arm trains `--supcon-crop-augment` with margin left at 0.0 (per lever A's
+verdict), identical hyperparameters otherwise to `contrastive-crop` (headonly, 8 epochs, seed 0,
+batch-size 2, grad-accum 4).
+
+**Does it move the property it targets?** Pooled, instance-level crop/scene agreement, epoch 0
+(before training) vs. epoch 8 (best checkpoint):
+
+| metric | epoch 0 | epoch 8 (best) |
+|---|---|---|
+| `val_crop_scene_agreement.self_score_mean` | +0.479 | **+0.821** |
+| `val_cos_gap.gap_class` | +0.106 | +0.318 |
+| `val_cos_gap.gap_background` | +0.208 | +0.604 |
+
+All three move in the intended direction, comparable in magnitude to `contrastive-crop`'s own
+training curve (self-score +0.490→+0.808; `gap_class` +0.117→+0.344; `gap_background`
++0.248→+0.617) — augmentation does not disturb the mechanism it builds on.
+
+**Does it hold on the independent single-exemplar diagnostic?** Extending 260808-dla's diagnostic
+(same deterministic exemplar, `.planning/quick/260808-w8c-.../self_score_diagnostic.py`) to all five
+checkpoints:
+
+| checkpoint | self_score | threshold (×0.94) | scene patches retained |
+|---|---|---|---|
+| baseline (pretrained) | +0.368 | +0.346 | 970/2482 (39.1%) |
+| headonly (classification) | +0.556 | +0.523 | 1215/2487 (48.9%) |
+| contrastive | −0.200 | −0.188 | 1766/2490 (70.9%) |
+| contrastive-crop | +0.859 | +0.808 | 199/2497 (8.0%) |
+| contrastive-crop-v2 | **+0.896** | **+0.843** | 208/2530 (**8.2%**) |
+
+`contrastive-crop-v2` has the highest self-score and among the tightest retention of all five
+checkpoints — consistent with the pooled result, and with the fourth experiment's precision-leaning
+F1 numbers above.
+
+**Verdict.** Both levers are real findings, not both wins: margin padding helps door and hurts window
+(no margin wins both, so it stays out of the shipped `contrastive-crop-v2` recipe); rotation/mirror
+augmentation pushes door F1 to the best numbers of any fine-tuned arm measured (0.253 tuned / 0.433
+default, vs. `contrastive-crop`'s 0.229 / 0.391) while costing window a small amount (0.204 vs.
+0.216, −5.5%). Neither result is softened or buried: the class asymmetry is the finding, and it
+generalizes the earlier lesson — a lever that helps the crop/scene-agreement mechanism does not
+automatically help both classes equally, because door and window symbols interact differently with
+both surrounding context (lever A) and orientation variety (lever B, which only clearly helped door).
+
+`--loss-mode both --supcon-crop-context --supcon-crop-augment` is implemented and smoke-tested
+(sanity-check.md), not measured on GPU — the same disclosure as `both`-mode in the second experiment.
+
 ## Provenance — classification-loss experiment
 
 The P/R/F1 numbers above were measured against the run trained and evaluated on the original
@@ -372,23 +477,58 @@ destroyed and `vastai show instances` confirmed empty immediately after pull-bac
 The contrastive-crop ONNX artifact passes `_verify_graph`'s local contract check (`class_embeds
 [batch, num_patches, 512]`, `pred_boxes [batch, 3600, 4]`) before being trusted.
 
+## Provenance — crop-margin + rotation-augmentation experiment
+
+The margin sweep (lever A) ran inference-only, zero retraining, against the already-exported
+`contrastive-crop` checkpoint. It was tried first on local CPU and killed after 35+ minutes with the
+first of 8 (margin, dataset) cells still incomplete — each cell re-runs the full 9-entry tuning grid
+over the whole 56-image val split plus tuned/default test evaluation, far more compute than the
+lightweight single-exemplar diagnostics used elsewhere in this report. Moved to a vast.ai RTX 3090
+(`OS_ONNX_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider`), which finished all 8 cells in ~34
+minutes. Full table and verdict: `margin-verdict.md`.
+
+Training `contrastive-crop-v2` (lever B) used a vast.ai RTX 3090, machine id 127879 (a host already
+used successfully for a diagnostic earlier in this quick task's research thread). `pixi run
+fetch-datasets`'s full sweep — which converts every registered eval dataset, not just floor plans —
+stalled repeatedly on an unrelated FSCD-LVIS Hugging Face Hub download timeout unrelated to this
+arm; rather than wait out an indefinite retry loop, `fetch-datasets --only floorplans-door` and
+`--only floorplans-window` converted just the two datasets this run needed (seconds, not the
+multi-GB FSCD-147/FSCD-LVIS downloads), and training/export/evaluation proceeded manually from
+there, reusing the same env setup (`onnxruntime-gpu==1.23.2`, cuDNN/cuBLAS `LD_LIBRARY_PATH`
+discovery) `scripts/gpu_finetune.sh` already establishes. Training took ~43 minutes (8 epochs);
+evaluation ~14 minutes. Pulled back sequentially: two result JSONs, `train_log.json`, and the ONNX
+export, whose sha256 (`d900e8ed6f12cc9d2150a46240aed969382715a4d1c79ab89318ad91b758d985`) was
+verified identical between the box and the local copy. The instance was destroyed and `vastai show
+instances` confirmed empty immediately after pull-back.
+
+| artifact | sha256 (as committed locally) |
+|---|---|
+| `models/owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx` (contrastive-crop-v2, unregistered comparison) | `d900e8ed6f12cc9d2150a46240aed969382715a4d1c79ab89318ad91b758d985` |
+
+The contrastive-crop-v2 ONNX artifact passes `_verify_graph`'s local contract check (`class_embeds
+[batch, num_patches, 512]`, `pred_boxes [batch, 3600, 4]`) before being trusted.
+
 ## Disposition
 
-None of the four fine-tuned arms is adopted as `owlv2-oneshot`'s shipped default.
+None of the five fine-tuned arms is adopted as `owlv2-oneshot`'s shipped default.
 `owlv2-oneshot`'s default model path and behavior are unchanged — every fine-tuned weight set is an
 opt-in research artifact, reachable for one run via
 `OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft.onnx` (headonly, classification),
 `OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_full.onnx` (full, classification),
-`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive.onnx` (headonly, contrastive), or
+`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive.onnx` (headonly, contrastive),
 `OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx` (headonly, contrastive-crop),
-mirroring the existing `OS_ONNX_PROVIDERS` override convention. `ncc` and `propose-retrieve` remain
-this repo's floor-plan recommendation (per `docs/eval/floorplans-findings.md`) — `contrastive-crop`'s
-0.229 door / 0.216 window tuned F1 does not reach `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403
-window F1, so this does not change which method ships on this domain. What it does change: the earlier
-verdict that fine-tuning `owlv2-oneshot`'s heads is foreclosed as a lever is retracted. Fine-tuning
-works, and works by a wide margin over every other measured arm and over the pretrained baseline,
-*once the training objective supervises the same crop-context-vs-scene-context comparison the method
-runs at inference* — the concrete, measured mechanism, not a hedge. `contrastive-crop` is the
-best-measured OWLv2 configuration on this domain and a reasonable opt-in choice for anyone using
-`owlv2-oneshot` on floor-plan-like symbol detection specifically, even though it is not this repo's
-top overall recommendation here.
+or `OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx` (headonly,
+contrastive-crop-v2), mirroring the existing `OS_ONNX_PROVIDERS` override convention. `ncc` and
+`propose-retrieve` remain this repo's floor-plan recommendation (per
+`docs/eval/floorplans-findings.md`) — `contrastive-crop-v2`'s 0.253 door / 0.204 window tuned F1 does
+not reach `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403 window F1, so this does not change which
+method ships on this domain. What it does change: the earlier verdict that fine-tuning
+`owlv2-oneshot`'s heads is foreclosed as a lever is retracted. Fine-tuning works, and works by a wide
+margin over the pretrained baseline, *once the training objective supervises the same
+crop-context-vs-scene-context comparison the method runs at inference* — the concrete, measured
+mechanism, not a hedge. `contrastive-crop-v2` is the best-measured OWLv2 configuration on this domain
+for door detection specifically (0.253 tuned / 0.433 default F1); `contrastive-crop` remains
+marginally better for window (0.216 vs. 0.204) if window is the priority class. Neither is this
+repo's top overall recommendation — `ncc`/`propose-retrieve` are — but both are reasonable opt-in
+choices for anyone using `owlv2-oneshot` on floor-plan-like symbol detection specifically, and the
+choice between the two fine-tuned arms is itself class-dependent rather than a clean either/or.

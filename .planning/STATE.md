@@ -33,22 +33,21 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-08 — Quick task 260808-dla: fixed the crop/scene calibration break 260805-hg1
-diagnosed by adding crop-context anchors to the SupCon pool (built via the SAME query-encoding
-functions owlv2-oneshot's inference path uses, not a reimplementation). Trained one headonly arm on a
-vast.ai RTX 3090, measured on the same 28-plan test splits. Result: the fix works. Pooled crop/scene
-self-score moves from +0.49 (epoch 0) to +0.81 (best epoch), never dipping negative; an independent
-fresh exemplar confirms the pattern (contrastive-crop self_score +0.86, the highest and
-tightest-retaining of all four checkpoints, vs -0.20 for the crop-context-free arm). F1 tracks it:
-door 0.229 tuned / 0.391 default and window 0.216 — the best numbers of any fine-tuned arm across both
-quick tasks, 2-39x every other fine-tuned arm and clearly ahead of the pretrained baseline (0.154 /
-0.023). Still short of propose-retrieve (0.459 door F1) / ncc (0.403 window F1), so the floor-plan
-recommendation is unchanged, but 260805-hg1's "fine-tuning is foreclosed" verdict is RETRACTED:
-fine-tuning owlv2-oneshot works once the training objective supervises the exact crop-vs-scene
-comparison the method runs at inference. Two vast.ai instances discarded unused this run (one went
-unreachable mid-training, one resolved to a documented-bad host's exact IP); a third trained cleanly.
-Full suite green (847 passed, 93.87% coverage). contrastive-crop remains opt-in, not the shipped
-default.
+Last activity: 2026-08-09 — Quick task 260808-w8c: two further, independently-motivated levers on
+260808-dla's contrastive-crop recipe, sequenced so the cheap one was measured before any GPU spend.
+Lever A (crop context-margin padding) was tested inference-only against the already-trained checkpoint
+(zero retraining, moved to a vast.ai GPU after a local CPU sweep proved too slow): helps door at
+margin=0.15 (+21%) but hurts window at every margin tried, so no margin beats 0.0 on both classes and
+none was carried into training. Lever B (rotation/mirror-augmented SupCon crop positives) then trained
+as contrastive-crop-v2: door F1 improves to 0.253 tuned / 0.433 default (best door numbers of any
+fine-tuned arm, vs 0.229/0.391 for contrastive-crop), window dips slightly to 0.204 (vs 0.216). The
+crop/scene self-score mechanism holds and slightly improves (independent single-exemplar diagnostic:
++0.896 vs +0.859, the highest of five checkpoints). Neither arm reaches propose-retrieve (0.459 door
+F1) / ncc (0.403 window F1), so the floor-plan recommendation is unchanged. A local fetch-datasets
+sweep stalled on an unrelated HF Hub timeout (FSCD-LVIS); worked around via --only scoping to just the
+two floor-plans datasets needed. Full suite green (859 passed, 93.89% coverage). contrastive-crop-v2
+remains opt-in, not the shipped default; the choice between contrastive-crop and contrastive-crop-v2
+is itself class-dependent (v2 better for door, v1 marginally better for window).
 
 Progress: [█████████░] 88%
 
@@ -62,6 +61,7 @@ Progress: [█████████░] 88%
 | 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
 | 260805-hg1 | SupCon contrastive loss for OWLv2 floor-plans fine-tune — sharper negative result, diagnosed crop/scene calibration break | 2026-08-08 | (pending) | [260805-hg1](./quick/260805-hg1-add-a-supervised-contrastive-loss-varian/) |
 | 260808-dla | Crop-context SupCon fix — closes the calibration break, best fine-tuned OWLv2 arm measured (door F1 0.229, window F1 0.216) | 2026-08-08 | (pending) | [260808-dla](./quick/260808-dla-add-crop-context-supervision-to-the-owlv/) |
+| 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |
 
 ## Performance Metrics
 
