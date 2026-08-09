@@ -195,6 +195,55 @@ signal computed at the accumulation boundary.
 A degenerate ground-truth box never crashes training: ``_crop_context_rows`` retries a different
 box (up to 3 attempts) when ``boxes_to_pixels`` rejects one after pixel rounding, then skips that
 image's crop-context anchor for the step and logs at DEBUG -- never an exception, never a NaN.
+
+Crop-margin + rotation/mirror augmentation (quick task 260808-w8c)
+-------------------------------------------------------------------
+Two further, independently-motivated levers on the ``contrastive-crop`` recipe above, sequenced so
+the cheap one (a local, no-GPU inference sweep against the already-exported checkpoint -- see
+``docs/reports/owlv2-floorplans-finetune.md``'s fourth experiment) is measured before any GPU money
+funds the second.
+
+**D-w8c-01 -- crop context-margin is ONE shared, model-free function,
+``expand_box_with_margin`` (``search/owlv2_oneshot.py``), used by BOTH the inference-time query
+crop and (opt-in, via ``supcon_crop_margin_frac``) this training-time crop-context anchor.** Not
+two independent implementations -- the same fidelity guarantee D-dla-04 gave query-patch
+selection.
+
+**D-w8c-02 -- the margin is applied to the crop-context anchor's ALREADY-VALIDATED pixel box, in
+``_crop_context_rows``, independent of the augmentation flag.** Default 0.0 leaves the anchor
+exactly as tight as 260808-dla measured it.
+
+**D-w8c-06 -- ``--supcon-crop-augment`` adds exactly ONE additional same-class SupCon positive per
+training image per micro-batch pass -- not a rotation bank.** A rotated (90/180/270) or mirrored
+(horizontal/vertical) view of the SAME crop, SAME ground-truth box, SAME label as the existing
+crop-context anchor (D-dla-01's "ordinary positive" rule, zero changes to ``supcon_loss``'s math).
+Ignored (a no-op) when ``supcon_crop_context`` is off.
+
+**D-w8c-07 -- the augmentation choice is drawn from the SAME seeded ``rng`` used for crop-context
+box selection, but ONLY AFTER the per-image box-selection loop has consumed its draws for the
+whole micro-batch.** A ``--supcon-crop-augment``-off run's ``rng`` stream -- and therefore its
+crop-context box selection and background sampling -- is unaffected by this task's presence in the
+file, so ``--supcon-crop-context`` alone continues to reproduce 260808-dla's already-committed
+numbers byte-for-byte (verified by the preflight/postflight fixture diff in
+``.planning/quick/260808-w8c-.../preflight-contrastive-crop-train-log.json``).
+
+**D-w8c-08 -- augmentation is applied to the RAW crop pixels (before ``owlv2_preprocess_tensor``),
+on the SAME already-validated pixel box the base crop-context anchor uses, and is batched into the
+SAME single ``_forward_batch`` call as the base crop anchors (base rows first, augmented rows
+appended after) rather than a second forward pass.** No new degenerate-box exposure; the extra
+compute is one crop-sized forward per image, not two.
+
+**D-w8c-09 -- the augmented anchor does NOT feed ``crop_scene_agreement``'s diagnostic pool.**
+D-dla-06's diagnostic stays exactly the property it was defined to measure -- the CANONICAL crop
+vs. its matched scene patch -- so 260808-dla's already-reported numbers and this task's own
+crop-context-alone regression check remain comparable. The augmented view is purely an additional
+SupCon training signal.
+
+This is a DIFFERENT mechanism from an earlier, already-reverted mitigation described in
+``docs/reports/owlv2-floorplans-finetune.md``'s "Why this was tried" section: "rotation/mirror
+query-embedding augmentation," which mutated the INFERENCE-time query embedding itself and zeroed
+a near-symmetric window's only true positive. D-w8c-06 augments TRAINING-time SupCon positives,
+never the shipped inference query -- the two must not be conflated.
 """
 
 from __future__ import annotations
@@ -208,6 +257,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 import torch
 from loguru import logger
 from transformers import Owlv2ForObjectDetection, Owlv2Processor
@@ -226,6 +276,7 @@ from object_search.inference.owlv2 import owlv2_preprocess_tensor  # noqa: E402
 from object_search.schemas import BBox  # noqa: E402
 from object_search.search.owlv2_oneshot import (  # noqa: E402
     boxes_to_pixels,
+    expand_box_with_margin,
     select_query_patch_index,
 )
 from object_search.train.owlv2_targets import (  # noqa: E402
@@ -465,19 +516,59 @@ def _load_pixel_values(image_path: Path) -> torch.Tensor:
     return torch.from_numpy(tensor)
 
 
-def _load_crop_pixel_values(image_path: Path, box: BBox) -> torch.Tensor:
-    """Read one scene PNG, crop it to ``box`` in RAW pixel space, and preprocess -> ``[1,3,960,960]``.
+def _read_crop_pixels(image_path: Path, box: BBox) -> npt.NDArray[np.uint8]:
+    """Read one scene PNG and slice it to ``box`` in RAW pixel space -- BGR ``uint8``, un-preprocessed.
 
-    Mirrors :func:`_load_pixel_values` exactly, but on the cropped sub-array rather than the whole
-    image -- and mirrors ``owlv2-oneshot``'s OWN inference-time exemplar-crop encode
-    (``search/owlv2_oneshot.py``: ``image[crop_box.y:y2, crop_box.x:x2]`` then
-    ``owlv2_preprocess_tensor``) line for line (D-dla-04, verified-fact 2): the crop gets its own
-    independent pad-to-square-then-resize based on the CROP's own aspect ratio, never the scene's.
+    Mirrors ``owlv2-oneshot``'s OWN inference-time exemplar-crop encode (``search/owlv2_oneshot.py``:
+    ``image[crop_box.y:y2, crop_box.x:x2]``) line for line (D-dla-04, verified-fact 2). Split out
+    from the old ``_load_crop_pixel_values`` so the raw-pixel step is reusable by both the base and
+    the (opt-in) augmented crop-context anchor (D-w8c-08).
     """
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image is None:
         raise SystemExit(f"could not read {image_path}")
-    crop = image[box.y : box.y2, box.x : box.x2]
+    return np.ascontiguousarray(image[box.y : box.y2, box.x : box.x2], dtype=np.uint8)
+
+
+def _load_crop_pixel_values(image_path: Path, box: BBox) -> torch.Tensor:
+    """Read one scene PNG, crop it to ``box`` in RAW pixel space, and preprocess -> ``[1,3,960,960]``.
+
+    Mirrors :func:`_load_pixel_values` exactly, but on the cropped sub-array rather than the whole
+    image: the crop gets its own independent pad-to-square-then-resize based on the CROP's own
+    aspect ratio, never the scene's.
+    """
+    tensor, _side = owlv2_preprocess_tensor(_read_crop_pixels(image_path, box))
+    return torch.from_numpy(tensor)
+
+
+_AUGMENT_CHOICES = 5
+
+
+def _augment_crop_pixels(crop: npt.NDArray[np.uint8], choice: int) -> npt.NDArray[np.uint8]:
+    """Rotate or mirror a raw BGR crop (D-w8c-08): 3 rotations + 2 mirrors, chosen by ``choice``.
+
+    ``np.rot90``/reversed-slice mirrors return NON-contiguous views, and ``owlv2_preprocess_tensor``
+    calls ``cv2.cvtColor`` first, which requires a contiguous array (verified_fact 5) -- always
+    ``np.ascontiguousarray`` the result before preprocessing.
+    """
+    if choice == 0:
+        transformed = np.rot90(crop, k=1)
+    elif choice == 1:
+        transformed = np.rot90(crop, k=2)
+    elif choice == 2:
+        transformed = np.rot90(crop, k=3)
+    elif choice == 3:
+        transformed = crop[:, ::-1, :]
+    elif choice == 4:
+        transformed = crop[::-1, :, :]
+    else:
+        raise ValueError(f"choice must be in [0, {_AUGMENT_CHOICES}), got {choice}")
+    return np.ascontiguousarray(transformed, dtype=np.uint8)
+
+
+def _load_augmented_crop_pixel_values(image_path: Path, box: BBox, choice: int) -> torch.Tensor:
+    """The SAME crop as :func:`_load_crop_pixel_values`, rotated/mirrored per ``choice``, preprocessed."""
+    crop = _augment_crop_pixels(_read_crop_pixels(image_path, box), choice)
     tensor, _side = owlv2_preprocess_tensor(crop)
     return torch.from_numpy(tensor)
 
@@ -737,10 +828,23 @@ def _crop_context_rows(
     -- on a DETACHED NumPy view, and the TORCH row at that index is gathered (keeping the gradient
     path into ``class_head.dense0``) and returned as an ordinary same-class positive.
 
-    Also returns the DETACHED ``(crop, scene)`` diagnostic pair for each successfully-built anchor,
-    by looking up the box's matched scene patch in the ALREADY-COMPUTED Hungarian ``indices`` (no
-    second matcher call, D-dla-06) -- silently skipping the diagnostic pairing (never the anchor
-    itself) if the Hungarian solve did not happen to match that particular box this step.
+    When ``config.supcon_crop_margin_frac > 0``, the validated pixel box is grown by
+    :func:`~object_search.search.owlv2_oneshot.expand_box_with_margin` -- the SAME function
+    ``owlv2-oneshot``'s inference crop uses (D-w8c-01) -- BEFORE cropping (D-w8c-02).
+
+    When ``config.supcon_crop_augment`` is set, AFTER this per-image box-selection loop has
+    consumed its ``rng`` draws for the whole micro-batch (D-w8c-07, so a flag-off run's rng stream
+    is unaffected), one additional rotated/mirrored view of each valid crop is built
+    (:func:`_augment_crop_pixels`) and batched into the SAME ``_forward_batch`` call, base rows
+    first, augmented rows appended after (D-w8c-08). Each augmented row is an ordinary same-class
+    positive carrying the SAME label as its base sibling (D-w8c-06) and is excluded from the
+    ``crop_scene_agreement`` diagnostic pool (D-w8c-09).
+
+    Also returns the DETACHED ``(crop, scene)`` diagnostic pair for each successfully-built BASE
+    anchor, by looking up the box's matched scene patch in the ALREADY-COMPUTED Hungarian
+    ``indices`` (no second matcher call, D-dla-06) -- silently skipping the diagnostic pairing
+    (never the anchor itself) if the Hungarian solve did not happen to match that particular box
+    this step.
 
     Returns:
         ``(anchor_rows, label_rows, diag_crop_rows, diag_scene_rows)`` -- four lists of tensors for
@@ -765,6 +869,10 @@ def _crop_context_rows(
             box_idx = _pick_crop_box_index(target, rng)
             candidate = boxes_to_pixels(target.boxes[box_idx : box_idx + 1], orig_w, orig_h)[0]
             if candidate is not None:
+                if runtime.config.supcon_crop_margin_frac > 0.0:
+                    candidate = expand_box_with_margin(
+                        candidate, runtime.config.supcon_crop_margin_frac, orig_w, orig_h
+                    )
                 pixel_box, chosen_box_idx = candidate, box_idx
                 break
             logger.debug(
@@ -789,9 +897,18 @@ def _crop_context_rows(
     if not crop_targets:
         return anchor_rows, label_rows, diag_crop_rows, diag_scene_rows
 
-    crop_pixel_values = torch.cat(
-        [_load_crop_pixel_values(path, box) for _, _, path, box in crop_targets]
-    ).to(runtime.device)
+    base_tensors = [_load_crop_pixel_values(path, box) for _, _, path, box in crop_targets]
+    augment_choices: list[int] = []
+    if runtime.config.supcon_crop_augment:
+        augment_choices = [int(rng.integers(0, _AUGMENT_CHOICES)) for _ in crop_targets]
+        augmented_tensors = [
+            _load_augmented_crop_pixel_values(path, box, choice)
+            for (_, _, path, box), choice in zip(crop_targets, augment_choices, strict=True)
+        ]
+        crop_pixel_values = torch.cat(base_tensors + augmented_tensors).to(runtime.device)
+    else:
+        crop_pixel_values = torch.cat(base_tensors).to(runtime.device)
+
     with torch.autocast(
         device_type=runtime.device.type, dtype=torch.bfloat16, enabled=runtime.use_bf16
     ):
@@ -801,13 +918,17 @@ def _crop_context_rows(
     crop_class_embeds = crop_class_embeds.float()
     crop_pred_boxes_np = crop_pred_boxes.float().detach().cpu().numpy()
 
-    for row, (image_index, box_idx, _path, _box) in enumerate(crop_targets):
+    def _select_row(row: int) -> torch.Tensor:
         selected = select_query_patch_index(
             crop_class_embeds[row].detach().cpu().numpy(),
             crop_pred_boxes_np[row],
             runtime.config.supcon_query_iou_frac,
         )
-        crop_row = crop_class_embeds[row, selected]  # torch, differentiable
+        return crop_class_embeds[row, selected]  # torch, differentiable
+
+    n_base = len(crop_targets)
+    for row, (image_index, box_idx, _path, _box) in enumerate(crop_targets):
+        crop_row = _select_row(row)
 
         target = batch[image_index]
         anchor_rows.append(crop_row.unsqueeze(0))
@@ -825,6 +946,20 @@ def _crop_context_rows(
             scene_patch_idx = int(source_idx[matched][0].item())
             diag_crop_rows.append(crop_row.detach().unsqueeze(0))
             diag_scene_rows.append(class_embeds[image_index, scene_patch_idx].detach().unsqueeze(0))
+
+    if augment_choices:
+        for offset, (image_index, box_idx, _path, _box) in enumerate(crop_targets):
+            augmented_row = _select_row(n_base + offset)
+            target = batch[image_index]
+            anchor_rows.append(augmented_row.unsqueeze(0))
+            label_rows.append(
+                torch.tensor(
+                    [int(target.class_labels[box_idx])],
+                    dtype=torch.int64,
+                    device=class_embeds.device,
+                )
+            )
+            # D-w8c-09: the augmented view is excluded from crop_scene_agreement's diagnostic pool.
 
     return anchor_rows, label_rows, diag_crop_rows, diag_scene_rows
 
@@ -1370,6 +1505,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "inference does (D-dla-05). Only read when --supcon-crop-context is set.",
     )
     parser.add_argument(
+        "--supcon-crop-margin-frac",
+        type=float,
+        default=defaults.supcon_crop_margin_frac,
+        help="Quick task 260808-w8c: grow the crop-context anchor's ground-truth box by this "
+        "fraction of its own size before cropping, via the SAME expand_box_with_margin "
+        "owlv2-oneshot's inference crop uses (D-w8c-01/02). Default 0.0 leaves the crop-context "
+        "anchor exactly as tight as 260808-dla measured it. Only read when --supcon-crop-context "
+        "is set.",
+    )
+    parser.add_argument(
+        "--supcon-crop-augment",
+        action="store_true",
+        help="Quick task 260808-w8c: add ONE additional rotated/mirrored view of the SAME "
+        "crop-context anchor as a second same-class SupCon positive per image (D-w8c-06/07/08). "
+        "Opt-in, layered on --supcon-crop-context; ignored when that is off. Default off leaves "
+        "the already-measured contrastive-crop arm byte-identical to before this flag existed.",
+    )
+    parser.add_argument(
         "--self-check",
         action="store_true",
         help="Assert the torch SupCon mirror agrees with the NumPy specification in "
@@ -1413,6 +1566,8 @@ def _config_from_args(args: argparse.Namespace) -> FinetuneConfig:
         supcon_background_negatives=args.supcon_background_negatives,
         supcon_crop_context=args.supcon_crop_context,
         supcon_query_iou_frac=args.supcon_query_iou_frac,
+        supcon_crop_margin_frac=args.supcon_crop_margin_frac,
+        supcon_crop_augment=args.supcon_crop_augment,
         max_steps=args.max_steps,
         limit_images=args.limit_images,
     )

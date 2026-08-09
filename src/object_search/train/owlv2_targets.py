@@ -239,6 +239,29 @@ class FinetuneConfig(BaseModel):
             "the way inference does; only read when supcon_crop_context is True."
         ),
     )
+    supcon_crop_margin_frac: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Quick task 260808-w8c: grow the crop-context anchor's ground-truth box by this "
+            "fraction of its own size (clamped to the scene) before cropping, via the SAME "
+            "expand_box_with_margin owlv2-oneshot's inference crop uses. Default 0.0 leaves the "
+            "crop-context anchor exactly as tight as 260808-dla measured it; only read when "
+            "supcon_crop_context is True."
+        ),
+    )
+    supcon_crop_augment: bool = Field(
+        default=False,
+        description=(
+            "Quick task 260808-w8c: add ONE additional rotated (90/180/270) or mirrored "
+            "(horizontal/vertical) view of the SAME crop-context anchor as a second same-class "
+            "SupCon positive, teaching the crop embedding orientation robustness. Opt-in, layered "
+            "on supcon_crop_context (ignored, logged at DEBUG, when that is False): default False "
+            "leaves the already-measured `contrastive-crop` arm byte-identical to before this "
+            "flag existed."
+        ),
+    )
     max_steps: int | None = Field(
         default=None,
         ge=1,

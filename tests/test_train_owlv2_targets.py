@@ -293,6 +293,18 @@ def test_supcon_crop_context_accepts_both_bools(value: bool) -> None:
     assert FinetuneConfig(supcon_crop_context=value).supcon_crop_context is value
 
 
+def test_the_crop_margin_and_augment_defaults_are_off() -> None:
+    """D-w8c-02/06: both new fields default to today's crop-context-alone behavior."""
+    config = FinetuneConfig()
+    assert config.supcon_crop_margin_frac == pytest.approx(0.0)
+    assert config.supcon_crop_augment is False
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_supcon_crop_augment_accepts_both_bools(value: bool) -> None:
+    assert FinetuneConfig(supcon_crop_augment=value).supcon_crop_augment is value
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -315,6 +327,8 @@ def test_supcon_crop_context_accepts_both_bools(value: bool) -> None:
         ("supcon_background_negatives", -1),
         ("supcon_query_iou_frac", -0.01),
         ("supcon_query_iou_frac", 1.01),
+        ("supcon_crop_margin_frac", -0.01),
+        ("supcon_crop_margin_frac", 1.01),
     ],
 )
 def test_finetune_config_rejects_out_of_range_values(field: str, value: float | str) -> None:
