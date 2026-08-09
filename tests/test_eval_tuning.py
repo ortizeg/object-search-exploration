@@ -82,6 +82,48 @@ def test_run_domain_tuning_reports_tuned_and_default_on_test(tmp_path: Path) -> 
     assert "val_f1" in entry
 
 
+def _drop_latency(report: dict[str, object]) -> dict[str, object]:
+    """Strip the non-deterministic `latency_ms` timing block before an equality comparison."""
+    methods = [dict(m) for m in report["methods"]]  # type: ignore[index]
+    for method in methods:
+        for key in ("tuned_test", "default_test"):
+            block = dict(method[key])
+            block.pop("latency_ms", None)
+            method[key] = block
+    return {**report, "methods": methods}
+
+
+def test_run_domain_tuning_without_grids_is_unchanged(tmp_path: Path) -> None:
+    """The new `grids` parameter's default (`None`) reproduces today's exact code path."""
+    base = _stage(tmp_path)
+    with_grids_none = run_domain_tuning(
+        "floorplans-door", base, methods=("ncc",), manifest_root=base, out=None, grids=None
+    )
+    without_grids_kwarg = run_domain_tuning(
+        "floorplans-door", base, methods=("ncc",), manifest_root=base, out=None
+    )
+    assert _drop_latency(with_grids_none) == _drop_latency(without_grids_kwarg)
+
+
+def test_run_domain_tuning_grids_override_replaces_the_builtin_grid_for_one_method(
+    tmp_path: Path,
+) -> None:
+    """A `grids` override for one method reaches `tune_method` -- not silently ignored."""
+    base = _stage(tmp_path)
+    single_entry = {"scales": (1.0,), "retain_frac": 0.5, "nms_iou": 0.3}
+    report = run_domain_tuning(
+        "floorplans-door",
+        base,
+        methods=("ncc",),
+        manifest_root=base,
+        out=None,
+        grids={"ncc": [single_entry]},
+    )
+    (entry,) = report["methods"]
+    # Only one candidate in the grid -> it is deterministically the argmax.
+    assert entry["tuned_overrides"] == single_entry
+
+
 def test_run_domain_tuning_writes_report_when_out_set(tmp_path: Path) -> None:
     base = _stage(tmp_path)
     out = tmp_path / "tuning.json"

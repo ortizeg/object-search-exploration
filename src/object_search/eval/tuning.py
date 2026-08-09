@@ -249,16 +249,22 @@ def _tune_methods_at_count(
     eval_split: str,
     manifest_root: Path | None,
     exemplar_selection: ExemplarSelection,
+    grids: Mapping[str, Sequence[dict[str, object]]] | None = None,
 ) -> list[dict[str, Any]]:
     """The per-method tune-on-val, freeze, report-tuned-vs-default-on-test loop at ONE count.
 
     Factored out so :func:`run_domain_tuning` can call it once (the byte-identical single-count
     report) or once per requested count (the additive nested multi-count report) without
     duplicating the loop.
+
+    ``grids``, when given, overrides :data:`_TUNING_GRIDS` for the named method(s) only (a method
+    absent from ``grids`` still uses its built-in grid). ``None`` (every call site before this
+    parameter existed) reproduces today's exact behavior byte-for-byte.
     """
     per_method: list[dict[str, Any]] = []
     for method in methods:
         spec = get_method(method)
+        method_grid = grids.get(method) if grids is not None else None
         tuned = tune_method(
             method,
             dataset,
@@ -268,6 +274,7 @@ def _tune_methods_at_count(
             seed=seed,
             manifest_root=manifest_root,
             exemplar_selection=exemplar_selection,
+            grid=method_grid,
         )
         best = tuned["best"]
         tuned_config = spec.config_model(**best["overrides"]) if best else None
@@ -332,6 +339,7 @@ def run_domain_tuning(
     manifest_root: Path | None = None,
     exemplar_selection: ExemplarSelection = "seeded-random",
     exemplar_counts: Sequence[int] | None = None,
+    grids: Mapping[str, Sequence[dict[str, object]]] | None = None,
     out: str | None = "docs/benchmark/floorplans-tuning-results.json",
 ) -> dict[str, Any]:
     """Tune every method on ``tune_split`` and report tuned-vs-default on ``eval_split``.
@@ -364,6 +372,11 @@ def run_domain_tuning(
             median-area box).
         exemplar_counts: Optional sequence of counts to nest per-count blocks for; ``None`` keeps
             the flat single-count report.
+        grids: Optional per-method grid override, keyed by method name. A method absent from this
+            mapping still uses its built-in :data:`_TUNING_GRIDS` entry. ``None`` (every call site
+            before this parameter existed) reproduces today's exact behavior byte-for-byte -- this
+            exists so a caller can sweep an extra config field (e.g. a fine-tune's crop-margin
+            fraction) crossed with a method's existing grid without forking the tuning loop.
         out: Where to write the JSON report (resolved against the repo root when relative). ``None``
             skips the write and only returns the report.
 
@@ -388,6 +401,7 @@ def run_domain_tuning(
             eval_split=eval_split,
             manifest_root=manifest_root,
             exemplar_selection=exemplar_selection,
+            grids=grids,
         )
 
     report: dict[str, Any] = {
