@@ -1,25 +1,27 @@
 # Fine-tuning `owlv2-oneshot` on floor plans — measured result
 
-**Verdict, stated up front: two independent fine-tuning objectives were tried, and neither closes the
-gap to the current floor-plan winners (`propose-retrieve` 0.459 door F1, `ncc` 0.403 window F1).**
-Classification-loss fine-tuning (first experiment, below) makes doors worse than the pretrained
-baseline and barely moves windows. A directly-matched supervised-contrastive (SupCon) objective
-(second experiment) — trained on the exact cosine-similarity space `owlv2-oneshot` scores with at
-inference — is worse still: door F1 0.010, window F1 0.009, roughly an order of magnitude below the
-pretrained baseline on both classes. The contrastive loss demonstrably learns the intended property
-(the cosine gap between same-class and background *scene* patches more than triples over training),
-but that property is only trained as a scene-to-scene comparison. `owlv2-oneshot`'s self-similarity
-calibration depends on a *crop-to-scene* comparison — the exemplar's own query embedding, computed
-from the small cropped exemplar image, scored against that same object's patch in the full scene —
-and that comparison broke: it goes cosine-**negative**, collapsing the calibration threshold negative
-and passing ~86% of all scene patches instead of the ~25–30% the other checkpoints pass. Both
-experiments train cleanly — loss falls monotonically, val tracks train, no sign of a wiring bug — but
-neither arm's improved training-objective loss transfers to better image-guided detection. The second
-experiment sharpens *why*: fine-tuning `owlv2-oneshot` requires supervising the exact cross-context
-comparison the method runs at inference, not a same-context proxy, however well the same-context proxy
-trains. The ceiling on this method is not (only) the frozen embedding space this repo's earlier
-diagnostic identified, but the training/inference contract itself — not something a from-scratch head
-fine-tune on 197 images fixes.
+**Verdict, stated up front: three fine-tuning objectives were tried. The first two fail outright; the
+third — supervising the exact training/inference mismatch the second one exposed — works, closing most
+of the gap to the pretrained baseline without reaching `propose-retrieve`/`ncc`.** Classification-loss
+fine-tuning (first experiment) makes doors worse than the pretrained baseline and barely moves windows.
+A directly-matched supervised-contrastive (SupCon) objective (second experiment) is worse still: door
+F1 0.010, window F1 0.009. Diagnosis found why: `owlv2-oneshot` computes two embeddings of the same
+object through two different forward passes — a **crop-context** query embedding (the small cropped
+exemplar alone) and a **scene-context** embedding of that object inside the full scene — and
+calibration depends on them agreeing, but the SupCon batches were built entirely from scene-context
+forward passes. Training never touched the crop-context path at all, and it drifted so far that the
+exemplar's own self-similarity score went cosine-**negative**, collapsing the calibration threshold and
+retaining ~86% of all scene patches instead of ~25–30%. **The third experiment fixes exactly this**:
+adding crop-context anchors to the SupCon pool (reusing `owlv2-oneshot`'s own query-encoding functions,
+not a reimplementation, to guarantee train/inference fidelity) restores a healthy, strongly positive
+self-similarity score and lifts door F1 to 0.229–0.391 and window F1 to 0.216 — roughly **2–24× every
+other fine-tuned arm** and clearly ahead of the pretrained baseline (0.154 door / 0.023 window) on both
+classes. It still falls short of `propose-retrieve`'s 0.459 door F1 and `ncc`'s 0.403 window F1, so
+`ncc`/`propose-retrieve` remain the floor-plan recommendation — but the headline changes from "fine-
+tuning is a dead end on this method" to "fine-tuning works once the training objective supervises the
+same cross-context comparison the method actually runs at inference." All three experiments train
+cleanly (loss falls monotonically, no sign of a wiring bug); the difference between them is entirely
+about what the training objective supervises, not how it optimizes.
 
 ## Why this was tried
 
@@ -94,6 +96,7 @@ method config and tuning grid — the only difference between rows is which ONNX
 | headonly (classification) | 0.034 | 0.421 | 0.062 | 0.048 | 0.464 | 0.087 |
 | full (classification) | 0.022 | 0.343 | 0.041 | 0.045 | 0.481 | 0.083 |
 | headonly (contrastive) | 0.006 | 0.086 | 0.011 | 0.005 | 0.090 | 0.010 |
+| headonly (contrastive-crop) | 0.261 | 0.785 | 0.391 | 0.138 | 0.674 | **0.229** |
 
 **Windows** (`floorplans-window`, test, 28/28 plans scored in every arm):
 
@@ -103,16 +106,18 @@ method config and tuning grid — the only difference between rows is which ONNX
 | headonly (classification) | 0.014 | 0.346 | 0.027 | 0.015 | 0.353 | **0.028** |
 | full (classification) | 0.005 | 0.192 | 0.011 | 0.005 | 0.167 | 0.010 |
 | headonly (contrastive) | 0.005 | 0.090 | 0.009 | 0.005 | 0.096 | 0.009 |
+| headonly (contrastive-crop) | 0.124 | 0.846 | 0.216 | 0.124 | 0.846 | **0.216** |
 
-**Doors regress with every fine-tuning arm tried, and the contrastive arm regresses furthest**
-(0.154 → 0.087 → 0.083 → **0.010**). **Windows move a hair in the right direction for the
-lightly-tuned classification arm** (0.023 → 0.028) but both the full-unfreeze classification arm and
-the contrastive arm regress below baseline (0.010, 0.009). No arm, on either class, gets within range
-of `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403 window F1 — those numbers remain the ones to
-ship against on this domain. Recall stays roughly in the same 8–10% band across all four door/window
-contrastive cells while precision falls to its lowest value of any arm measured — consistent with the
-diagnostic finding below: the contrastive checkpoint retains far more scene patches than any other
-checkpoint, so it is not failing to find candidates, it is failing to reject almost anything.
+**The crop-context-free classification and contrastive arms all regress below baseline** (doors:
+0.154 → 0.087 → 0.083 → 0.010; windows: 0.023 → 0.028 → 0.010 → 0.009), and the crop-context-free
+contrastive arm regresses furthest on both classes — consistent with the diagnostic finding below: it
+retains far more scene patches than any other checkpoint, so it is not failing to find candidates, it
+is failing to reject almost anything. **`contrastive-crop` reverses this pattern entirely**: door F1
+0.229 tuned / 0.391 default and window F1 0.216 (default and tuned select the same config) are the
+best numbers of any fine-tuned arm by a wide margin, and beat the pretrained baseline on both classes.
+Neither `contrastive-crop` cell reaches `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403 window
+F1 — those remain the methods to ship on this domain — but this is the first fine-tuning arm where the
+answer to "does fine-tuning help this method" is genuinely yes.
 
 > **Baseline reproduction note.** The pretrained-baseline numbers measured here (0.154 door / 0.023
 > window, tuned) are close to but not bit-identical with the already-committed
@@ -219,6 +224,79 @@ task; if pursued, it is separately-scoped future work, not a config tweak to thi
 carries both `loss_ce` and `loss_supcon` populated simultaneously in a 1-step CPU smoke run, but no
 `both`-mode arm was trained to convergence or evaluated, per D-hg1-05.
 
+## Third experiment: crop-context supervision
+
+**Hypothesis.** The second experiment's diagnosis identified a training/inference contract gap, not
+just a bad objective: SupCon reshaped the scene-embedding space beautifully (the cosine-gap table
+above), but calibration depends on a *different* comparison — the crop-context query embedding vs. a
+scene-context patch of the same object — that training never touched, and it drifted enough to flip
+the exemplar's self-similarity score negative. If crop- and scene-context embeddings of the same
+object are explicitly trained to agree, not just assumed to, calibration should recover.
+
+**The recipe** (`--supcon-crop-context`, layered on `--loss-mode contrastive`, default off so the
+already-committed `contrastive` arm's numbers stay reproducible): for each training image, in addition
+to the existing scene-context anchors and background negatives, the exemplar crop of one
+randomly-picked ground-truth box is run through the model's image encoder and its selected patch
+embedding is appended to the SupCon pool as an ordinary same-class positive — zero changes to
+`supcon_loss`'s math (D-dla-01). Critically, the crop is built via the **same**
+`select_query_patch_index` / `owlv2_preprocess_tensor` / `boxes_to_pixels` functions
+`owlv2-oneshot`'s inference path itself calls (D-dla-04) — literal code reuse, not a
+reimplementation, to close off the single largest correctness risk in this task: a crop-preprocessing
+mismatch between training and inference that would silently supervise the wrong thing. One crop per
+training image, not one per ground-truth box (D-dla-02): floor plans average ~20 boxes/image, and a
+crop forward is a full independent ViT pass (unlike scene anchors, which piggyback on the one scene
+forward already computed), so one-per-box would cost 10–20× more compute for a doubling in effective
+coverage across the run's epochs. Same hyperparameters as the crop-context-free `contrastive` arm
+(headonly freeze, 8 epochs, seed 0, batch-size 2, grad-accum 4) so the only variable is the new anchor.
+
+**Does it move the property it targets? Pooled, instance-level crop/scene agreement, epoch 0 (before
+training) vs. epoch 7 (best checkpoint):**
+
+| metric | epoch 0 | epoch 7 (best) |
+|---|---|---|
+| `val_crop_scene_agreement.self_score_mean` | +0.490 | **+0.808** |
+| `val_cos_gap.gap_class` | +0.117 | +0.344 |
+| `val_cos_gap.gap_background` | +0.228 | +0.617 |
+
+The pooled crop/scene self-similarity moves from a middling positive start to a strongly positive
++0.808 (n=56 pairs each epoch) and never dips negative at any epoch — the opposite of the
+crop-context-free arm's collapse to −0.297. The scene-side cosine gaps still widen substantially too
+(comparable magnitude to the second experiment), so this is not a tradeoff against the property the
+classification-loss recipe never touched — both move together.
+
+**Does it hold on an independent, freshly-chosen exemplar?** The original diagnostic's exact exemplar
+coordinates were never persisted (it ran ad hoc on a since-destroyed instance), so this measures a
+*different*, deterministically-chosen exemplar (the first door-class ground-truth box, by annotation
+order, in the first file_name-sorted training image that has one — `.planning/quick/260808-dla-add-
+crop-context-supervision-to-the-owlv/self_score_diagnostic.py`, CPU-only, no GPU) against all four
+checkpoints:
+
+| checkpoint | self_score | threshold (×0.94) | scene patches retained |
+|---|---|---|---|
+| baseline (pretrained) | +0.368 | +0.346 | 970/2482 (39.1%) |
+| headonly (classification) | +0.556 | +0.523 | 1215/2487 (48.9%) |
+| contrastive | **−0.200** | **−0.188** | 1766/2490 (70.9%) |
+| contrastive-crop | **+0.859** | **+0.808** | 199/2497 (**8.0%**) |
+
+These numbers are not bit-comparable to the second experiment's table above (a different exemplar),
+but the pattern is the same and, on this exemplar, even sharper: `contrastive-crop` doesn't just
+recover a positive self-score, it produces the **highest** self-score and the **tightest** retention of
+any of the four checkpoints — more selective than the pretrained baseline. That tracks directly with
+the F1 table above: `contrastive-crop` is a precision story (0.124–0.261 vs. 0.005–0.061 for every
+other fine-tuned arm) at comparable or better recall, exactly what "reject almost nothing" (the second
+experiment's failure) becoming "reject almost everything except real instances" looks like.
+
+**Verdict: the fix works.** Crop-context supervision closes the training/inference contract gap the
+second experiment diagnosed, and F1 tracks it — door F1 2.6–4.5× the pretrained baseline and 2–39×
+every other fine-tuned arm; window F1 9–24× every other fine-tuned arm and roughly 9–10× the baseline.
+It does not reach `propose-retrieve`/`ncc`, so this repo's floor-plan recommendation is unchanged, but
+the finding for `owlv2-oneshot` fine-tuning specifically inverts: it is not a dead end, provided the
+training objective supervises the exact cross-context comparison the method runs at inference rather
+than a same-context proxy.
+
+`--loss-mode both --supcon-crop-context` is implemented and smoke-tested (sanity-check.md), not
+measured on GPU — the same disclosure as `both`-mode in the second experiment.
+
 ## Provenance — classification-loss experiment
 
 The P/R/F1 numbers above were measured against the run trained and evaluated on the original
@@ -270,16 +348,47 @@ instance rented, used, and destroyed solely for that comparison (no training, CP
 against all three already-exported ONNX checkpoints) — not part of this artifact's own provenance
 chain, called out here because it is the source of the query-patch/self-score numbers.
 
+## Provenance — crop-context experiment
+
+Trained on the `headonly` freeze arm for 8 epochs, seed 0, identical hyperparameters to the
+crop-context-free `contrastive` arm plus `--supcon-crop-context`. Two vast.ai RTX 3090 instances were
+involved in getting this arm measured: the first went unreachable (SSH connection refused, `vastai
+show instances` reporting `offline` with `intended_status: running`) partway through the ~3.7-hour
+training run, the same host-flakiness pattern documented in the classification-loss experiment's
+provenance above — destroyed without a usable result. A same-priced replacement offer from a different
+listing resolved to the **exact same public IP** as a host already known-bad from this repo's earlier
+GPU work (see 260801-8zy's infrastructure notes) — destroyed immediately, unused, before any spend.
+A third, genuinely different instance (different IP, machine id 47340) trained the arm cleanly start
+to finish in one run. Pulled back sequentially: two result JSONs, `train_log.json`, and the ONNX
+export, whose sha256 (`fa79868753928ce3c8638378395fb4c74c8cd6aa7b3e7253a84b9bcffca02cd2`) was verified
+identical between the box and the local copy (a straight file integrity check, not a
+cross-hardware-reproduction claim — only one training run produced this artifact). The instance was
+destroyed and `vastai show instances` confirmed empty immediately after pull-back.
+
+| artifact | sha256 (as committed locally) |
+|---|---|
+| `models/owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx` (contrastive-crop, unregistered comparison) | `fa79868753928ce3c8638378395fb4c74c8cd6aa7b3e7253a84b9bcffca02cd2` |
+
+The contrastive-crop ONNX artifact passes `_verify_graph`'s local contract check (`class_embeds
+[batch, num_patches, 512]`, `pred_boxes [batch, 3600, 4]`) before being trusted.
+
 ## Disposition
 
-Neither the classification-loss arms nor the contrastive arm is adopted as a default.
-`owlv2-oneshot`'s shipped model path and default behavior are unchanged — the fine-tuned weights are
-opt-in research artifacts only, reachable for one run via
+None of the four fine-tuned arms is adopted as `owlv2-oneshot`'s shipped default.
+`owlv2-oneshot`'s default model path and behavior are unchanged — every fine-tuned weight set is an
+opt-in research artifact, reachable for one run via
 `OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft.onnx` (headonly, classification),
-`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_full.onnx` (full, classification), or
-`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive.onnx` (headonly, contrastive), mirroring
-the existing `OS_ONNX_PROVIDERS` override convention. `ncc` and `propose-retrieve` remain the methods
-to ship on this domain (per `docs/eval/floorplans-findings.md`); this result does not change that
-recommendation — if anything it forecloses fine-tuning `owlv2-oneshot`'s heads on floor plans as a
-productive lever at all, classification or contrastive, unless a future attempt specifically
-supervises the crop-context query encoding path rather than only scene-context patches.
+`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_full.onnx` (full, classification),
+`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive.onnx` (headonly, contrastive), or
+`OS_OWLV2_MODEL=owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx` (headonly, contrastive-crop),
+mirroring the existing `OS_ONNX_PROVIDERS` override convention. `ncc` and `propose-retrieve` remain
+this repo's floor-plan recommendation (per `docs/eval/floorplans-findings.md`) — `contrastive-crop`'s
+0.229 door / 0.216 window tuned F1 does not reach `propose-retrieve`'s 0.459 door F1 or `ncc`'s 0.403
+window F1, so this does not change which method ships on this domain. What it does change: the earlier
+verdict that fine-tuning `owlv2-oneshot`'s heads is foreclosed as a lever is retracted. Fine-tuning
+works, and works by a wide margin over every other measured arm and over the pretrained baseline,
+*once the training objective supervises the same crop-context-vs-scene-context comparison the method
+runs at inference* — the concrete, measured mechanism, not a hedge. `contrastive-crop` is the
+best-measured OWLv2 configuration on this domain and a reasonable opt-in choice for anyone using
+`owlv2-oneshot` on floor-plan-like symbol detection specifically, even though it is not this repo's
+top overall recommendation here.

@@ -33,19 +33,22 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-08 — Quick task 260805-hg1: added a supervised-contrastive (SupCon) loss
-variant to the OWLv2 floor-plans fine-tune recipe, trained one headonly arm on a vast.ai RTX 3090,
-measured on the same 28-plan test splits. Sharper negative result than 260801-8zy: door/window F1
-0.010/0.009, worse than both the classification-loss recipe and the pretrained baseline, even though
-the loss demonstrably learns the intended property (val_cos_gap.gap_class/gap_background more than
-triple over training, in the exact cosine space owlv2-oneshot scores with). A follow-up offline
-diagnostic (second vast.ai instance) found the mechanism: SupCon only ever supervises scene-context
-forward passes, never the crop-context query-encoding path used at inference, so the two diverged —
-the exemplar's own self-similarity score goes cosine-negative, collapsing the calibration threshold
-and retaining ~86% of all scene patches instead of ~25-30%. Full suite green (831 passed, 93.81%
-coverage). Neither classification nor contrastive arm adopted as default; ncc/propose-retrieve remain
-the floor-plan recommendation. A crop-context-supervision fix was requested as follow-up scope, not
-yet started.
+Last activity: 2026-08-08 — Quick task 260808-dla: fixed the crop/scene calibration break 260805-hg1
+diagnosed by adding crop-context anchors to the SupCon pool (built via the SAME query-encoding
+functions owlv2-oneshot's inference path uses, not a reimplementation). Trained one headonly arm on a
+vast.ai RTX 3090, measured on the same 28-plan test splits. Result: the fix works. Pooled crop/scene
+self-score moves from +0.49 (epoch 0) to +0.81 (best epoch), never dipping negative; an independent
+fresh exemplar confirms the pattern (contrastive-crop self_score +0.86, the highest and
+tightest-retaining of all four checkpoints, vs -0.20 for the crop-context-free arm). F1 tracks it:
+door 0.229 tuned / 0.391 default and window 0.216 — the best numbers of any fine-tuned arm across both
+quick tasks, 2-39x every other fine-tuned arm and clearly ahead of the pretrained baseline (0.154 /
+0.023). Still short of propose-retrieve (0.459 door F1) / ncc (0.403 window F1), so the floor-plan
+recommendation is unchanged, but 260805-hg1's "fine-tuning is foreclosed" verdict is RETRACTED:
+fine-tuning owlv2-oneshot works once the training objective supervises the exact crop-vs-scene
+comparison the method runs at inference. Two vast.ai instances discarded unused this run (one went
+unreachable mid-training, one resolved to a documented-bad host's exact IP); a third trained cleanly.
+Full suite green (847 passed, 93.87% coverage). contrastive-crop remains opt-in, not the shipped
+default.
 
 Progress: [█████████░] 88%
 
@@ -58,6 +61,7 @@ Progress: [█████████░] 88%
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
 | 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
 | 260805-hg1 | SupCon contrastive loss for OWLv2 floor-plans fine-tune — sharper negative result, diagnosed crop/scene calibration break | 2026-08-08 | (pending) | [260805-hg1](./quick/260805-hg1-add-a-supervised-contrastive-loss-varian/) |
+| 260808-dla | Crop-context SupCon fix — closes the calibration break, best fine-tuned OWLv2 arm measured (door F1 0.229, window F1 0.216) | 2026-08-08 | (pending) | [260808-dla](./quick/260808-dla-add-crop-context-supervision-to-the-owlv/) |
 
 ## Performance Metrics
 
