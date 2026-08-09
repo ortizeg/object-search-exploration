@@ -100,6 +100,21 @@ must never be ambiguous about which graph produced its numbers. Nothing about th
 config defaults, or ``_METHOD_VERSION`` changes with it, which is why the version is NOT bumped:
 the method is the same method, pointed at a different file by an explicit human action.
 
+Crop context-margin extension (``crop_context_margin_frac``, D-w8c-01/02)
+--------------------------------------------------------------------------
+``crop_context_margin_frac`` (default ``0.0``, byte-identical to prior behavior when unset) grows
+the exemplar box by that fraction of its own width/height on each side, clamped to the scene,
+before the crop is sliced -- so a small symbol pulls in real neighboring pixels (walls, adjacent
+symbols) instead of being cropped tight and then blown up ~24-30x to 960x960 on synthetic pad
+color. The expansion is done by :func:`expand_box_with_margin`, a single shared, model-free
+function used by BOTH this inference path and (opt-in) ``scripts/finetune_owlv2.py``'s
+training-time crop-context anchor -- one implementation, not two, mirroring the same
+train/inference-fidelity guarantee :func:`select_query_patch_index`'s extraction gave query-patch
+selection. A margin computed differently at training and inference would silently change which
+scene pixels the query embedding is derived from with no exception -- literal code reuse closes
+that off. See ``docs/reports/owlv2-floorplans-finetune.md``'s fourth experiment for the measured
+margin sweep.
+
 Licence
 -------
 OWLv2 is **Apache-2.0** (Google) -- the same permissive tier as DINOv2 and SuperPoint's code, with
@@ -207,6 +222,17 @@ class Owlv2OneshotConfig(BaseModel):
             "Query-embedding selection: consider the exemplar-crop patches whose predicted box IoU "
             "with the full crop is at least this fraction of the maximum, then pick the single "
             "most distinctive (least similar to the mean) of them. Lower widens the candidate set."
+        ),
+    )
+    crop_context_margin_frac: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Grow the exemplar box by this fraction of its own width/height on each side (clamped "
+            "to the scene) before cropping the query image. 0.0 (default) crops the exemplar box "
+            "exactly, unchanged from prior behavior. A small symbol cropped tight and then "
+            "resized to 960x960 is a huge, context-free upsample; a margin pulls in real "
+            "neighboring pixels (walls, adjacent symbols) instead of synthetic pad color."
         ),
     )
     max_box_area_frac: float = Field(
@@ -427,6 +453,30 @@ def boxes_to_pixels(
     return out
 
 
+def expand_box_with_margin(box: BBox, margin_frac: float, image_w: int, image_h: int) -> BBox:
+    """Grow ``box`` by ``margin_frac`` of its own width/height on each side, clamped to the scene.
+
+    Shared, model-free helper used by BOTH the inference-time query crop (:func:`search`) and,
+    opt-in, the training-time crop-context anchor (``scripts/finetune_owlv2.py``) -- one
+    implementation, not two, so a margin computed differently at training and inference can never
+    silently mis-define which pixels the query embedding is derived from.
+
+    ``margin_frac <= 0.0`` returns ``box`` unchanged (no allocation, byte-identical to today's
+    behavior). A negative ``margin_frac`` is a caller bug, not a shrink request, so it raises.
+    """
+    if margin_frac < 0.0:
+        raise ValueError(f"margin_frac must be >= 0.0, got {margin_frac}")
+    if margin_frac == 0.0:
+        return box
+    margin_x = margin_frac * box.w
+    margin_y = margin_frac * box.h
+    x1 = max(0, round(box.x - margin_x))
+    y1 = max(0, round(box.y - margin_y))
+    x2 = min(image_w, round(box.x2 + margin_x))
+    y2 = min(image_h, round(box.y2 + margin_y))
+    return BBox(x=x1, y=y1, w=max(1, x2 - x1), h=max(1, y2 - y1))
+
+
 def _empty_or_error(
     outcome: SearchOutcome,
     note: str,
@@ -496,6 +546,8 @@ def search(
 
     # 1. Encode the exemplar crop as a query image (same vision graph as the scene, one call).
     crop_box = exemplar.box.clipped_to(orig_w, orig_h)
+    if config.crop_context_margin_frac > 0.0:
+        crop_box = expand_box_with_margin(crop_box, config.crop_context_margin_frac, orig_w, orig_h)
     crop = np.ascontiguousarray(
         image[crop_box.y : crop_box.y2, crop_box.x : crop_box.x2], dtype=np.uint8
     )

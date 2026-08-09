@@ -35,6 +35,7 @@ from object_search.search.owlv2_oneshot import (
     _iou_with_unit_box,
     _l2_normalize,
     boxes_to_pixels,
+    expand_box_with_margin,
     reset_inferencer_cache,
     search,
     select_query_embedding,
@@ -115,6 +116,7 @@ def test_config_defaults() -> None:
     assert cfg.calibration == "self-similarity"  # gmm degenerates on OWLv2's compressed cosine
     assert cfg.retain_frac == 0.94  # the robust sweet spot from the retain_frac sweep
     assert cfg.query_iou_frac == 0.8
+    assert cfg.crop_context_margin_frac == 0.0  # no margin: byte-identical to prior behavior
     assert cfg.max_box_area_frac == 0.25  # drop the generic whole-frame box
     assert cfg.nms_iou == 0.3  # tight NMS collapses OWLv2's per-object duplicate patches
     assert cfg.max_candidates == 50
@@ -131,6 +133,7 @@ def test_config_is_frozen_and_schema_drives_the_form() -> None:
         "calibration",
         "retain_frac",
         "query_iou_frac",
+        "crop_context_margin_frac",
         "max_box_area_frac",
         "nms_iou",
         "max_candidates",
@@ -270,6 +273,29 @@ def test_boxes_to_pixels_maps_and_drops_degenerate() -> None:
     assert out[1] is None
 
 
+def test_expand_box_with_margin_is_a_noop_at_zero() -> None:
+    box = BBox(x=10, y=10, w=30, h=30)
+    assert expand_box_with_margin(box, 0.0, image_w=200, image_h=200) == box
+
+
+def test_expand_box_with_margin_grows_symmetrically_by_the_exact_amount() -> None:
+    box = BBox(x=60, y=60, w=30, h=30)
+    expanded = expand_box_with_margin(box, 0.5, image_w=200, image_h=200)
+    assert expanded == BBox(x=45, y=45, w=60, h=60)
+
+
+def test_expand_box_with_margin_clamps_to_the_scene() -> None:
+    box = BBox(x=5, y=5, w=10, h=10)  # near the top-left edge
+    expanded = expand_box_with_margin(box, 2.0, image_w=200, image_h=200)
+    assert expanded.x == 0 and expanded.y == 0  # clamped, never negative
+    assert expanded.x2 <= 200 and expanded.y2 <= 200
+
+
+def test_expand_box_with_margin_rejects_negative_fraction() -> None:
+    with pytest.raises(ValueError, match="margin_frac"):
+        expand_box_with_margin(BBox(x=0, y=0, w=10, h=10), -0.1, image_w=200, image_h=200)
+
+
 def test_owlv2_preprocess_tensor_shape_and_side() -> None:
     """The preprocessing produces the fixed [1,3,960,960] tensor and reports the square side."""
     image = np.zeros((80, 120, 3), dtype=np.uint8)  # non-square -> side is max(H, W) = 120
@@ -301,6 +327,28 @@ def test_search_end_to_end_with_a_stub_inferencer(monkeypatch: pytest.MonkeyPatc
     assert "query_ms" in result.diagnostics.metrics
     assert "target_ms" in result.diagnostics.metrics
     assert result.diagnostics.proposals is not None
+
+
+def test_search_applies_crop_context_margin_frac_to_the_query_crop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SAME exemplar box yields a materially larger query crop purely from the new field."""
+    scene = np.zeros((200, 200, 3), dtype=np.uint8)
+    exemplar = ExemplarBox(box=BBox(x=60, y=60, w=30, h=30))
+
+    stub_default = _StubInferencer(_query_stub(), _scene_stub())
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub_default)
+    search(scene, exemplar, Owlv2OneshotConfig(score_threshold=0.5))
+    assert stub_default.calls[0] == (30, 30)
+
+    stub_margin = _StubInferencer(_query_stub(), _scene_stub())
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub_margin)
+    search(
+        scene,
+        exemplar,
+        Owlv2OneshotConfig(score_threshold=0.5, crop_context_margin_frac=0.5),
+    )
+    assert stub_margin.calls[0] == (60, 60)
 
 
 def test_search_empty_when_nothing_clears(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -407,6 +455,7 @@ def test_method_version_and_config_defaults_are_unchanged_by_the_weight_override
     assert config.calibration == "self-similarity"
     assert config.retain_frac == 0.94
     assert config.query_iou_frac == 0.8
+    assert config.crop_context_margin_frac == 0.0
     assert config.max_box_area_frac == 0.25
     assert config.nms_iou == 0.3
     assert config.max_candidates == 50
