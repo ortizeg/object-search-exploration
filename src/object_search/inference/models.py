@@ -17,6 +17,7 @@ how this repo may later be shared, and both are recorded on the spec and in ``LI
 
 from __future__ import annotations
 
+import os
 import urllib.request
 from collections.abc import Mapping
 from pathlib import Path
@@ -149,6 +150,40 @@ MODEL_REGISTRY: Mapping[str, ModelSpec] = {
         dest="owlv2_base_patch16.onnx",
         added_in_phase=8,
     ),
+    # The SAME graph as above, exported from a LOCAL fine-tuned checkpoint instead of the hub id
+    # (quick task 260801-8zy: does fine-tuning on floor-plan training data fix owlv2-oneshot's
+    # floor-plan precision?). A SEPARATE artifact under a separate `dest`: the shipped
+    # `owlv2-base-patch16` entry above -- repo_id, revision, dest, and its pinned sha256 -- is
+    # deliberately untouched, and `owlv2-oneshot` still resolves that file unless the explicit
+    # `OS_OWLV2_MODEL` opt-in says otherwise.
+    "owlv2-base-patch16-floorplans-ft": ModelSpec(
+        key="owlv2-base-patch16-floorplans-ft",
+        source="export",
+        repo_id="google/owlv2-base-patch16-ensemble",
+        revision=None,  # the weights come from a LOCAL checkpoint dir, not a hub revision
+        filename="owlv2_base_patch16_floorplans_ft.onnx",
+        # sha256 is None BY DESIGN, not by omission. This artifact is produced from a local
+        # fine-tuning run, so a pinned hash would gate on one machine's run rather than on a
+        # reproducible source -- it would be a hash of a result, not an integrity check. The
+        # sha256 of the run that produced the reported numbers is recorded in the report instead.
+        sha256=None,
+        license="Apache-2.0",
+        license_note=(
+            "Apache-2.0, inherited from the google/owlv2-base-patch16-ensemble base weights it is "
+            "fine-tuned from -- no AGPL/§13 and no non-commercial clause. Fine-tuning on the "
+            "Roboflow floor-plans-500 export does not change the weight licence."
+        ),
+        source_note=(
+            "NOT fetched by `pixi run fetch-models` on a clean box: it is produced locally by two "
+            "commands in the `export` pixi env -- (1) `pixi run -e export finetune-owlv2 --out "
+            "models/finetune/owlv2-floorplans-headonly`, then (2) `python scripts/export_owlv2.py "
+            "--checkpoint models/finetune/owlv2-floorplans-headonly --out "
+            "owlv2_base_patch16_floorplans_ft.onnx`. When the checkpoint dir is absent the "
+            "exporter logs how to make it and returns the (absent) dest, so fetch_all stays green."
+        ),
+        dest="owlv2_base_patch16_floorplans_ft.onnx",
+        added_in_phase=8,
+    ),
 }
 
 
@@ -218,6 +253,20 @@ def _export(spec: ModelSpec, dest: Path) -> Path:
         return _export_fastsam(spec, dest)
     if spec.key == "owlv2-base-patch16":
         return _export_owlv2(spec, dest)
+    if spec.key == "owlv2-base-patch16-floorplans-ft":
+        checkpoint = owlv2_finetune_checkpoint()
+        if not (checkpoint / "config.json").is_file():
+            logger.warning(
+                "{}: no fine-tuned checkpoint at {}. This artifact is produced locally, not "
+                "downloaded: run `pixi run -e export finetune-owlv2 --out {}` first (or point "
+                "{} at an existing checkpoint dir). Returning the absent destination.",
+                spec.key,
+                checkpoint,
+                checkpoint,
+                _OWLV2_FT_CHECKPOINT_ENV,
+            )
+            return dest
+        return _export_owlv2(spec, dest, checkpoint=checkpoint)
     raise ValueError(f"no exporter registered for {spec.key!r}")
 
 
@@ -250,8 +299,32 @@ def _export_fastsam(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover
 _OWLV2_IMAGE_SIZE = 960
 _OWLV2_OPSET = 17
 
+# Where a fine-tuned OWLv2 checkpoint is read from when exporting the *-floorplans-ft artifact.
+# An env override in the same spirit as OS_ONNX_PROVIDERS / OS_OWLV2_MODEL: absent changes nothing.
+_OWLV2_FT_CHECKPOINT_ENV = "OS_OWLV2_FT_CHECKPOINT"
+_OWLV2_FT_CHECKPOINT_DEFAULT = "finetune/owlv2-floorplans-headonly"
 
-def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (export env only)
+
+def owlv2_finetune_checkpoint() -> Path:
+    """The HuggingFace checkpoint dir the fine-tuned OWLv2 export reads from.
+
+    ``$OS_OWLV2_FT_CHECKPOINT`` when set (absolute, or relative to ``models/``); otherwise
+    ``models/finetune/owlv2-floorplans-headonly`` -- the default ``finetune-owlv2`` writes to.
+    Pure path arithmetic, so CI gates it with no torch and no checkpoint on disk.
+    """
+    override = os.environ.get(_OWLV2_FT_CHECKPOINT_ENV, "").strip()
+    if not override:
+        return models_dir() / _OWLV2_FT_CHECKPOINT_DEFAULT
+    candidate = Path(override).expanduser()
+    return candidate if candidate.is_absolute() else models_dir() / candidate
+
+
+def _export_owlv2(  # pragma: no cover (export env only)
+    spec: ModelSpec,
+    dest: Path,
+    *,
+    checkpoint: Path | None = None,
+) -> Path:
     """Export OWLv2's image-guided vision graph (class_embeds/pred_boxes/logit_shift/logit_scale).
 
     Wraps ``Owlv2ForObjectDetection`` so the ONNX graph takes a single ``pixel_values`` input and
@@ -261,6 +334,13 @@ def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (exp
     recalibration, computed with no query, so exporting it needs no second image input). The
     query-embedding selection and cosine scoring stay in NumPy in the method module -- the graph is
     deliberately just the shared image encoder.
+
+    ``checkpoint`` selects the *weights only*: ``from_pretrained(checkpoint)`` when given, else
+    ``from_pretrained(spec.repo_id)``. The wrapper, opset, dynamic axes, and ``.part`` rename are
+    identical either way, so a fine-tuned graph is byte-for-byte the same SHAPE as the shipped one
+    and ``owlv2_oneshot`` consumes it with zero method changes -- which is the whole reason
+    text-conditioned fine-tuning can improve an image-guided method (the two paths share
+    ``vision_model`` / ``class_predictor`` / ``box_predictor``).
     """
     try:
         import torch  # export env only (Apache-2.0); never imported by the runtime package
@@ -272,8 +352,12 @@ def _export_owlv2(spec: ModelSpec, dest: Path) -> Path:  # pragma: no cover (exp
         )
         return dest
 
-    logger.info(f"{spec.key}: exporting OWLv2 image-guided vision graph to ONNX (Apache-2.0)")
-    model = Owlv2ForObjectDetection.from_pretrained(spec.repo_id)
+    weights = str(checkpoint) if checkpoint is not None else spec.repo_id
+    logger.info(
+        f"{spec.key}: exporting OWLv2 image-guided vision graph to ONNX (Apache-2.0) "
+        f"from weights {weights}"
+    )
+    model = Owlv2ForObjectDetection.from_pretrained(weights)
     model.eval()
 
     class _VisionGraph(torch.nn.Module):  # type: ignore[misc]  # torch is untyped (Any) in this env

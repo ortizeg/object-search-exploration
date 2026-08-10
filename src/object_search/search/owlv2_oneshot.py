@@ -98,6 +98,36 @@ Known failure modes
   ``pixi run -e export export-owlv2``. Absent, the method returns ``outcome=error`` with a
   ``model_unavailable`` note rather than raising, so the renderer and API degrade honestly.
 
+Which weight file is loaded (``OS_OWLV2_MODEL``) -- an opt-in whose absence changes nothing
+---------------------------------------------------------------------------------------------
+Exactly like ``OS_ONNX_PROVIDERS`` (which opts a run into a GPU execution provider), the
+``OS_OWLV2_MODEL`` environment variable opts **one run** into a different OWLv2 ``.onnx``: a bare
+filename resolves under ``models/``, an absolute path is used verbatim, and **unset -- the normal
+case -- resolves the shipped ``owlv2_base_patch16.onnx`` and behaves identically to not having the
+variable at all**. See :func:`_resolve_model_path`.
+
+It exists so a fine-tuned export can be measured against the pretrained one on the identical
+method, method version, and config -- making the delta attributable to the weights alone rather
+than to a forked method. The loaded filename is logged at INFO for the same reason: a recorded run
+must never be ambiguous about which graph produced its numbers. Nothing about the algorithm, the
+config defaults, or ``_METHOD_VERSION`` changes with it, which is why the version is NOT bumped:
+the method is the same method, pointed at a different file by an explicit human action.
+
+Crop context-margin extension (``crop_context_margin_frac``, D-w8c-01/02)
+--------------------------------------------------------------------------
+``crop_context_margin_frac`` (default ``0.0``, byte-identical to prior behavior when unset) grows
+the exemplar box by that fraction of its own width/height on each side, clamped to the scene,
+before the crop is sliced -- so a small symbol pulls in real neighboring pixels (walls, adjacent
+symbols) instead of being cropped tight and then blown up ~24-30x to 960x960 on synthetic pad
+color. The expansion is done by :func:`expand_box_with_margin`, a single shared, model-free
+function used by BOTH this inference path and (opt-in) ``scripts/finetune_owlv2.py``'s
+training-time crop-context anchor -- one implementation, not two, mirroring the same
+train/inference-fidelity guarantee :func:`select_query_patch_index`'s extraction gave query-patch
+selection. A margin computed differently at training and inference would silently change which
+scene pixels the query embedding is derived from with no exception -- literal code reuse closes
+that off. See ``docs/reports/owlv2-floorplans-finetune.md``'s fourth experiment for the measured
+margin sweep.
+
 Licence
 -------
 OWLv2 is **Apache-2.0** (Google) -- the same permissive tier as DINOv2 and SuperPoint's code, with
@@ -129,6 +159,7 @@ Mirrored in ``docs/methods/owlv2-oneshot.md`` and ``docs/ROBUSTNESS-BACKLOG.md``
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -160,6 +191,7 @@ from object_search.search.registry import register_method
 _METHOD_VERSION = "1.0.0"
 _OWLV2_KEY = "owlv2-base-patch16"  # the MODEL_REGISTRY key for the OWLv2 vision graph
 _PROVIDERS = resolve_providers()  # CPU by default (bit-identical); OS_ONNX_PROVIDERS opts into GPU
+_OWLV2_MODEL_ENV = "OS_OWLV2_MODEL"  # explicit per-run weight opt-in; absent => the shipped default
 _EXEMPLAR_IOU = 0.5  # a match overlapping the exemplar by >= this is the exemplar's own region
 _EXEMPLAR_SELF_IOU = 0.3  # looser overlap used to read off the exemplar's own self-match score
 _TILE_SIZE = OWLV2_IMAGE_SIZE  # tile side matches OWLv2's native input -- no extra downscaling
@@ -214,6 +246,17 @@ class Owlv2OneshotConfig(BaseModel):
             "Query-embedding selection: consider the exemplar-crop patches whose predicted box IoU "
             "with the full crop is at least this fraction of the maximum, then pick the single "
             "most distinctive (least similar to the mean) of them. Lower widens the candidate set."
+        ),
+    )
+    crop_context_margin_frac: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Grow the exemplar box by this fraction of its own width/height on each side (clamped "
+            "to the scene) before cropping the query image. 0.0 (default) crops the exemplar box "
+            "exactly, unchanged from prior behavior. A small symbol cropped tight and then "
+            "resized to 960x960 is a huge, context-free upsample; a margin pulls in real "
+            "neighboring pixels (walls, adjacent symbols) instead of synthetic pad color."
         ),
     )
     rotation_invariant: bool = Field(
@@ -289,6 +332,30 @@ _inferencer: OWLv2Inferencer | None = None
 _inferencer_loaded = False
 
 
+def _resolve_model_path() -> Path:
+    """Which OWLv2 ``.onnx`` this method loads: the shipped default unless ``OS_OWLV2_MODEL`` says.
+
+    Pure path arithmetic (no disk read, no session), so CI gates it with no weight present.
+
+    * ``OS_OWLV2_MODEL`` unset or empty -> ``models_dir() / MODEL_REGISTRY[_OWLV2_KEY].dest``, the
+      shipped pretrained graph. **This is the only behaviour that exists unless a human sets the
+      variable**, so the default method is provably unchanged.
+    * set to a relative name (``owlv2_base_patch16_floorplans_ft.onnx``) -> resolved under
+      ``models_dir()``, where every weight in this repo lives.
+    * set to an absolute path -> used verbatim.
+
+    The absence of the variable changes nothing -- deliberately the same contract as
+    ``OS_ONNX_PROVIDERS``. It exists so one evaluation run can be pointed at an alternative OWLv2
+    graph (e.g. a fine-tuned export) with the method's algorithm, version, and config defaults all
+    held fixed, which is what makes an A/B attributable to the weights alone.
+    """
+    override = os.environ.get(_OWLV2_MODEL_ENV, "").strip()
+    if not override:
+        return models.models_dir() / models.MODEL_REGISTRY[_OWLV2_KEY].dest
+    candidate = Path(override).expanduser()
+    return candidate if candidate.is_absolute() else models.models_dir() / candidate
+
+
 def _get_inferencer() -> OWLv2Inferencer | None:
     """Return the shared OWLv2 inferencer, or ``None`` when its weight is absent.
 
@@ -300,7 +367,7 @@ def _get_inferencer() -> OWLv2Inferencer | None:
     if _inferencer_loaded:
         return _inferencer
     _inferencer_loaded = True
-    path = models.models_dir() / models.MODEL_REGISTRY[_OWLV2_KEY].dest
+    path = _resolve_model_path()
     if not path.is_file():
         logger.info(
             "owlv2-oneshot: {!r} weight absent at {}; returning model_unavailable "
@@ -310,6 +377,9 @@ def _get_inferencer() -> OWLv2Inferencer | None:
         )
         _inferencer = None
         return None
+    # Log WHICH weight file produced this session's results, so a recorded run is never ambiguous
+    # about the graph behind its numbers -- the one thing an opt-in weight override could obscure.
+    logger.info("owlv2-oneshot: loading OWLv2 graph {}", path.name)
     _inferencer = OWLv2Inferencer(path, providers=_PROVIDERS)
     return _inferencer
 
@@ -350,6 +420,46 @@ def _iou_with_unit_box(boxes_cxcywh: npt.NDArray[np.float32]) -> npt.NDArray[np.
     return np.asarray(inter / np.maximum(union, _EPS), dtype=np.float32)
 
 
+def select_query_patch_index(
+    class_embeds: npt.NDArray[np.float32],
+    boxes_cxcywh: npt.NDArray[np.float32],
+    iou_frac: float,
+) -> int:
+    """Pick the index of the single most-distinctive covering patch (HuggingFace's heuristic).
+
+    This is the index-selection half of :func:`select_query_embedding`, pulled out (D-dla-04) so
+    both ``owlv2-oneshot``'s inference-time query selection AND the crop-context SupCon anchor
+    built during training (``scripts/finetune_owlv2.py``) call the exact SAME function rather than
+    two independently-written implementations that could silently drift. NOT L2-normalizing the
+    input here (unlike :func:`select_query_embedding`, which normalizes before selecting) means a
+    caller holding a differentiable torch tensor can index the ORIGINAL row after calling this on a
+    detached NumPy view, keeping the gradient path intact.
+
+    Among the crop patches whose predicted box covers the crop (IoU with the full ``[0, 1]`` box
+    at least ``iou_frac`` of the maximum), returns the index of the single patch whose embedding is
+    **least similar to the mean patch embedding** -- the most *distinctive* one, which is the
+    actual object rather than the generic "whole-frame / background" direction. Mean-pooling those
+    patches instead (the naive first cut) yields exactly that generic embedding, which then matches
+    scene patches predicting whole-image boxes -- the method scored ~0 F1 until this selection was
+    fixed (see docs/reports/owlv2-improvement.md).
+
+    Falls back to the index of the single largest-area patch if no box overlaps the unit box at all.
+
+    This is an independently callable, model-free unit -- tests exercise it with synthetic tensors.
+    """
+    normed = _l2_normalize(class_embeds, axis=1)
+    ious = _iou_with_unit_box(boxes_cxcywh)
+    max_iou = float(ious.max()) if ious.size else 0.0
+    if max_iou <= 0.0:
+        return int(np.argmax(boxes_cxcywh[:, 2] * boxes_cxcywh[:, 3]))
+    selected = np.nonzero(ious >= iou_frac * max_iou)[0]
+    # Distinctiveness: the covering patch LEAST similar to the mean patch embedding is the object,
+    # not the background. sims is minimized -> the most distinctive covering patch is chosen.
+    mean_embed = _l2_normalize(normed.mean(axis=0)[None, :], axis=1)[0]
+    sims = np.asarray(normed[selected] @ mean_embed, dtype=np.float32)
+    return int(selected[int(np.argmin(sims))])
+
+
 def select_query_embedding(
     class_embeds: npt.NDArray[np.float32],
     boxes_cxcywh: npt.NDArray[np.float32],
@@ -358,30 +468,13 @@ def select_query_embedding(
     """Select one ``(D,)`` L2-normalized query embedding: HuggingFace's distinctiveness heuristic.
 
     This mirrors ``Owlv2ForObjectDetection.embed_image_query``, and it is a **correctness
-    requirement**, not a refinement. Among the crop patches whose predicted box covers the crop
-    (IoU with the full ``[0, 1]`` box at least ``iou_frac`` of the maximum), it picks the single
-    patch whose embedding is **least similar to the mean patch embedding** -- the most
-    *distinctive* one, which is the actual object rather than the generic "whole-frame /
-    background" direction. Mean-pooling those patches instead (the naive first cut) yields exactly
-    that generic embedding, which then matches scene patches predicting whole-image boxes -- the
-    method scored ~0 F1 until this selection was fixed (see docs/reports/owlv2-improvement.md).
-
-    Falls back to the single largest-area patch if no box overlaps the unit box at all.
+    requirement**, not a refinement. A thin wrapper over :func:`select_query_patch_index`: get the
+    index, then return that row of the L2-normalized embedding matrix.
 
     This is an independently callable, model-free unit -- tests exercise it with synthetic tensors.
     """
     normed = _l2_normalize(class_embeds, axis=1)
-    ious = _iou_with_unit_box(boxes_cxcywh)
-    max_iou = float(ious.max()) if ious.size else 0.0
-    if max_iou <= 0.0:
-        best = int(np.argmax(boxes_cxcywh[:, 2] * boxes_cxcywh[:, 3]))
-        return np.asarray(normed[best], dtype=np.float32)
-    selected = np.nonzero(ious >= iou_frac * max_iou)[0]
-    # Distinctiveness: the covering patch LEAST similar to the mean patch embedding is the object,
-    # not the background. sims is minimized -> the most distinctive covering patch is chosen.
-    mean_embed = _l2_normalize(normed.mean(axis=0)[None, :], axis=1)[0]
-    sims = np.asarray(normed[selected] @ mean_embed, dtype=np.float32)
-    best = int(selected[int(np.argmin(sims))])
+    best = select_query_patch_index(class_embeds, boxes_cxcywh, iou_frac)
     return np.asarray(normed[best], dtype=np.float32)
 
 
@@ -413,6 +506,30 @@ def boxes_to_pixels(
         else:
             out.append(BBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1))
     return out
+
+
+def expand_box_with_margin(box: BBox, margin_frac: float, image_w: int, image_h: int) -> BBox:
+    """Grow ``box`` by ``margin_frac`` of its own width/height on each side, clamped to the scene.
+
+    Shared, model-free helper used by BOTH the inference-time query crop (:func:`search`) and,
+    opt-in, the training-time crop-context anchor (``scripts/finetune_owlv2.py``) -- one
+    implementation, not two, so a margin computed differently at training and inference can never
+    silently mis-define which pixels the query embedding is derived from.
+
+    ``margin_frac <= 0.0`` returns ``box`` unchanged (no allocation, byte-identical to today's
+    behavior). A negative ``margin_frac`` is a caller bug, not a shrink request, so it raises.
+    """
+    if margin_frac < 0.0:
+        raise ValueError(f"margin_frac must be >= 0.0, got {margin_frac}")
+    if margin_frac == 0.0:
+        return box
+    margin_x = margin_frac * box.w
+    margin_y = margin_frac * box.h
+    x1 = max(0, round(box.x - margin_x))
+    y1 = max(0, round(box.y - margin_y))
+    x2 = min(image_w, round(box.x2 + margin_x))
+    y2 = min(image_h, round(box.y2 + margin_y))
+    return BBox(x=x1, y=y1, w=max(1, x2 - x1), h=max(1, y2 - y1))
 
 
 def tile_boxes(orig_w: int, orig_h: int, tile_size: int, overlap_frac: float) -> list[BBox]:
@@ -556,6 +673,8 @@ def search(
     #    embeddings are not rotation-equivariant, so a mirrored/rotated scene instance (common on
     #    floor plans) may not match the exemplar's own orientation.
     crop_box = exemplar.box.clipped_to(orig_w, orig_h)
+    if config.crop_context_margin_frac > 0.0:
+        crop_box = expand_box_with_margin(crop_box, config.crop_context_margin_frac, orig_w, orig_h)
     crop = np.ascontiguousarray(
         image[crop_box.y : crop_box.y2, crop_box.x : crop_box.x2], dtype=np.uint8
     )

@@ -224,6 +224,8 @@ cannot drift from the code.
 | `seed` | `0` | `random_state` for the gmm calibrator (its only genuinely stochastic step). |
 | `retain_frac` | `0.7` | self-similarity accepts scores above `self_score × retain_frac` (`self_score = 1.0`). |
 | `fixed_input_side` | `null` | Opt-in GPU-OOM fix. `null` = native/cap path (byte-identical on chipset/synthetic). A multiple of 14 letterboxes every scene into one fixed `side × side` input (uniform scale + constant bottom-right pad) so onnxruntime sees a single input resolution; padding tokens are masked and boxes map back through the one letterbox scale. A non-multiple is rejected at construction. |
+| `adaptive_min_exemplar_tokens` | `null` | Opt-in token-starvation fix. `null` = keep the fixed `scene_max_side` cap (byte-identical). When set, the scene may be UPSCALED so the exemplar spans at least this many stride-14 tokens on its shorter side, clamped to `adaptive_max_side` (or `scene_max_side`). Pair with a `fixed_input_side` of the SAME value as the ceiling, or the letterbox re-downscales the upscale away. |
+| `adaptive_max_side` | `null` | The compute ceiling used instead of `scene_max_side` while adaptive resolution is resolving a small exemplar upward. `null` reuses `scene_max_side`. A separate, higher ceiling means only starved-exemplar images pay the extra compute. Ignored when `adaptive_min_exemplar_tokens` is `null`. |
 
 ## Known failure modes
 
@@ -245,21 +247,44 @@ cannot drift from the code.
 Deferred deliberately (mirrored verbatim from the module docstring and
 `docs/ROBUSTNESS-BACKLOG.md`); none is built in this phase:
 
-- **Sliding-window backbone inference** for very large scenes, so localisation no longer degrades
-  at the resolution cap.
-- **Adaptive input resolution** — size the scene so the exemplar spans ≥ N stride-14 tokens
-  (clamped to a hard max) instead of a fixed `scene_max_side`. Measured ~6× chipset recall
-  (0.077 → 0.554 on a small-chip subset); deferred because it costs latency, does not fix the
-  flat-chip precision, and chipset is NCC's regime. See
-  [`../reports/dino-dense-improvement.md`](../reports/dino-dense-improvement.md).
+- **Sliding-window backbone inference — tried on floorplans-door, REGRESSED at every tile size
+  tested.** Overlapping NATIVE-resolution tiles, merged by per-pixel max, were implemented and
+  measured against the adaptive+letterbox winner (test F1 0.144): 784px tiles → F1 0.053, 1120px
+  → 0.078, 1568px → 0.072 — all worse, two of three even worse than the plain 1120px letterbox
+  baseline (0.113–0.117) it was meant to beat. Working hypothesis: DINOv2's self-attention needs
+  the WHOLE input in one forward pass; a tile only sees its own crop, so tiling trades resolution
+  for a real loss of global context that costs more than the resolution buys on this domain.
+  Reverted (not shipped) — see
+  [`../reports/dino-dense-floorplans-improvement.md`](../reports/dino-dense-floorplans-improvement.md)
+  for the full log and a coarse-to-fine two-stage alternative that would not fragment context.
+- **Adaptive input resolution — LANDED (opt-in), floor-plans-door.** `adaptive_min_exemplar_tokens`
+  + `adaptive_max_side` size the scene so the exemplar spans ≥ N stride-14 tokens, clamped to a
+  ceiling, instead of a fixed `scene_max_side`. Still deferred as the CHIPSET fix it was originally
+  scoped for (chipset is NCC's regime; ~6× recall lift measured there but not worth the latency,
+  see [`../reports/dino-dense-improvement.md`](../reports/dino-dense-improvement.md)) — but
+  validated and shipped for floorplans-door, where paired with a matching `fixed_input_side`
+  letterbox it lifted test F1 0.117 → 0.144 (val: flat pooled F1, but small/medium recall up on
+  both splits). See
+  [`../reports/dino-dense-floorplans-improvement.md`](../reports/dino-dense-floorplans-improvement.md).
 - **Learned feature upsampling (FeatUp)** to recover sub-patch localisation from the stride-14
   grid without a full high-res forward pass.
-- **SAM-based box refinement** — snap each coarse component box to the nearest segment mask.
+- **SAM-based box refinement** — snap each coarse component box to the nearest segment mask. A
+  cheaper variant (a peak- or centroid-centred exemplar-SHAPED box replacing the blob's own
+  bounding rect, no SAM) was tried on floorplans-door and REGRESSED (F1 0.144 → 0.138 at best) —
+  the blob's own extent tracks the true instance better than a fixed-size box re-centred on an
+  off-centre peak or centroid. A real segmentation-based refinement remains open.
 - **Spatially-structured (not order-free) part matching.** `max-token` scoring already does
   many-to-many token similarity (**DONE** — it replaced the mean-pooled prototype and lifted
   textured F1 from ≈ 0.03 to ≈ 0.70), but it pools the top-k cosines with no geometric constraint
   on *where* the matching parts sit. A spatial-consistency term (parts arranged like the exemplar)
   would cut clutter false positives further.
+- **Multi-rotation exemplar query bank — tried, REGRESSED.** A 4-orientation (0°/90°/180°/270°)
+  union of the exemplar's crop tokens, meant to buy training-free rotation robustness for mirrored
+  floor-plan door symbols, was tried on floorplans-door and REGRESSED F1 0.144 → 0.108 — the wider
+  bank matches more background clutter at SOME rotation, adding false positives without a matching
+  recall gain. Not shipped. A future attempt should score per-rotation and take the scene-token MAX
+  across orientations rather than pooling into one bank, so a spurious cross-orientation match
+  cannot silently inflate a token's top-k average.
 - **DINOv3 backbone swap** once a clean ONNX export exists.
 
 ## Sample runs

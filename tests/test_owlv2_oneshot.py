@@ -3,8 +3,9 @@
 Two tiers, deliberately (mirroring ``test_propose_retrieve.py``):
 
 * **Model-free logic** -- the config schema, the pure helpers (``_l2_normalize``,
-  ``_iou_with_unit_box``, ``select_query_embedding``, ``boxes_to_pixels``, the OWLv2 preprocessing
-  tensor), the full ``search`` path driven by an **injected stub inferencer** (so the compose /
+  ``_iou_with_unit_box``, ``select_query_patch_index``, ``select_query_embedding``,
+  ``boxes_to_pixels``, the OWLv2 preprocessing tensor), the full ``search`` path driven by an
+  **injected stub inferencer** (so the compose /
   threshold / NMS / exemplar-labelling logic is gated with no weight), the "runtime imports no
   torch" constraint, and the model-absent error path. These **run in CI**.
 * **Real-model behaviour** -- the end-to-end search on the real ONNX graph. Needs the gitignored
@@ -36,9 +37,11 @@ from object_search.search.owlv2_oneshot import (
     _iou_with_unit_box,
     _l2_normalize,
     boxes_to_pixels,
+    expand_box_with_margin,
     reset_inferencer_cache,
     search,
     select_query_embedding,
+    select_query_patch_index,
     tile_boxes,
 )
 
@@ -132,6 +135,7 @@ def test_config_defaults() -> None:
     assert cfg.calibration == "self-similarity"  # gmm degenerates even on the calibrated score
     assert cfg.retain_frac == 0.85  # robust sweet spot against the calibrated score (re-tuned)
     assert cfg.query_iou_frac == 0.8
+    assert cfg.crop_context_margin_frac == 0.0  # no margin: byte-identical to prior behavior
     assert cfg.max_box_area_frac == 0.25  # drop the generic whole-frame box
     assert cfg.nms_iou == 0.3  # tight NMS collapses OWLv2's per-object duplicate patches
     assert cfg.max_candidates == 50
@@ -148,6 +152,7 @@ def test_config_is_frozen_and_schema_drives_the_form() -> None:
         "calibration",
         "retain_frac",
         "query_iou_frac",
+        "crop_context_margin_frac",
         "max_box_area_frac",
         "nms_iou",
         "max_candidates",
@@ -236,6 +241,44 @@ def test_select_query_embedding_picks_the_most_distinctive_covering_patch() -> N
     assert q[1] > q[0]  # the distinctive [0,1,0] patch, NOT the generic [1,0,0] one
 
 
+def test_select_query_patch_index_agrees_with_select_query_embedding() -> None:
+    """The extracted index-selection helper must never drift from the wrapper that uses it.
+
+    Same fixture as ``test_select_query_embedding_picks_the_most_distinctive_covering_patch``:
+    the index :func:`select_query_patch_index` returns must be the row whose L2-normalized
+    embedding equals what :func:`select_query_embedding` returns (D-dla-04).
+    """
+    class_embeds = np.array(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32
+    )
+    boxes = np.array(
+        [
+            [0.5, 0.5, 1.0, 1.0],
+            [0.5, 0.5, 1.0, 1.0],
+            [0.05, 0.05, 0.02, 0.02],
+            [0.05, 0.05, 0.02, 0.02],
+        ],
+        dtype=np.float32,
+    )
+    index = select_query_patch_index(class_embeds, boxes, iou_frac=0.8)
+    assert index == 1
+
+    expected = select_query_embedding(class_embeds, boxes, iou_frac=0.8)
+    normed = _l2_normalize(class_embeds, axis=1)
+    assert np.allclose(normed[index], expected)
+
+
+def test_select_query_patch_index_falls_back_to_largest_area_when_no_box_overlaps() -> None:
+    """Mirrors the existing zero-max-IoU fallback branch in ``select_query_embedding``."""
+    class_embeds = np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]], dtype=np.float32)
+    # None of these boxes overlaps the unit [0,1]x[0,1] box at all (all far outside it).
+    boxes = np.array(
+        [[5.0, 5.0, 0.5, 0.5], [5.0, 5.0, 0.1, 0.1], [5.0, 5.0, 2.0, 2.0]], dtype=np.float32
+    )
+    index = select_query_patch_index(class_embeds, boxes, iou_frac=0.8)
+    assert index == 2  # box 2 has the largest area (2.0 * 2.0)
+
+
 def test_boxes_to_pixels_maps_and_drops_degenerate() -> None:
     boxes = np.array(
         [
@@ -247,6 +290,29 @@ def test_boxes_to_pixels_maps_and_drops_degenerate() -> None:
     out = boxes_to_pixels(boxes, orig_w=200, orig_h=200)
     assert out[0] == BBox(x=10, y=10, w=30, h=30)
     assert out[1] is None
+
+
+def test_expand_box_with_margin_is_a_noop_at_zero() -> None:
+    box = BBox(x=10, y=10, w=30, h=30)
+    assert expand_box_with_margin(box, 0.0, image_w=200, image_h=200) == box
+
+
+def test_expand_box_with_margin_grows_symmetrically_by_the_exact_amount() -> None:
+    box = BBox(x=60, y=60, w=30, h=30)
+    expanded = expand_box_with_margin(box, 0.5, image_w=200, image_h=200)
+    assert expanded == BBox(x=45, y=45, w=60, h=60)
+
+
+def test_expand_box_with_margin_clamps_to_the_scene() -> None:
+    box = BBox(x=5, y=5, w=10, h=10)  # near the top-left edge
+    expanded = expand_box_with_margin(box, 2.0, image_w=200, image_h=200)
+    assert expanded.x == 0 and expanded.y == 0  # clamped, never negative
+    assert expanded.x2 <= 200 and expanded.y2 <= 200
+
+
+def test_expand_box_with_margin_rejects_negative_fraction() -> None:
+    with pytest.raises(ValueError, match="margin_frac"):
+        expand_box_with_margin(BBox(x=0, y=0, w=10, h=10), -0.1, image_w=200, image_h=200)
 
 
 def test_tile_boxes_single_tile_when_the_image_already_fits() -> None:
@@ -301,6 +367,28 @@ def test_search_end_to_end_with_a_stub_inferencer(monkeypatch: pytest.MonkeyPatc
     assert "query_ms" in result.diagnostics.metrics
     assert "target_ms" in result.diagnostics.metrics
     assert result.diagnostics.proposals is not None
+
+
+def test_search_applies_crop_context_margin_frac_to_the_query_crop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SAME exemplar box yields a materially larger query crop purely from the new field."""
+    scene = np.zeros((200, 200, 3), dtype=np.uint8)
+    exemplar = ExemplarBox(box=BBox(x=60, y=60, w=30, h=30))
+
+    stub_default = _StubInferencer(_query_stub(), _scene_stub())
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub_default)
+    search(scene, exemplar, Owlv2OneshotConfig(score_threshold=0.5))
+    assert stub_default.calls[0] == (30, 30)
+
+    stub_margin = _StubInferencer(_query_stub(), _scene_stub())
+    monkeypatch.setattr(owlv2_oneshot, "_get_inferencer", lambda: stub_margin)
+    search(
+        scene,
+        exemplar,
+        Owlv2OneshotConfig(score_threshold=0.5, crop_context_margin_frac=0.5),
+    )
+    assert stub_margin.calls[0] == (60, 60)
 
 
 def test_search_empty_when_nothing_clears(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -573,6 +661,60 @@ def test_search_returns_model_unavailable_when_weight_absent(
     assert result.error is not None
     assert result.error.kind == "model_unavailable"
     assert result.matches == ()
+
+
+# --------------------------------------- model-free: which weight file the method resolves (8zy)
+
+
+def test_resolve_model_path_without_the_env_var_is_the_shipped_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset OS_OWLV2_MODEL => exactly the path this method resolved before the override existed.
+
+    This is the whole promise of the opt-in: with no env var set, the shipped pretrained graph is
+    what loads, so every previously reported owlv2-oneshot number stays comparable.
+    """
+    monkeypatch.delenv("OS_OWLV2_MODEL", raising=False)
+    expected = models.models_dir() / models.MODEL_REGISTRY["owlv2-base-patch16"].dest
+    assert owlv2_oneshot._resolve_model_path() == expected
+
+    # An empty / whitespace value is treated as unset, not as a path to "".
+    monkeypatch.setenv("OS_OWLV2_MODEL", "   ")
+    assert owlv2_oneshot._resolve_model_path() == expected
+
+
+def test_resolve_model_path_relative_lands_in_models_dir_absolute_is_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(owlv2_oneshot.models, "models_dir", lambda: tmp_path)
+
+    monkeypatch.setenv("OS_OWLV2_MODEL", "owlv2_base_patch16_floorplans_ft.onnx")
+    assert owlv2_oneshot._resolve_model_path() == (
+        tmp_path / "owlv2_base_patch16_floorplans_ft.onnx"
+    )
+
+    absolute = tmp_path / "elsewhere" / "arm_b.onnx"
+    monkeypatch.setenv("OS_OWLV2_MODEL", str(absolute))
+    assert owlv2_oneshot._resolve_model_path() == absolute
+
+
+def test_method_version_and_config_defaults_are_unchanged_by_the_weight_override() -> None:
+    """The override points the SAME method at a different file; it is not a new method (8zy).
+
+    If `_METHOD_VERSION` or any config default moved, an A/B across weights would no longer be
+    attributable to the weights alone -- which is the only reason the override exists.
+    """
+    assert owlv2_oneshot._METHOD_VERSION == "1.0.0"
+    config = Owlv2OneshotConfig()
+    assert config.calibration == "self-similarity"
+    assert config.retain_frac == 0.85
+    assert config.query_iou_frac == 0.8
+    assert config.crop_context_margin_frac == 0.0
+    assert config.max_box_area_frac == 0.25
+    assert config.nms_iou == 0.3
+    assert config.max_candidates == 50
+    assert config.score_threshold is None
+    assert config.seed == 0
 
 
 def test_search_rejects_a_foreign_config() -> None:

@@ -1,0 +1,108 @@
+{
+  "arm": "headonly",
+  "base_model": "google/owlv2-base-patch16-ensemble",
+  "best_epoch": 1,
+  "best_val_loss": 5.0417094230651855,
+  "bf16": false,
+  "classes": [
+    "door",
+    "window",
+    "bathroom",
+    "perimeter",
+    "stairs"
+  ],
+  "config": {
+    "batch_size": 2,
+    "bbox_cost": 5.0,
+    "class_cost": 1.0,
+    "epochs": 1,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "giou_cost": 2.0,
+    "grad_accum": 1,
+    "grad_clip": 1.0,
+    "limit_images": 2,
+    "loss_mode": "contrastive",
+    "lr_backbone": 1e-05,
+    "lr_head": 0.0001,
+    "max_steps": 1,
+    "seed": 0,
+    "supcon_background_negatives": 64,
+    "supcon_crop_augment": false,
+    "supcon_crop_context": true,
+    "supcon_crop_margin_frac": 0.0,
+    "supcon_query_iou_frac": 0.8,
+    "supcon_temperature": 0.07,
+    "unfreeze_all": false,
+    "unfreeze_last_n": 0,
+    "w_bbox": 5.0,
+    "w_class": 1.0,
+    "w_contrast": 1.0,
+    "w_giou": 2.0,
+    "warmup_frac": 0.1,
+    "weight_decay": 0.0001
+  },
+  "epochs": [
+    {
+      "epoch": 0,
+      "saved": false,
+      "steps": 0,
+      "train_loss": 4.747983455657959,
+      "train_loss_bbox": 0.01978086121380329,
+      "train_loss_ce": 2.1188318729400635,
+      "train_loss_giou": 0.28750768303871155,
+      "train_loss_supcon": 4.074063777923584,
+      "val_cos_gap": {
+        "background_mean": 0.4470034250086176,
+        "diff_class_mean": 0.6488052940777989,
+        "gap_background": 0.3021623205311273,
+        "gap_class": 0.10036045146194605,
+        "same_class_mean": 0.7491657455397449
+      },
+      "val_crop_scene_agreement": {
+        "n_pairs": 2.0,
+        "self_score_max": 0.49720200064697095,
+        "self_score_mean": 0.46204276481101525,
+        "self_score_min": 0.4268835289750596
+      },
+      "val_loss": 5.483437180519104,
+      "val_loss_bbox": 0.020982792600989342,
+      "val_loss_ce": 2.1592392921447754,
+      "val_loss_giou": 0.3993532061576843,
+      "val_loss_supcon": 4.579816818237305
+    },
+    {
+      "epoch": 1,
+      "saved": true,
+      "steps": 1,
+      "train_loss": 4.790621280670166,
+      "train_loss_bbox": 0.01978086121380329,
+      "train_loss_ce": 2.1188318729400635,
+      "train_loss_giou": 0.28750768303871155,
+      "train_loss_supcon": 4.116701602935791,
+      "val_cos_gap": {
+        "background_mean": 0.4789119921515866,
+        "diff_class_mean": 0.6614166573450352,
+        "gap_background": 0.30161897794148534,
+        "gap_class": 0.11911431274803674,
+        "same_class_mean": 0.7805309700930719
+      },
+      "val_crop_scene_agreement": {
+        "n_pairs": 2.0,
+        "self_score_max": 0.5642257503795944,
+        "self_score_mean": 0.5223970303540755,
+        "self_score_min": 0.4805683103285565
+      },
+      "val_loss": 5.0417094230651855,
+      "val_loss_bbox": 0.019654396921396255,
+      "val_loss_ce": 2.289309501647949,
+      "val_loss_giou": 0.33249014616012573,
+      "val_loss_supcon": 4.278457164764404
+    }
+  ],
+  "seed": 0,
+  "total_params": 154966792,
+  "train_coco": "datasets/_incoming/floorplans/train/_annotations.coco.json",
+  "trainable_params": 1579526,
+  "val_coco": "datasets/_incoming/floorplans/valid/_annotations.coco.json"
+}

@@ -115,7 +115,13 @@ doors, 1st on windows, full 28/28 coverage, and (below) uniformly robust to symb
   +76% tuned F1) but doors only a little and noisily (the val-argmax is unstable across nearby area
   values with only 56 validation plans — full trial table in
   [`docs/reports/owlv2-floorplans-improvement.md`](../reports/owlv2-floorplans-improvement.md)).
-  Windows are still the harder class in absolute terms — but no longer barely moving.
+  Windows are still the harder class in absolute terms — but no longer barely moving. Fine-tuning
+  the underlying OWLv2 weights was also tried, independently of this calibration pass — see
+  [`owlv2` floor-plan fine-tune](../reports/owlv2-floorplans-finetune.md): four experiments,
+  the first two (classification loss, plain contrastive loss) regress doors and are negative
+  results, but a crop-context-supervised contrastive objective (with rotation/mirror augmentation)
+  beats the pretrained baseline on both classes (door F1 up to 0.253 tuned, window 0.204–0.216) —
+  still short of `propose-retrieve`/`ncc`, so the recommendation below is unaffected.
 - **The `dino-dense` letterbox works:** coverage 0/28 → 13/14 (OOM failures 28 → 1). Still not
   competitive, but no longer broken.
 

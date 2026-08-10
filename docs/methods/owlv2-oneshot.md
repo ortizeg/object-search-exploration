@@ -30,12 +30,14 @@ plain single-input inferencer and the "image-guided" cleverness legible.
 
 ### 1. Encode the exemplar crop as a query image
 
-The crop `image[exemplar.box]` is encoded through `OWLv2Inferencer.embed_image`, yielding per-patch
-`class_embeds` `(P, 512)` and normalized `pred_boxes` `(P, 4)`. Same graph, same preprocessing as
-the scene encode in step 3. If `config.rotation_invariant`, the crop rotated 90/180/270 degrees is
-ALSO encoded (OWLv2 patch embeddings are not rotation-equivariant, so a mirrored/rotated scene
-instance may not match the exemplar's own orientation) — measured not to net-help (see the
-ROBUSTNESS BACKLOG below), so it stays off by default.
+The crop `image[exemplar.box]` (optionally grown by `config.crop_context_margin_frac`, clamped to
+the scene, via `expand_box_with_margin` — `0.0` is byte-identical to the tight box) is encoded
+through `OWLv2Inferencer.embed_image`, yielding per-patch `class_embeds` `(P, 512)` and normalized
+`pred_boxes` `(P, 4)`. Same graph, same preprocessing as the scene encode in step 3. If
+`config.rotation_invariant`, the crop rotated 90/180/270 degrees is ALSO encoded (OWLv2 patch
+embeddings are not rotation-equivariant, so a mirrored/rotated scene instance may not match the
+exemplar's own orientation) — measured not to net-help (see the ROBUSTNESS BACKLOG below), so it
+stays off by default.
 
 ### 2. Select one query embedding per rotation (most-distinctive covering patch)
 
@@ -156,6 +158,7 @@ cannot drift from the code.
 | `calibration` | `"self-similarity"` | How the threshold is chosen when `score_threshold` is null. `self-similarity` cuts at `self_score * retain_frac`, anchored to the exemplar's own self-match. `gmm` degenerates badly even against the calibrated score (measured). |
 | `retain_frac` | `0.85` | `self-similarity` accepts scene patches above `self_score * retain_frac`. Higher is stricter. `0.85` is the robust sweet spot against the CALIBRATED score — beat the prior `0.94`/raw-cosine baseline's F1 on every regime measured. |
 | `query_iou_frac` | `0.8` | Query-embedding selection: among the exemplar-crop patches whose predicted box IoU with the full crop is at least this fraction of the maximum, pick the single most distinctive (least similar to the mean). Lower widens the candidate set. |
+| `crop_context_margin_frac` | `0.0` | Grow the exemplar box by this fraction of its own width/height on each side (clamped to the scene) before cropping the query image. `0.0` crops the exemplar box exactly, unchanged from prior behavior. A margin pulls in real neighboring pixels instead of the synthetic pad color a tight crop gets blown up on. Measured on floor plans (fine-tuned checkpoint): helps doors at `0.15` (+21%), hurts windows at every nonzero value tried — no single value wins both classes, so this stays off by default (`docs/reports/owlv2-floorplans-finetune.md`, fourth experiment). |
 | `rotation_invariant` | `false` | Also encode the crop rotated 90/180/270 degrees and score on the per-patch MAX across all four. Measured: helps VARIED/WINDOW, regresses DOOR (-26%) and EASY (-20%) — not recommended. |
 | `max_box_area_frac` | `0.25` | Drop any predicted box whose area exceeds this fraction of its SOURCE TILE's area — OWLv2's generic whole-frame box, which scores highest but is never a valid instance. |
 | `tile_large_scenes` | `false` | Split a scene wider/taller than 960px into overlapping 960px tiles instead of downscaling into one pass. Measured: regressed 5 of 6 regimes, including EASY (the one it targeted) — not recommended. |

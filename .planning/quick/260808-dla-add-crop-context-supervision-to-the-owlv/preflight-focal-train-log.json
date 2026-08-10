@@ -1,0 +1,63 @@
+{
+  "arm": "headonly",
+  "base_model": "google/owlv2-base-patch16-ensemble",
+  "best_epoch": 1,
+  "best_val_loss": 2.435304641723633,
+  "bf16": false,
+  "classes": [
+    "door",
+    "window",
+    "bathroom",
+    "perimeter",
+    "stairs"
+  ],
+  "config": {
+    "batch_size": 2,
+    "bbox_cost": 5.0,
+    "class_cost": 1.0,
+    "epochs": 1,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "giou_cost": 2.0,
+    "grad_accum": 1,
+    "grad_clip": 1.0,
+    "limit_images": 2,
+    "loss_mode": "focal",
+    "lr_backbone": 1e-05,
+    "lr_head": 0.0001,
+    "max_steps": 1,
+    "seed": 0,
+    "supcon_background_negatives": 64,
+    "supcon_crop_context": false,
+    "supcon_query_iou_frac": 0.8,
+    "supcon_temperature": 0.07,
+    "unfreeze_all": false,
+    "unfreeze_last_n": 0,
+    "w_bbox": 5.0,
+    "w_class": 1.0,
+    "w_contrast": 1.0,
+    "w_giou": 2.0,
+    "warmup_frac": 0.1,
+    "weight_decay": 0.0001
+  },
+  "epochs": [
+    {
+      "epoch": 1,
+      "saved": true,
+      "steps": 1,
+      "train_loss": 2.7927515506744385,
+      "train_loss_bbox": 0.01978086121380329,
+      "train_loss_ce": 2.1188318729400635,
+      "train_loss_giou": 0.28750768303871155,
+      "val_loss": 2.435304641723633,
+      "val_loss_bbox": 0.019662583246827126,
+      "val_loss_ce": 1.6715418100357056,
+      "val_loss_giou": 0.3327248990535736
+    }
+  ],
+  "seed": 0,
+  "total_params": 154966792,
+  "train_coco": "datasets/_incoming/floorplans/train/_annotations.coco.json",
+  "trainable_params": 1579526,
+  "val_coco": "datasets/_incoming/floorplans/valid/_annotations.coco.json"
+}

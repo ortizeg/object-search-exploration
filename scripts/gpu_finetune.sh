@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# Fine-tune OWLv2 on the floor-plans train split on a CUDA GPU box (e.g. a vast.ai RTX 3090/4090),
+# export the trained arm(s) to ONNX, and measure baseline-vs-fine-tuned precision/recall on the
+# frozen 28-plan floor-plan test splits. This is the reproducible recipe behind the numbers in
+# docs/reports/owlv2-floorplans-finetune.md (quick tasks 260801-8zy and 260805-hg1).
+#
+# Arm-selectable via ARMS (space-separated, default reproduces the original 260801-8zy 3-arm run
+# exactly):
+#   baseline    -- train-free; evaluates the already-exported pretrained graph.
+#   headonly    -- box_head + class_head only, vision tower frozen, classification (focal) loss.
+#   full        -- + the whole vision tower unfrozen, classification (focal) loss.
+#   contrastive -- box_head + class_head only (heads-only freeze, like headonly), but
+#                  --loss-mode contrastive (SupCon over class_embeds, see 260805-hg1). Added
+#                  without touching the headonly/full rows so the default ARMS reproduces
+#                  260801-8zy's committed numbers byte-for-byte in intent, if not in bits (GPU
+#                  floating point is not bit-identical across physical hardware -- verify a
+#                  regenerated checkpoint by its train_log.json loss curve, never by sha256).
+#   contrastive-crop -- same as contrastive, plus --supcon-crop-context (crop-context SupCon
+#                  anchors, see 260808-dla). Added as its own row so it cannot collide with or
+#                  overwrite the `contrastive` arm's already-committed artifacts.
+#   contrastive-crop-v2 -- same as contrastive-crop, plus --supcon-crop-augment (rotation/mirror
+#                  crop-positive augmentation, see 260808-w8c) and, if OWLV2_MARGIN_FRAC is
+#                  nonzero, --supcon-crop-margin-frac. The 260808-w8c margin sweep found no margin
+#                  value beats 0.0 on both classes, so the default invocation trains augmentation
+#                  alone; OWLV2_MARGIN_FRAC exists so a future re-run can revisit that with a
+#                  different verdict without editing this script.
+# The text tower stays frozen in EVERY arm -- it is not part of the exported graph, see
+# scripts/finetune_owlv2.py.
+#
+# Prereqs on the box:
+#   * a CUDA 12.x image, git, curl;
+#   * the Roboflow floor-plans COCO export at datasets/_incoming/floorplans/{train,valid,test}.
+#     Floor plans is a MANUAL dataset -- there is NO ungated URL, so it must be copied to the box
+#     BEFORE running this script, exactly as scripts/gpu_bench.sh documents:
+#       scp -r ~/Downloads/floorPlans <user>@<box>:/path/to/object-search-exploration/datasets/_incoming/floorplans
+#     This script has nothing to do without them and exits with an actionable message.
+#   * HF_TOKEN is OPTIONAL here. Everything this script downloads is public: OWLv2's base weights
+#     (google/owlv2-base-patch16-ensemble, Apache-2.0) and the DINOv2/SuperPoint artifacts
+#     fetch-models already handles. The floor plans arrive by scp, not from the Hub. So a missing
+#     HF_TOKEN is a warning, never a failure.
+#
+# Usage:
+#   bash scripts/gpu_finetune.sh                                   # all three original arms
+#   ARMS="contrastive" SEED=0 EPOCHS=8 BATCH_SIZE=2 GRAD_ACCUM=4 bash scripts/gpu_finetune.sh
+#
+# Artifacts for pull-back (printed again at the end):
+#   docs/benchmark/owlv2-finetune/*.json              -- N arms x 2 classes tuning reports
+#   models/finetune/*/train_log.json                  -- the per-epoch train/val curves
+#   models/owlv2_base_patch16_floorplans_ft.onnx            -- headonly (registered artifact)
+#   models/owlv2_base_patch16_floorplans_ft_full.onnx       -- full (unregistered comparison)
+#   models/owlv2_base_patch16_floorplans_ft_contrastive.onnx -- contrastive (unregistered comparison)
+#   models/owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx -- contrastive-crop (260808-dla)
+#   models/owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx -- contrastive-crop-v2 (260808-w8c)
+set -euo pipefail
+
+export HF_HUB_DISABLE_XET=1
+if [ -z "${HF_TOKEN:-}" ]; then
+  echo "WARNING: HF_TOKEN is not set. Everything this script downloads is public (OWLv2 is"
+  echo "         Apache-2.0 and ungated; the floor plans arrive by scp), so this is fine -- but if"
+  echo "         a Hub download 401s, export HF_TOKEN and re-run."
+fi
+
+PIXI="${PIXI:-$HOME/.pixi/bin/pixi}"
+command -v "$PIXI" >/dev/null 2>&1 || { curl -fsSL https://pixi.sh/install.sh | bash; PIXI="$HOME/.pixi/bin/pixi"; }
+
+SEED="${SEED:-0}"
+EPOCHS="${EPOCHS:-8}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-4}"
+ARMS="${ARMS:-baseline headonly full}"
+# Only read for the contrastive-crop-v2 arm's training flags and step 6's eval-time grids override
+# (see 260808-w8c's margin-verdict.md -- 0.0 by default since no margin beat it on both classes).
+OWLV2_MARGIN_FRAC="${OWLV2_MARGIN_FRAC:-0.0}"
+
+_CONTRASTIVE_CROP_V2_FLAGS="--loss-mode contrastive --supcon-crop-context --supcon-crop-augment"
+if [ "$OWLV2_MARGIN_FRAC" != "0.0" ] && [ "$OWLV2_MARGIN_FRAC" != "0" ]; then
+  _CONTRASTIVE_CROP_V2_FLAGS="$_CONTRASTIVE_CROP_V2_FLAGS --supcon-crop-margin-frac $OWLV2_MARGIN_FRAC"
+fi
+
+declare -A TRAIN_FLAGS=(
+  [headonly]=""
+  [full]="--unfreeze-all"
+  [contrastive]="--loss-mode contrastive"
+  [contrastive-crop]="--loss-mode contrastive --supcon-crop-context"
+  [contrastive-crop-v2]="$_CONTRASTIVE_CROP_V2_FLAGS"
+)
+declare -A CKPT_DIR=(
+  [headonly]="models/finetune/owlv2-floorplans-headonly"
+  [full]="models/finetune/owlv2-floorplans-full"
+  [contrastive]="models/finetune/owlv2-floorplans-contrastive"
+  [contrastive-crop]="models/finetune/owlv2-floorplans-contrastive-crop"
+  [contrastive-crop-v2]="models/finetune/owlv2-floorplans-contrastive-crop-v2"
+)
+declare -A ONNX_NAME=(
+  [baseline]="owlv2_base_patch16.onnx"
+  [headonly]="owlv2_base_patch16_floorplans_ft.onnx"
+  [full]="owlv2_base_patch16_floorplans_ft_full.onnx"
+  [contrastive]="owlv2_base_patch16_floorplans_ft_contrastive.onnx"
+  [contrastive-crop]="owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx"
+  [contrastive-crop-v2]="owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx"
+)
+
+echo "== 1/8  install envs (default + export) and assert BOTH CUDA paths =="
+"$PIXI" install
+"$PIXI" install -e export
+
+# --- 1a. onnxruntime-gpu for the DEFAULT env (the eval path). THREE gotchas, not two:
+# onnxruntime is a CONDA package here so `pip uninstall onnxruntime` cannot remove it, and the pixi
+# env ships NO pip so `pixi run pip ...` is a silent no-op. Bootstrap pip, force-install over it.
+# The third gotcha, found the hard way on a real box: `onnxruntime-gpu>=1.19,<2` resolves to
+# whatever is newest (1.28.0 as of this writing), which needs CUDA 13 / cuDNN 9 -- but a
+# `pytorch/pytorch:*-cuda12.1-*` box only has CUDA 12.1. The CUDAExecutionProvider then fails to
+# LOAD at session-creation time (not at the `get_available_providers()` check below, which only
+# reports what's compiled in, not what actually initializes), and onnxruntime silently falls back
+# to CPU -- eval that should take minutes takes hours with no error anywhere. Pin to 1.23.2, the
+# newest version confirmed to actually load CUDAExecutionProvider on CUDA 12.1/cuDNN 9.
+PYBIN="$("$PIXI" run -q which python)"
+"$PYBIN" -m ensurepip --upgrade
+"$PYBIN" -m pip install --force-reinstall --no-deps "onnxruntime-gpu==1.23.2"
+# Invoke $PYBIN DIRECTLY from here on -- a later `pixi run` can re-sync the conda CPU build over it.
+# This only checks what onnxruntime-gpu is COMPILED with, not what actually loads at runtime --
+# `get_available_providers()` lists CUDAExecutionProvider even when its .so later fails to dlopen.
+# The real load-bearing check is below (after 1b), once the export env's torch -- and therefore
+# its bundled cuDNN/cuBLAS libs, which the LD_LIBRARY_PATH setup after 1b depends on -- is known
+# to actually be the CUDA build, not before.
+"$PYBIN" -c "import onnxruntime as o; ps=o.get_available_providers(); print('ORT providers (compiled in):', ps); assert 'CUDAExecutionProvider' in ps, 'CUDAExecutionProvider missing -- check CUDA libs / driver'"
+
+# --- 1b. NEW gotcha, and the one that silently costs the most: the `export` feature's conda
+# `pytorch` can resolve to a CPU-ONLY build on a CUDA box. Training would then run for hours on the
+# CPU without a single error. Assert, and force the CUDA wheel in with the same bootstrap-pip /
+# --force-reinstall pattern if the assertion fails.
+EXPORT_PYBIN="$("$PIXI" run -e export -q which python)"
+if ! "$EXPORT_PYBIN" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+  echo "  export env's torch is CPU-only -- force-installing the CUDA wheel"
+  "$EXPORT_PYBIN" -m ensurepip --upgrade
+  "$EXPORT_PYBIN" -m pip install --force-reinstall \
+    --index-url https://download.pytorch.org/whl/cu121 torch torchvision
+fi
+"$EXPORT_PYBIN" -c "import torch; assert torch.cuda.is_available(), 'torch still cannot see the GPU -- refusing to train on CPU'; print('torch CUDA:', torch.cuda.get_device_name(0))"
+
+# --- 1c. cuDNN 9 / cuBLAS libs for onnxruntime's CUDAExecutionProvider: NOT reliably on the
+# system CUDA path even on a "cudnn9-devel" image (found by testing, not assumed) -- but always
+# present alongside the export env's now-confirmed-CUDA torch install (its wheels bundle them).
+# Must run AFTER 1b, not before: if 1b just force-installed the CUDA wheel, that's when these
+# paths first exist.
+_EXPORT_SITE_PKGS="$(dirname "$(dirname "$EXPORT_PYBIN")")/lib/python3.12/site-packages"
+_CUDNN_LIB="$(dirname "$(find "$_EXPORT_SITE_PKGS/nvidia/cudnn/lib" -name 'libcudnn.so.9' -print -quit 2>/dev/null)" 2>/dev/null || true)"
+_CUBLAS_LIB="$(dirname "$(find "$_EXPORT_SITE_PKGS/nvidia/cublas/lib" -name 'libcublasLt.so*' -print -quit 2>/dev/null)" 2>/dev/null || true)"
+export LD_LIBRARY_PATH="${_CUDNN_LIB}:${_CUBLAS_LIB}:/usr/local/cuda/lib64:/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export OS_ONNX_PROVIDERS="CUDAExecutionProvider,CPUExecutionProvider"
+
+# --- 1d. The dataset. This script has nothing to do without it.
+for split in train valid test; do
+  [ -d "datasets/_incoming/floorplans/$split" ] || {
+    echo "FATAL: datasets/_incoming/floorplans/$split is missing."
+    echo "Floor plans is a MANUAL dataset. scp the Roboflow COCO export to the box first:"
+    echo "  scp -r ~/Downloads/floorPlans <user>@<box>:\$PWD/datasets/_incoming/floorplans"
+    exit 1
+  }
+done
+echo "  floor-plan COCO tree present"
+
+echo "== 2/8  fetch models + export the BASELINE pretrained owlv2 graph =="
+"$PIXI" run fetch-models || true
+"$PIXI" run -e export export-owlv2
+test -f models/owlv2_base_patch16.onnx
+# The real CUDAExecutionProvider check: does it actually LOAD, not just get reported as compiled
+# in. Fail loudly here, before any GPU time is spent training, rather than silently eval-ing on
+# CPU for hours later in step 7.
+"$PYBIN" -c "
+import onnxruntime as o
+sess = o.InferenceSession('models/owlv2_base_patch16.onnx', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+actual = sess.get_providers()
+print('ORT providers (actually loaded):', actual)
+assert 'CUDAExecutionProvider' in actual, (
+    'CUDAExecutionProvider is compiled in but FAILED TO LOAD (check LD_LIBRARY_PATH for '
+    'libcudnn.so.9 / libcublasLt.so.* -- see step 1c) -- would otherwise silently fall back to '
+    'CPU for the eval sweep in step 7'
+)
+"
+
+echo "== 3/8  convert floor plans -> datasets/floorplans-{door,window}/{val,test} =="
+"$PIXI" run fetch-datasets
+test -d datasets/floorplans-door/test && test -d datasets/floorplans-window/test
+
+echo "== 4/8  train arm(s): $ARMS =="
+for arm in $ARMS; do
+  [ "$arm" = "baseline" ] && { echo "--- $arm is train-free (already exported in step 2) ---"; continue; }
+  echo "--- train $arm (finetune-owlv2 ${TRAIN_FLAGS[$arm]:-}) ---"
+  # shellcheck disable=SC2086 -- TRAIN_FLAGS is a single pre-tokenized flag or empty, not user input
+  "$PIXI" run -e export finetune-owlv2 ${TRAIN_FLAGS[$arm]:-} \
+    --seed "$SEED" --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
+    --out "${CKPT_DIR[$arm]}"
+done
+
+echo "== 5/8  export trained arm(s) to their OWN onnx artifact (the shipped baseline stays untouched) =="
+for arm in $ARMS; do
+  [ "$arm" = "baseline" ] && continue
+  "$PIXI" run -e export python scripts/export_owlv2.py --checkpoint "${CKPT_DIR[$arm]}" --out "${ONNX_NAME[$arm]}"
+  ls -la "models/${ONNX_NAME[$arm]}"
+done
+# Re-assert the ORT GPU build: the export step ran `pixi run`, which can re-sync the conda CPU
+# onnxruntime.
+"$PYBIN" -c "import onnxruntime as o; assert 'CUDAExecutionProvider' in o.get_available_providers()" \
+  || "$PYBIN" -m pip install --force-reinstall --no-deps "onnxruntime-gpu==1.23.2"
+
+echo "== 6/8  evaluate arm(s) x 2 classes -- ONE PROCESS PER RUN =="
+# Per-run processes mirror gpu_bench.sh: onnxruntime re-allocates its CUDA arena per distinct input
+# resolution and the plans vary in size, so a shared process is where the OOMs live. Everything
+# except OS_OWLV2_MODEL is identical across arms, so the delta is attributable to the weights
+# alone. A single failed cell prints TUNE_FAIL and the GPU session continues.
+mkdir -p docs/benchmark/owlv2-finetune
+for ds in floorplans-door floorplans-window; do
+  for arm in $ARMS; do
+    MODEL="${ONNX_NAME[$arm]}"
+    echo "--- tune $ds / $arm ($MODEL) ---"
+    OS_OWLV2_MODEL="$MODEL" "$PYBIN" - "$ds" "$arm" "$OWLV2_MARGIN_FRAC" <<'PYEOF' || echo "TUNE_FAIL $arm $ds"
+import sys
+from object_search.eval.tuning import _TUNING_GRIDS, run_domain_tuning
+ds, arm, margin_frac = sys.argv[1], sys.argv[2], float(sys.argv[3])
+# The contrastive-crop-v2 arm is scored with the crop it was trained to expect (D-w8c-03/D-w8c-10):
+# only when margin is nonzero does this differ from every other arm's plain tuning grid.
+grids = None
+if arm == "contrastive-crop-v2" and margin_frac != 0.0:
+    grids = {
+        "owlv2-oneshot": tuple(
+            {**dict(g), "crop_context_margin_frac": margin_frac} for g in _TUNING_GRIDS["owlv2-oneshot"]
+        )
+    }
+run_domain_tuning(ds, "datasets", methods=("owlv2-oneshot",), exemplar_count=1, grids=grids,
+                  out=f"docs/benchmark/owlv2-finetune/{ds}-{arm}.json")
+PYEOF
+  done
+done
+
+echo "== 7/8  sha256 provenance =="
+"$PYBIN" - "$ARMS" <<'PYEOF'
+import sys
+from pathlib import Path
+from object_search.provenance import file_sha256
+onnx_names = {
+    "baseline": "owlv2_base_patch16.onnx",
+    "headonly": "owlv2_base_patch16_floorplans_ft.onnx",
+    "full": "owlv2_base_patch16_floorplans_ft_full.onnx",
+    "contrastive": "owlv2_base_patch16_floorplans_ft_contrastive.onnx",
+    "contrastive-crop": "owlv2_base_patch16_floorplans_ft_contrastive_crop.onnx",
+    "contrastive-crop-v2": "owlv2_base_patch16_floorplans_ft_contrastive_crop_v2.onnx",
+}
+arms = sys.argv[1].split()
+for arm in arms:
+    name = onnx_names[arm]
+    path = Path("models") / name
+    print(f"{name}: {file_sha256(path) if path.is_file() else 'MISSING'}")
+PYEOF
+
+echo "== 8/8  pull-back list =="
+echo "DONE. Pull these back:"
+ls -la docs/benchmark/owlv2-finetune/*.json || true
+ls -la models/finetune/*/train_log.json || true
+for arm in $ARMS; do
+  [ "$arm" = "baseline" ] && continue
+  ls -la "models/${ONNX_NAME[$arm]}" || true
+done
+echo "Then DESTROY the instance: vastai destroy instance <id>  (and confirm with: vastai show instances)"
