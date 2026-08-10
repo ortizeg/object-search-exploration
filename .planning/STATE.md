@@ -63,6 +63,27 @@ mirror knob; mosse also has a disclosed doors val/test nuance (narrower sweep fo
 honest full-grid argmax ships 0.408 instead). Zero synthetic-regime regression on either method.
 New scripts/ncc_debug_visualize.py debug tool. Full suite green.
 
+Prior activity: 2026-08-08 — Quick task 260730-vx3 (sparse-geo): the same floor-plan flat-recall symptom attacked on
+Method 2, and unlike ncc/mosse it did NOT pay off — a fully negative, fully measured result. Two
+hypotheses, both disproven, both out of the diff: (1) mirror acceptance (allow_mirror + reflected
+pose votes) lost F1 in 4/4 class x voting-mode cells — at single-4dof (door -0.004, window -0.020)
+and at pairwise-4dof against its own no-mirror control (door -0.008, window -0.032) — with precision
+and AP50 down everywhere and ~2x latency; reverted in full, commit 8ab99a2. (2) SuperPoint backend
+lost F1 in 4/4 cells (best case door -0.024, window -0.048), AP50 down in 3/4, window coverage
+28/28 -> 26/28 on a hard ONNX/CoreML crash at zero detected keypoints, 5.3-6.9x latency; never
+committed, so its revert was a no-op in src/. sparse_geo.py verified byte-identical to pre-task
+df64af1 (SHA-256 + empty diff) and the default-config synthetic regimes reproduce EXACTLY
+(tp/fp/fn identical on all four). Key diagnostics worth keeping: the det<0 mirror gate fires only
+2 times in 55 peaks (it was never where mirrored doors die — the loss is at the voting stage), and
+SIFT orientations are NOT mirror-consistent, so single-4dof structurally cannot cluster a mirrored
+instance. The flat door recall-by-size symptom remains OPEN — the funnel collapses between
+correspondence and peak (55 peaks for 157 GT doors from 2664 correspondences). Docs-only change:
+new docs/reports/sparse-geo-improvement.md + nav, findings-page and ROBUSTNESS-BACKLOG
+cross-references. Structural contrast recorded: ncc/mosse are template-correlation methods with no
+built-in rotation invariance, so a cardinal rotation bank was their winning lever; sparse-geo's SIFT
+keypoints are rotation-invariant by construction, so this investigation correctly scoped to
+reflection instead — reflection just turned out not to be the answer either.
+
 Progress: [█████████░] 88%
 
 ### Quick Tasks Completed
@@ -75,6 +96,7 @@ Progress: [█████████░] 88%
 | 260730-vx4 | ncc floor-plan orientation/mirror follow-up: cardinal bank + mirror, doors F1 0.164->0.358 | 2026-08-01 | 357abe3 | [260730-vx4](./quick/260730-vx4-improve-ncc-on-floor-plan-door-window-do/) |
 | 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
 | 260730-w9s | mosse floor-plan orientation/mirror follow-up: cardinal bank + verify-mirror, doors F1 0.201->0.408, windows 0.077->0.155 | 2026-08-07 | c84428b | [260730-w9s](./quick/260730-w9s-improve-mosse-on-floor-plan-door-window-/) |
+| 260730-vx3 | sparse-geo floor-plan investigation: mirror acceptance AND SuperPoint backend BOTH disproven and reverted; no source change, docs-only report | 2026-08-08 | (pending) | [260730-vx3](./quick/260730-vx3-improve-sparse-geo-src-object-search-sea/) |
 | 260805-hg1 | SupCon contrastive loss for OWLv2 floor-plans fine-tune — sharper negative result, diagnosed crop/scene calibration break | 2026-08-08 | (pending) | [260805-hg1](./quick/260805-hg1-add-a-supervised-contrastive-loss-varian/) |
 | 260808-dla | Crop-context SupCon fix — closes the calibration break, best fine-tuned OWLv2 arm measured (door F1 0.229, window F1 0.216) | 2026-08-08 | (pending) | [260808-dla](./quick/260808-dla-add-crop-context-supervision-to-the-owlv/) |
 | 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |

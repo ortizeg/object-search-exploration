@@ -90,6 +90,7 @@ benchmark.log
 # EXPERIMENTS.md + the report section.
 .planning/quick/*/runs/
 .planning/quick/*/logs/
+.planning/quick/*/measurements/
 # Per-image debug renders from scripts/ncc_debug_visualize.py (and its future siblings) --
 # derived from the licensed floor-plan images, not a committed deliverable in their own right.
 .planning/quick/*/debug/

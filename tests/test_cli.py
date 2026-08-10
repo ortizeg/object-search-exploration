@@ -147,3 +147,83 @@ def test_render_samples_all_renders_marker_gallery_when_backend_available(
     result = runner.invoke(app, ["render-samples", "--out", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "marker sample artifact(s)" in result.output
+
+
+# ------------------------------------------- tune-floorplans: the --methods run-set narrowing
+# (run_domain_tuning is stubbed, so nothing is scored and no dataset or weight is touched; only
+# the CLI's parse-and-validate boundary is under test. Model-free by construction, so it holds in
+# CI where models/ is empty.)
+
+
+def _stub_tuning(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, tuple[str, ...]]]:
+    """Replace run_domain_tuning with a recorder; return the (dataset, methods) call log."""
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def _record(
+        dataset: str,
+        research_root: object,
+        *,
+        methods: object,
+        exemplar_count: int,
+        out: str,
+    ) -> dict[str, object]:
+        assert isinstance(methods, tuple | list)
+        calls.append((dataset, tuple(str(m) for m in methods)))
+        return {"methods": []}
+
+    monkeypatch.setattr("object_search.eval.tuning.run_domain_tuning", _record)
+    return calls
+
+
+def test_tune_floorplans_methods_option_parses_a_comma_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_tuning(monkeypatch)
+    result = runner.invoke(
+        app, ["tune-floorplans", "--dataset", "floorplans-door", "--methods", "ncc,sparse-geo"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [("floorplans-door", ("ncc", "sparse-geo"))]
+
+
+def test_tune_floorplans_methods_option_tolerates_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_tuning(monkeypatch)
+    result = runner.invoke(
+        app, ["tune-floorplans", "--dataset", "floorplans-door", "--methods", " sparse-geo , ncc "]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [("floorplans-door", ("sparse-geo", "ncc"))]
+
+
+def test_tune_floorplans_without_methods_requests_all_six(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from object_search.eval.tuning import DEFAULT_TUNING_METHODS
+
+    calls = _stub_tuning(monkeypatch)
+    result = runner.invoke(app, ["tune-floorplans", "--dataset", "floorplans-window"])
+    assert result.exit_code == 0, result.output
+    assert calls == [("floorplans-window", DEFAULT_TUNING_METHODS)]
+    assert len(DEFAULT_TUNING_METHODS) == 6
+
+
+def test_tune_floorplans_rejects_an_unknown_method_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_tuning(monkeypatch)
+    result = runner.invoke(
+        app, ["tune-floorplans", "--dataset", "floorplans-door", "--methods", "ncc,sparse_geo"]
+    )
+    # A typo must fail loudly at the CLI boundary, not produce an empty report.
+    assert result.exit_code == 1
+    assert "sparse_geo" in result.output
+    assert calls == []
+
+
+def test_tune_floorplans_rejects_an_empty_methods_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_tuning(monkeypatch)
+    result = runner.invoke(
+        app, ["tune-floorplans", "--dataset", "floorplans-door", "--methods", " , "]
+    )
+    assert result.exit_code == 1
+    assert calls == []

@@ -55,6 +55,23 @@ docstring (mirrored verbatim so the two cannot drift).
 - **LoFTR / RoMa dense matching** with correspondence-field clustering for low-texture objects
   (a research spike — the ONNX export is awkward).
 
+> **Two hypotheses against the floor-plan flat door recall were investigated, and BOTH were
+> reverted** (see [`reports/sparse-geo-improvement.md`](reports/sparse-geo-improvement.md)).
+> **Mirror acceptance** — an `allow_mirror` relaxation of the `det < 0` degeneracy gate plus
+> reflected pose votes — lost F1 in 4/4 class × voting-mode cells and was removed in full
+> (commit `8ab99a2`); the pre-existing mirror *rejection* contract is unchanged. A **SuperPoint
+> backend** lost F1 in 4/4 cells, dropped window coverage 28/28 → 26/28 on an ONNX/CoreML crash
+> when zero keypoints are detected, and cost 5.3–6.9× latency; it was never committed, and
+> `backend` still defaults to `sift`. **Nothing in the list above was realized by that work**, but
+> two items gain context from it: **DISK / ALIKED backends** are now also a question about learned-
+> detector *quality on line-art* (SuperPoint found less than half as many exemplar keypoints as
+> SIFT on the one texture-rich door crop probed), not only about escaping SuperPoint's
+> non-commercial terms; and **post-hoc orientation assignment for frameless keypoints** is worth
+> less than it looked, since SIFT's own orientations were measured *not* mirror-consistent. The
+> flat door recall-by-size symptom itself remains **unexplained** — the funnel collapses somewhere
+> between correspondence and peak (55 peaks hypothesized for 157 ground-truth doors, from 2 664
+> correspondences), and per-instance funnel instrumentation is the cheapest next measurement.
+
 ## `dino-dense` (Method 3 — DINOv2 dense-token best-part matching)
 
 Captured here and in the `dino_dense.py` docstring. The mean-pooled-prototype and thresholding
