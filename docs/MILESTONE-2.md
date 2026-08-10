@@ -8,7 +8,7 @@ all implemented and tested. The references below point at the real, shipped code
 
 - **Exploration:** [`docs/explorations/marker-conditioned.md`](explorations/marker-conditioned.md)
   — the full pipeline, the two orientation paths, the scoring formula, and the config reference.
-- **Sample runs:** [`docs/samples/marker-conditioned/`](samples/marker-conditioned/) — committed,
+- **Sample runs:** [`docs/samples/marker-conditioned/`](samples/marker-conditioned/index.md) — committed,
   byte-identical on re-render (`pixi run samples`).
 
 ## The feature

@@ -12,7 +12,7 @@ object in the same image.** That is single-image exemplar search, not dataset-le
 dataset earns its place here only if it has **per-instance bounding boxes** (our harness scores boxes
 with IoU) and **exemplar-style queries** — not by being a famous counting benchmark. Dot-only sets
 are excluded rather than given fabricated boxes (see [Metrics](#metrics) and
-[Scope](#scope--exclusions)).
+[Scope](#scope-exclusions)).
 
 The rendered numbers live in the [research report](../reports/research-report.html)
 (`pixi run report-research`); the raw `docs/benchmark/research-results.json` it reads is gitignored
