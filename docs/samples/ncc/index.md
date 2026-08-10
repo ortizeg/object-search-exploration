@@ -8,4 +8,10 @@ hand-edit. Latency is reported live on the CLI, not here (it is not byte-stable)
 | [cluttered-distractors](cluttered-distractors.png) | ok | 21 | 0.4500 |
 | [lattice-plain](lattice-plain.png) | ok | 12 | 0.8500 |
 | [lattice-touching](lattice-touching.png) | empty | 0 | n/a |
+| [real-cluttered-apple](real-cluttered-apple.png) | ok | 2 | 0.4500 |
+| [real-plain-apple](real-plain-apple.png) | ok | 5 | 0.4500 |
+| [real-varied-apple](real-varied-apple.png) | ok | 3 | 0.4500 |
 | [scatter-scaled](scatter-scaled.png) | ok | 5 | 0.8500 |
+| [textured-cluttered-01](textured-cluttered-01.png) | ok | 12 | 0.4500 |
+| [textured-plain-01](textured-plain-01.png) | ok | 9 | 0.8500 |
+| [textured-varied-01](textured-varied-01.png) | ok | 9 | 0.4500 |
