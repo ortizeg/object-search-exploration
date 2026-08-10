@@ -110,7 +110,9 @@ nav:
       - MOSSE: reports/mosse-improvement.md
       - Sparse-geo: reports/sparse-geo-improvement.md
       - DINO dense: reports/dino-dense-improvement.md
+      - "DINO dense (floor-plans)": reports/dino-dense-floorplans-improvement.md
       - OWLv2: reports/owlv2-improvement.md
+      - "OWLv2 (floor-plans)": reports/owlv2-floorplans-improvement.md
       - OWLv2 floor-plan fine-tune: reports/owlv2-floorplans-finetune.md
       - OWLv2 (real-objects): reports/owlv2-oneshot-real-objects-improvement.md
       - Propose–retrieve: reports/propose-retrieve-improvement.md
