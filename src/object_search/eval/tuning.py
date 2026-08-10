@@ -358,15 +358,17 @@ def _tune_methods_at_count(
     report) or once per requested count (the additive nested multi-count report) without
     duplicating the loop.
 
-    ``grids`` is an optional per-method override of :data:`_TUNING_GRIDS`, threaded straight to
-    :func:`tune_method`'s own ``grid=`` parameter (``None`` -- the default -- falls back to that
-    method's committed grid, unchanged). It exists so a research script can sweep a method-specific
-    variant (e.g. a floor-plan rotation-bank sweep) without shelling out to the full
-    ``tune-floorplans`` CLI, which always tunes every registered method.
+    ``grids``, when given, overrides :data:`_TUNING_GRIDS` for the named method(s) only (a method
+    absent from ``grids`` still uses its built-in grid), threaded straight to :func:`tune_method`'s
+    own ``grid=`` parameter. ``None`` (every call site before this parameter existed) reproduces
+    today's exact behavior byte-for-byte. It exists so a research script can sweep a method-specific
+    variant (e.g. a floor-plan rotation-bank sweep, or a fine-tune's crop-margin fraction) without
+    shelling out to the full ``tune-floorplans`` CLI, which always tunes every registered method.
     """
     per_method: list[dict[str, Any]] = []
     for method in methods:
         spec = get_method(method)
+        method_grid = grids.get(method) if grids is not None else None
         tuned = tune_method(
             method,
             dataset,
@@ -375,7 +377,7 @@ def _tune_methods_at_count(
             iou_threshold=iou_threshold,
             seed=seed,
             manifest_root=manifest_root,
-            grid=grids.get(method) if grids is not None else None,
+            grid=method_grid,
             exemplar_selection=exemplar_selection,
         )
         best = tuned["best"]
@@ -474,12 +476,13 @@ def run_domain_tuning(
             median-area box).
         exemplar_counts: Optional sequence of counts to nest per-count blocks for; ``None`` keeps
             the flat single-count report.
-        grids: Optional per-method grid override, e.g. ``{"ncc": ({"angles_deg": (...)}, ...)}``.
-            A method present here is tuned over the supplied grid INSTEAD of its
-            :data:`_TUNING_GRIDS` entry; a method absent from the mapping (and the ``None``
-            default) keeps the committed grid, so omitting this argument reproduces the previous
+        grids: Optional per-method grid override, e.g. ``{"ncc": ({"angles_deg": (...)}, ...)}``,
+            keyed by method name. A method present here is tuned over the supplied grid INSTEAD of
+            its :data:`_TUNING_GRIDS` entry; a method absent from the mapping (and the ``None``
+            default) keeps its committed grid, so omitting this argument reproduces the previous
             report byte for byte. This is the seam an offline experiment script uses to sweep a
-            candidate knob without editing the committed grids.
+            candidate knob (e.g. a floor-plan rotation-bank sweep, or a fine-tune's crop-margin
+            fraction) without editing the committed grids or forking the tuning loop.
         out: Where to write the JSON report (resolved against the repo root when relative). ``None``
             skips the write and only returns the report.
 

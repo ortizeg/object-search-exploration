@@ -4,6 +4,15 @@ Run this ONLY in the ``export`` pixi environment, which carries ``transformers``
 
     pixi run -e export export-owlv2
 
+    # ... or export a locally fine-tuned checkpoint to a SEPARATE artifact, leaving the shipped
+    # pretrained owlv2_base_patch16.onnx on disk untouched (quick task 260801-8zy):
+    pixi run -e export python scripts/export_owlv2.py \
+        --checkpoint models/finetune/owlv2-floorplans-headonly \
+        --out owlv2_base_patch16_floorplans_ft.onnx
+
+With no flags the behaviour is byte-identical to what it was before those flags existed: the same
+registry key, the same destination, the same ``_verify_graph`` assertions.
+
 Why a standalone script and not just ``fetch-models``
 -----------------------------------------------------
 ``fetch-models`` (``object_search.inference.models._export_owlv2``) also performs this export as
@@ -41,6 +50,7 @@ documented names, all rank 3, and static last dims ``512``, ``4``, ``1``, ``1``.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -115,11 +125,67 @@ def _verify_graph(onnx_path: Path) -> None:
     )
 
 
-def main() -> None:
-    """Export the OWLv2 vision graph via the registry, then verify the graph output contract."""
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the two optional flags. With NEITHER, behaviour is identical to before they existed.
+
+    ``--checkpoint`` swaps only the *weights* the wrapper is built from (a local fine-tuned
+    HuggingFace checkpoint dir instead of the hub id); ``--out`` swaps only the destination
+    filename inside ``models/``. The wrapper, opset, dynamic axes, and ``_verify_graph`` assertions
+    are the same in every case -- a fine-tuned graph must satisfy the SAME output contract, or the
+    method that consumes it would be silently reading a different graph.
+    """
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Export from this local fine-tuned HuggingFace checkpoint dir (as written by "
+            "`pixi run -e export finetune-owlv2`) instead of the pinned hub id. Default: the hub."
+        ),
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help=(
+            "Destination filename inside models/. Default: the registry entry's dest "
+            "(owlv2_base_patch16.onnx for the pretrained export)."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Export the OWLv2 vision graph, then verify the graph output contract.
+
+    With no flags this is the shipped pretrained export, unchanged: the same registry key, the same
+    dest, the same verification. With ``--checkpoint`` it exports fine-tuned weights through the
+    identical wrapper, to a separate file, leaving the pretrained artifact on disk untouched.
+    """
+    args = _parse_args(argv)
     spec = models.MODEL_REGISTRY["owlv2-base-patch16"]
-    logger.info(f"Exporting {spec.key} (Apache-2.0) -> {spec.dest} at imgsz=960, opset=17")
-    dest = models.fetch(spec, force=True)
+    if args.out is not None:
+        spec = spec.model_copy(update={"dest": args.out})
+
+    if args.checkpoint is None:
+        logger.info(f"Exporting {spec.key} (Apache-2.0) -> {spec.dest} at imgsz=960, opset=17")
+        dest = models.fetch(spec, force=True)
+    else:
+        checkpoint = args.checkpoint.expanduser().resolve()
+        if not (checkpoint / "config.json").is_file():
+            raise SystemExit(
+                f"No HuggingFace checkpoint at {checkpoint} (expected a config.json). Produce one "
+                f"with: pixi run -e export finetune-owlv2 --out {args.checkpoint}"
+            )
+        logger.info(
+            f"Exporting FINE-TUNED OWLv2 from {checkpoint} -> {spec.dest} at imgsz=960, opset=17"
+        )
+        # Call the exporter directly (not through `fetch`) so the checkpoint is explicit here
+        # rather than smuggled through an env var: this script's flags ARE the contract.
+        dest = models._export_owlv2(spec, models.models_dir() / spec.dest, checkpoint=checkpoint)
 
     if not dest.is_file():
         raise SystemExit(
@@ -128,11 +194,18 @@ def main() -> None:
         )
 
     logger.info(f"Exported to {dest} (sha256={models.provenance.file_sha256(dest)})")
+    # The SAME verification runs on a fine-tuned graph: the output contract must not drift.
     _verify_graph(dest)
-    logger.info(
-        "Next: pin this sha256 into MODEL_REGISTRY['owlv2-base-patch16'].sha256 so a "
-        "byte-different re-export refuses to install (EVAL-09)."
-    )
+    if args.checkpoint is None:
+        logger.info(
+            "Next: pin this sha256 into MODEL_REGISTRY['owlv2-base-patch16'].sha256 so a "
+            "byte-different re-export refuses to install (EVAL-09)."
+        )
+    else:
+        logger.info(
+            "Fine-tuned artifact: its sha256 is NOT pinned in the registry (it is a hash of one "
+            "local run, not a reproducible source); record it in the report instead."
+        )
 
 
 if __name__ == "__main__":

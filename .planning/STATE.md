@@ -33,7 +33,23 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-07 — Quick tasks 260730-vx4 (ncc) + 260730-w9s (mosse): floor-plan
+Last activity: 2026-08-09 — Quick task 260808-w8c: two further, independently-motivated levers on
+260808-dla's contrastive-crop recipe, sequenced so the cheap one was measured before any GPU spend.
+Lever A (crop context-margin padding) was tested inference-only against the already-trained checkpoint
+(zero retraining, moved to a vast.ai GPU after a local CPU sweep proved too slow): helps door at
+margin=0.15 (+21%) but hurts window at every margin tried, so no margin beats 0.0 on both classes and
+none was carried into training. Lever B (rotation/mirror-augmented SupCon crop positives) then trained
+as contrastive-crop-v2: door F1 improves to 0.253 tuned / 0.433 default (best door numbers of any
+fine-tuned arm, vs 0.229/0.391 for contrastive-crop), window dips slightly to 0.204 (vs 0.216). The
+crop/scene self-score mechanism holds and slightly improves (independent single-exemplar diagnostic:
++0.896 vs +0.859, the highest of five checkpoints). Neither arm reaches propose-retrieve (0.459 door
+F1) / ncc (0.403 window F1), so the floor-plan recommendation is unchanged. A local fetch-datasets
+sweep stalled on an unrelated HF Hub timeout (FSCD-LVIS); worked around via --only scoping to just the
+two floor-plans datasets needed. Full suite green (859 passed, 93.89% coverage). contrastive-crop-v2
+remains opt-in, not the shipped default; the choice between contrastive-crop and contrastive-crop-v2
+is itself class-dependent (v2 better for door, v1 marginally better for window).
+
+Prior activity: 2026-08-07 — Quick tasks 260730-vx4 (ncc) + 260730-w9s (mosse): floor-plan
 orientation/mirror follow-up, merged together into one PR against a rebased main. Both confirmed
 the rotation-bank-too-narrow hypothesis via a cardinal 0/90/180/270 bank (+ mirror), additive
 _TUNING_GRIDS entries, no shipped defaults touched. ncc doors F1 0.164->0.358 (windows: a disclosed
@@ -57,7 +73,11 @@ Progress: [█████████░] 88%
 | 260727-fpe | Floor-plan (Roboflow) target-domain eval + per-method threshold tuning | 2026-07-27 | 5a3a477 | [260727-fpe](./quick/260727-fpe-floorplans-domain-eval/) |
 | 260729-dh6 | Floor-plan eval enrichment: per-slice analysis + aggressive tuning + dino-dense OOM fix | 2026-07-29 | 8f8192c | [260729-dh6](./quick/260729-dh6-floor-plan-eval-per-slice-analysis-recal/) |
 | 260730-vx4 | ncc floor-plan orientation/mirror follow-up: cardinal bank + mirror, doors F1 0.164->0.358 | 2026-08-01 | 357abe3 | [260730-vx4](./quick/260730-vx4-improve-ncc-on-floor-plan-door-window-do/) |
+| 260801-8zy | Fine-tune OWLv2 on floor-plans train data — measured negative result, regresses doors | 2026-08-04 | (pending) | [260801-8zy](./quick/260801-8zy-fine-tune-owlv2-on-the-floor-plans-train/) |
 | 260730-w9s | mosse floor-plan orientation/mirror follow-up: cardinal bank + verify-mirror, doors F1 0.201->0.408, windows 0.077->0.155 | 2026-08-07 | c84428b | [260730-w9s](./quick/260730-w9s-improve-mosse-on-floor-plan-door-window-/) |
+| 260805-hg1 | SupCon contrastive loss for OWLv2 floor-plans fine-tune — sharper negative result, diagnosed crop/scene calibration break | 2026-08-08 | (pending) | [260805-hg1](./quick/260805-hg1-add-a-supervised-contrastive-loss-varian/) |
+| 260808-dla | Crop-context SupCon fix — closes the calibration break, best fine-tuned OWLv2 arm measured (door F1 0.229, window F1 0.216) | 2026-08-08 | (pending) | [260808-dla](./quick/260808-dla-add-crop-context-supervision-to-the-owlv/) |
+| 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |
 
 ## Performance Metrics
 
