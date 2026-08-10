@@ -101,6 +101,7 @@ Progress: [█████████░] 88%
 | 260808-dla | Crop-context SupCon fix — closes the calibration break, best fine-tuned OWLv2 arm measured (door F1 0.229, window F1 0.216) | 2026-08-08 | (pending) | [260808-dla](./quick/260808-dla-add-crop-context-supervision-to-the-owlv/) |
 | 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |
 | 260810-gx5 | Wire 2 orphan mkdocs pages (dino-dense/owlv2 floor-plans improvement reports) into nav; third target (floorplans-results.md) is gitignored, not a real orphan | 2026-08-10 | 90ea3a1 | [260810-gx5](./quick/260810-gx5-fix-3-orphan-mkdocs-pages-by-wiring-them/) |
+| 260810-h6e | Fix 7 broken internal doc links flagged by strict mkdocs build (6 samples/ dir links -> index.md, 1 anchor typo) | 2026-08-10 | 1530fd9 | [260810-h6e](./quick/260810-h6e-fix-broken-relative-links-flagged-by-str/) |
 
 ## Performance Metrics
 
