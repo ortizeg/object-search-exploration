@@ -259,12 +259,16 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         key="floorplans-door",
         source="manual-download",
         source_url="https://universe.roboflow.com/university-y9nbi/floor-plans-500",
-        license="Roboflow Universe (see source_url; verify licence before redistribution)",
+        license="CC BY 4.0 (Roboflow floor-plans-500, university-y9nbi)",
         license_note=(
-            "The floor-plans-500 COCO export is produced from Roboflow Universe; its export README "
-            "does not restate a licence, so the licence as shown on the dataset page governs. "
-            "Recorded here and gitignored; the data is never re-hosted. A human exports it in COCO "
-            "format and drops the extracted train/valid/test tree at datasets/_incoming/floorplans."
+            "Confirmed 2026-08-10 directly against the creator's (university-y9nbi) own Roboflow "
+            "listing -- CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). A third-party "
+            "Kaggle mirror's 'MIT' tag was checked and discounted: a re-uploader cannot "
+            "unilaterally relicense someone else's data, so the original creator's stated terms "
+            "govern. Recorded here and gitignored; the raw dataset is never re-hosted (only "
+            "attributed derivative excerpts are committed elsewhere, e.g. the overlay gallery in "
+            "docs/eval/floorplans-findings.md). A human exports it in COCO format and drops the "
+            "extracted train/valid/test tree at datasets/_incoming/floorplans."
         ),
         requires_manual=True,
         incoming_subdir="floorplans",
@@ -280,12 +284,16 @@ DATASET_REGISTRY: Mapping[str, DatasetSpec] = {
         key="floorplans-window",
         source="manual-download",
         source_url="https://universe.roboflow.com/university-y9nbi/floor-plans-500",
-        license="Roboflow Universe (see source_url; verify licence before redistribution)",
+        license="CC BY 4.0 (Roboflow floor-plans-500, university-y9nbi)",
         license_note=(
-            "The floor-plans-500 COCO export is produced from Roboflow Universe; its export README "
-            "does not restate a licence, so the licence as shown on the dataset page governs. "
-            "Recorded here and gitignored; the data is never re-hosted. Shares the one dropped "
-            "train/valid/test tree at datasets/_incoming/floorplans/ with floorplans-door."
+            "Confirmed 2026-08-10 directly against the creator's (university-y9nbi) own Roboflow "
+            "listing -- CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). A third-party "
+            "Kaggle mirror's 'MIT' tag was checked and discounted: a re-uploader cannot "
+            "unilaterally relicense someone else's data, so the original creator's stated terms "
+            "govern. Recorded here and gitignored; the raw dataset is never re-hosted (only "
+            "attributed derivative excerpts are committed elsewhere, e.g. the overlay gallery in "
+            "docs/eval/floorplans-findings.md). Shares the one dropped train/valid/test tree at "
+            "datasets/_incoming/floorplans/ with floorplans-door."
         ),
         requires_manual=True,
         incoming_subdir="floorplans",
