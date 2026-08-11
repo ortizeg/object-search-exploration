@@ -65,11 +65,15 @@ docs/benchmark/research-results.json
 # licence/weights-gated raw numbers as research-results.json, so likewise never committed.
 docs/benchmark/*-tuning-results.json
 docs/benchmark/permethod/
-# The local floor-plan report + its TP/FP/FN overlays EMBED the floor-plan images (licensed data),
-# so they are read locally but never committed. The aggregate stat charts under docs/eval/img/ carry
-# no plan pixels and ARE committed. (build via `pixi run python scripts/build_floorplans_report.py`)
+# The floor-plans-500 source dataset (Roboflow Universe, university-y9nbi) is CC BY 4.0 --
+# confirmed 2026-08-10 directly against the creator's own listing (a third-party Kaggle mirror's
+# "MIT" tag was investigated and discounted: a re-uploader can't unilaterally relicense someone
+# else's data). CC BY 4.0 permits redistributing derivatives with attribution, so the TP/FP/FN
+# overlays (docs/benchmark/floorplans-overlays/, attributed in floorplans-findings.md) are
+# committed. The local HTML report + the raw results dump stay regenerate-only/gitignored --
+# environment-dependent artifacts, not the reviewable deliverable (that's the committed overlay
+# gallery + floorplans-findings.md itself). (build via `pixi run python scripts/build_floorplans_report.py`)
 docs/benchmark/floorplans-report.html
-docs/benchmark/floorplans-overlays/
 docs/benchmark/floorplans-results.md
 # OWLv2 fine-tuning arms (quick task 260801-8zy): the per-arm x per-class tuning dumps produced on
 # a rented GPU box and pulled back. Regenerable, environment-dependent, and weights-gated exactly

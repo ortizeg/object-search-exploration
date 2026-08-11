@@ -10,7 +10,7 @@ planStatus:
   tags: [docs, mkdocs, eval, samples]
   created: "2026-08-10"
   startDate: "2026-08-10"
-  updated: "2026-08-10T17:52:00.000Z"
+  updated: "2026-08-10T18:20:00.000Z"
   progress: 100
 ---
 
@@ -41,19 +41,35 @@ Extend that same renderer to also cover the `textured` and `real-objects` datase
 **Explicitly out of scope** (per user instruction): research datasets (RPINE / FSCD-147 /
 FSCD-LVIS / CARPK) and the `basketball/` frames. Do not touch either.
 
-## Dropped: floor-plans overlay gallery — correction, not just deprioritized
+## Floor-plans overlay gallery — dropped, then un-dropped once the licence was verified
 
-The original plan had a "Part 1" wiring `docs/benchmark/floorplans-overlays/` (24 PNGs) into
-`docs/eval/floorplans-findings.md` as a committed gallery, on the assumption those PNGs were
-already-committed, unlinked artifacts. **That assumption was wrong**, caught before any edit
-was made: `docs/benchmark/floorplans-overlays/` is `.gitignore`d (`.gitignore:72`), and
-`floorplans-findings.md` itself already explains why — the overlays embed the **licensed
-floor-plan images**, so they're a local-only, regenerate-on-demand artifact
-(`scripts/build_floorplans_report.py`), never committed. Embedding them would either 404 on
-a fresh clone/CI build or require un-gitignoring licensed imagery, neither of which is
-correct. The existing "Qualitative overlays (local, gitignored)" section in that file
-already documents the regenerate-locally path correctly. There is no gap here — this item is
-dropped, not deferred.
+**2026-08-10, first pass:** the original plan had a "Part 1" wiring
+`docs/benchmark/floorplans-overlays/` (24 PNGs) into `docs/eval/floorplans-findings.md` as a
+committed gallery, on the wrong assumption those PNGs were already-committed, unlinked
+artifacts. Caught before any edit was made: the directory was `.gitignore`d, and
+`datasets/provenance.json` (the local, gitignored fetch manifest) recorded the floor-plans
+source license as an explicit unresolved placeholder — `"Roboflow Universe (see source_url;
+verify licence before redistribution)"` — i.e. "not verified yet," not "confirmed
+restrictive." Dropped pending that verification.
+
+**2026-08-10, later same day:** the user checked the license directly on the Roboflow
+creator's (`university-y9nbi`) own listing — **CC BY 4.0** — which permits redistributing
+derivatives with attribution. (A third-party Kaggle mirror's "MIT" tag was also raised and
+discounted: a re-uploader can't unilaterally relicense someone else's data; the original
+creator's stated terms govern.) That resolves the exact placeholder
+`datasets/provenance.json` was flagging. Un-dropped: `.gitignore` updated to un-ignore
+`docs/benchmark/floorplans-overlays/`, attribution added to both
+`docs/eval/research-datasets.md` and `docs/eval/floorplans-findings.md`, and the 24 PNGs
+wired into a real embedded gallery (organized by class → tier → method) replacing the old
+"local, gitignored" note. `floorplans-report.html` and `floorplans-results.md` stay
+gitignored — regenerate-only, environment-dependent artifacts, not the reviewable
+deliverable.
+
+Follow-up not done here (out of the requested scope, flagged for later): the code that
+writes `datasets/provenance.json`'s per-file `license` field
+(`src/object_search/eval/datasets.py:262,283`) still emits the generic "verify licence
+before redistribution" placeholder rather than the now-confirmed `"CC BY 4.0"` — worth fixing
+so future re-fetches record the right value instead of re-raising the same question.
 
 ## Textured + real-objects sample galleries
 

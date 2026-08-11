@@ -108,6 +108,14 @@ surface; floor plans (below) was added later as the **target-domain** set.
   should we ship" is actually decided.
 - **Source:** Roboflow Universe <https://universe.roboflow.com/university-y9nbi/floor-plans-500>,
   exported in COCO format.
+- **Licence:** [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) — confirmed 2026-08-10
+  directly against the creator's (`university-y9nbi`) own Roboflow listing (a third-party Kaggle
+  mirror's "MIT" tag was checked and discounted — a re-uploader cannot unilaterally relicense
+  someone else's data). Permits redistributing derivatives with attribution; this is why the
+  TP/FP/FN overlay gallery in [floorplans-findings.md](floorplans-findings.md) is committed rather
+  than gitignored. Raw dataset images themselves stay gitignored regardless (`/datasets/`,
+  `requires_manual` — see below), not because of licence doubt but because they are large and this
+  repo never re-hosts a full third-party dataset, only attributed derivative excerpts.
 - **Annotation type:** per-symbol bounding boxes. The export carries `bathroom` / `door` /
   `perimeter` / `stairs` / `window`; we use **`door`** and **`window`** — dense repeated stamped
   symbols present in every plan (door ~9/plan, window ~7–8/plan). `perimeter` / `bathroom` /
