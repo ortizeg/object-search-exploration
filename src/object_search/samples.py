@@ -38,6 +38,8 @@ import numpy as np
 import numpy.typing as npt
 from loguru import logger
 
+from object_search.eval.labels import load_ground_truth
+from object_search.eval.labels import scene_path as _scene_path
 from object_search.explorations import list_explorations
 from object_search.explorations.marker_conditioned import MarkerConditionedConfig
 from object_search.explorations.marker_conditioned import run as _marker_run
@@ -62,32 +64,74 @@ _DEFAULT_OUT = repo_root() / "docs" / "samples"
 # INTER_AREA downscaling is deterministic, so byte-identical regeneration is preserved.
 _MAX_PANEL_WIDTH = 1440
 
-# The FIXED query set: image_id -> the exemplar box drawn on that image. Each box was chosen
-# to land squarely on one real instance of its synthetic scene (a textured region, never a
-# flat patch). image_ids match DEMO_SPECS keys, so the scene is synthesized deterministically
-# from the same spec. Sorted-key iteration everywhere below keeps the gallery order stable.
+
+def _exemplar_for(image_id: str) -> ExemplarBox:
+    """The designated ground-truth exemplar for a committed (non-synthetic) sample image.
+
+    Reuses the same box the benchmark queries with (``GroundTruth.exemplar``) rather than
+    hand-picking a new one, so the sample panel shows the canonical query for that image --
+    the same box a `pixi run bench` sweep uses -- not an independently chosen coordinate.
+    """
+    ground_truth = load_ground_truth(image_id)
+    if ground_truth is None:
+        raise KeyError(f"no ground-truth sidecar for sample image_id {image_id!r}")
+    return ground_truth.exemplar
+
+
+# The FIXED query set: image_id -> the exemplar box drawn on that image.
+#
+# The four synthetic entries' boxes were hand-chosen to land squarely on one real instance of
+# their synthetic scene (a textured region, never a flat patch); their image_ids match
+# DEMO_SPECS keys, so the scene is synthesized deterministically from the same spec.
+#
+# The textured/real-objects entries below reuse each image's designated ground-truth exemplar
+# (`_exemplar_for`, backed by `eval.labels.load_ground_truth`) instead of a hand-picked box --
+# one image per regime (textured: plain/varied/cluttered; real-objects: the same `apple`
+# category across all three regimes, so a reader can also see regime alone change a method's
+# behaviour on one fixed object). Sorted-key iteration everywhere below keeps the gallery order
+# stable regardless of dict insertion order.
 SAMPLE_MANIFEST: dict[str, ExemplarBox] = {
     "cluttered-distractors": ExemplarBox(box=BBox(x=37, y=274, w=57, h=57)),
     "lattice-plain": ExemplarBox(box=BBox(x=562, y=292, w=57, h=57)),
     "lattice-touching": ExemplarBox(box=BBox(x=124, y=351, w=73, h=73)),
     "scatter-scaled": ExemplarBox(box=BBox(x=689, y=333, w=59, h=74)),
+    "textured-plain-01": _exemplar_for("textured-plain-01"),
+    "textured-varied-01": _exemplar_for("textured-varied-01"),
+    "textured-cluttered-01": _exemplar_for("textured-cluttered-01"),
+    "real-plain-apple": _exemplar_for("real-plain-apple"),
+    "real-varied-apple": _exemplar_for("real-varied-apple"),
+    "real-cluttered-apple": _exemplar_for("real-cluttered-apple"),
 }
 
 
 def _load_scene(image_id: str) -> npt.NDArray[np.uint8]:
     """Return the BGR scene for a manifest ``image_id``.
 
-    Every manifest entry is a synthetic ``DEMO_SPECS`` scene, synthesized deterministically
-    from its seed -- so the gallery does not depend on any committed image bytes.
+    A ``DEMO_SPECS`` manifest entry is synthesized deterministically from its seed, so those
+    do not depend on any committed image bytes. Everything else (textured / real-objects) is a
+    committed file on disk, read via the same ``eval.labels.scene_path`` lookup the benchmark
+    uses -- so the gallery panel matches what a human sees running the CLI or UI on that image.
+    Both paths are byte-stable on re-render: synthesis is seed-deterministic, and a committed
+    file's bytes never change between runs.
 
     Raises:
-        KeyError: If ``image_id`` names no known synthetic spec, so a typo in the manifest is
-            a loud failure rather than a silently skipped sample.
+        KeyError: If ``image_id`` names neither a known synthetic spec nor a committed scene
+            file, so a typo in the manifest is a loud failure rather than a silently skipped
+            sample.
     """
-    if image_id not in DEMO_SPECS:
+    if image_id in DEMO_SPECS:
+        return synthesize(DEMO_SPECS[image_id]).image
+    path = _scene_path(image_id)
+    if path is None:
         known = ", ".join(sorted(DEMO_SPECS))
-        raise KeyError(f"unknown sample image_id {image_id!r}; known synthetic specs: {known}")
-    return synthesize(DEMO_SPECS[image_id]).image
+        raise KeyError(
+            f"unknown sample image_id {image_id!r}; known synthetic specs: {known}; "
+            "no committed scene file found on disk either"
+        )
+    scene = cv2.imread(str(path))
+    if scene is None:
+        raise OSError(f"failed to read sample scene at {path}")
+    return np.asarray(scene, dtype=np.uint8)
 
 
 def _decode_heatmap(result: SearchResult) -> npt.NDArray[np.uint8] | None:

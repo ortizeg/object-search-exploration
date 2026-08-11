@@ -5,7 +5,13 @@ hand-edit. Latency is reported live on the CLI, not here (it is not byte-stable)
 
 | image | outcome | instances found | threshold |
 | --- | --- | --- | --- |
-| [cluttered-distractors](cluttered-distractors.png) | ok | 51 | 0.0818 |
-| [lattice-plain](lattice-plain.png) | ok | 12 | 0.0864 |
+| [cluttered-distractors](cluttered-distractors.png) | ok | 18 | 0.3500 |
+| [lattice-plain](lattice-plain.png) | ok | 12 | 0.8000 |
 | [lattice-touching](lattice-touching.png) | empty | 0 | n/a |
-| [scatter-scaled](scatter-scaled.png) | empty | 0 | 0.5000 |
+| [real-cluttered-apple](real-cluttered-apple.png) | ok | 3 | 0.3500 |
+| [real-plain-apple](real-plain-apple.png) | ok | 6 | 0.3500 |
+| [real-varied-apple](real-varied-apple.png) | ok | 11 | 0.3500 |
+| [scatter-scaled](scatter-scaled.png) | ok | 9 | 0.3500 |
+| [textured-cluttered-01](textured-cluttered-01.png) | ok | 12 | 0.3500 |
+| [textured-plain-01](textured-plain-01.png) | ok | 9 | 0.8000 |
+| [textured-varied-01](textured-varied-01.png) | ok | 10 | 0.3257 |
