@@ -33,7 +33,15 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-09 — Quick task 260808-w8c: two further, independently-motivated levers on
+Last activity: 2026-08-12 - Quick task 260811-p0l: sparse-geo SuperPoint-vs-SIFT spike on the
+real-objects domain (run on a rented vast.ai box), testing whether the floor-plans-500 SuperPoint
+verdict generalizes. PARTIALLY DIVERGES: still behind the shipped sift/single-4dof baseline, but
+roughly at parity (and ahead on AP) against a same-voting-mode SIFT control the floor-plans report
+never ran; zero errors/abstentions across all 5 conditions x 30 images (the floor-plans zero-keypoint
+crash's precondition never occurs on real photo texture). No source or config change; backend stays
+sift.
+
+Last activity (previous): 2026-08-09 — Quick task 260808-w8c: two further, independently-motivated levers on
 260808-dla's contrastive-crop recipe, sequenced so the cheap one was measured before any GPU spend.
 Lever A (crop context-margin padding) was tested inference-only against the already-trained checkpoint
 (zero retraining, moved to a vast.ai GPU after a local CPU sweep proved too slow): helps door at
@@ -102,6 +110,7 @@ Progress: [█████████░] 88%
 | 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |
 | 260810-gx5 | Wire 2 orphan mkdocs pages (dino-dense/owlv2 floor-plans improvement reports) into nav; third target (floorplans-results.md) is gitignored, not a real orphan | 2026-08-10 | 90ea3a1 | [260810-gx5](./quick/260810-gx5-fix-3-orphan-mkdocs-pages-by-wiring-them/) |
 | 260810-h6e | Fix 7 broken internal doc links flagged by strict mkdocs build (6 samples/ dir links -> index.md, 1 anchor typo) | 2026-08-10 | 1530fd9 | [260810-h6e](./quick/260810-h6e-fix-broken-relative-links-flagged-by-str/) |
+| 260811-p0l | sparse-geo SuperPoint spike on real-objects (ran on rented vast.ai box): PARTIALLY DIVERGES from floor-plans-500's DISPROVEN verdict -- roughly at parity/ahead on AP vs. a fair same-voting-mode SIFT control; no source change | 2026-08-12 | 141101f | [260811-p0l](./quick/260811-p0l-spike-explore-the-superpoint-backend-for/) |
 
 ## Performance Metrics
 
