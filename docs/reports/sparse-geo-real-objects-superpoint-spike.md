@@ -219,10 +219,10 @@ artifacts under `.planning/quick/260811-p0l-spike-explore-the-superpoint-backend
 
 ## Deferred work
 
-- **Re-run the floor-plans-500 sweep with the same-voting-mode SIFT controls added.** This spike's
-  strongest finding — that the floor-plans verdict may be confounded by voting mode rather than
-  purely by backend — is a hypothesis about *that* domain's data, and floor-plans-500 is the only
-  place it can actually be checked.
+- ~~Re-run the floor-plans-500 sweep with the same-voting-mode SIFT controls added.~~ **Resolved
+  2026-08-13** in [`sparse-geo-floorplans-voting-mode-confound.md`](sparse-geo-floorplans-voting-mode-confound.md):
+  verdict **PARTIALLY** — the confound explains most to all of the door loss (SuperPoint even leads
+  on AP50 at matched voting mode there), but a real backend-specific gap survives on windows.
 - **DISK / ALIKED backends** (carried forward from `sparse-geo-improvement.md`, and from the
   robustness backlog): now informed by two data points instead of one — a permissive-licence
   learned detector is worth investigating on its own merits on both domains, not only as a

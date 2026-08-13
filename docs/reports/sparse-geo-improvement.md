@@ -187,6 +187,16 @@ of four** class × voting-mode cells. Not merely inert — mildly harmful.
 Measured against the **original baseline**, not against hypothesis 1 (which was already reverted),
 so the two are never conflated.
 
+> **Update (2026-08-13):** every delta below compares `sift/single-4dof` against
+> `superpoint/{translation-2dof,pairwise-4dof}` with no same-voting-mode SIFT control — `SparseGeoConfig`
+> refuses `single-4dof` for a frameless backend, so SuperPoint never had one measured. A follow-up,
+> [`sparse-geo-floorplans-voting-mode-confound.md`](sparse-geo-floorplans-voting-mode-confound.md),
+> adds that missing control and finds the verdict **PARTIALLY** survives: on doors the voting-mode
+> switch alone explains most to all of the loss below (residual backend gap −0.004 to −0.045, and
+> SuperPoint is actually *ahead* on AP50 at matched voting mode); on windows a real backend-specific
+> gap remains even after controlling for voting mode. Read the door numbers below as measuring the
+> voting mode SuperPoint was forced onto more than the backend itself; the window numbers hold up.
+
 ### The feasibility probe — the premise is half-right and it does not matter
 
 Exemplar-crop keypoint counts on 5 door plans, which is the quantity the premise is actually about:
@@ -400,6 +410,13 @@ that was not measured, and the honest state of the question is: open.
 What *is* established and should anchor the next attempt: the funnel collapses at **peak
 hypothesis** — 55 peaks for 157 ground-truth doors, from 2 664 correspondences. Correspondences are
 plentiful; peaks are not. Whatever the real cause is, it lives between correspondence and peak.
+
+**Update (2026-08-13):** the "SuperPoint is worse on every measured axis" framing above is now
+partly superseded — [`sparse-geo-floorplans-voting-mode-confound.md`](sparse-geo-floorplans-voting-mode-confound.md)
+adds the same-voting-mode SIFT control this investigation never ran and finds the verdict
+**PARTIALLY** holds: mostly a voting-mode artifact on doors (SuperPoint is even ahead on AP50 at
+matched voting mode there), but a real backend-specific gap survives on windows. Unrelated to the
+flat-door-recall symptom above, which that follow-up neither explains nor further constrains.
 
 Candidate directions worth investigating later — **explicitly speculation, not conclusions, and
 none of them measured**:
