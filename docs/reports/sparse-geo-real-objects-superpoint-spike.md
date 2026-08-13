@@ -22,6 +22,15 @@ voting_mode=...))` and monkeypatches `object_search.eval.benchmark.get_method` a
 call to `benchmark._run_one`, so scoring, AP-candidate logging, and abstention/error handling are
 byte-identical to `pixi run bench-real-objects` by construction.
 
+**Protocol parameters**, identical to `conf/benchmark-real-objects.yaml` so every number below is
+directly comparable to the published `real-objects` figures: `iou_threshold=0.5` (a prediction
+counts as a true positive at IoU ≥ 0.5, the same threshold every report in this project uses),
+`exemplar_count=1` (one exemplar box per query), `seed=0` for the `np.random.default_rng`-based
+exemplar sampler (D-11 — `cv2`'s RNG is never used for this, per the project's determinism rules),
+and the default `"seeded-random"` exemplar-selection mode. No config field beyond `backend` and
+`voting_mode` is overridden in any condition, so every other `SparseGeoConfig` field (e.g.
+`min_inliers`, `nms_iou`) stays at its shipped default throughout this run.
+
 **Where it ran.** At the user's request, the fetch + smoke + sweep steps ran on a rented vast.ai CPU
 box (offer `47060238`, $0.048/hr, 12 vCPUs) rather than the local machine, to keep this spike off the
 user's laptop. Code was shipped via `git archive HEAD | gzip` over `scp` — **not** `git push`, since

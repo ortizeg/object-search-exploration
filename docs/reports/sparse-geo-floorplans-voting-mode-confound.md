@@ -29,6 +29,14 @@ second, unnamed confound sits alongside the voting-mode one:
   hypothesis, were tuned over. Its `min_inliers` floor of 5 is a disclosed caveat in the original
   report; matching it here is what makes the SuperPoint comparison grid-fair on *both* axes at once.
 
+**Protocol parameters**, identical to the ones `run_domain_tuning`'s defaults and the published
+sweep both used, so every new cell is directly comparable to the published rows: `exemplar_count=1`,
+`iou_threshold=0.5`, `seed=0` for the `np.random.default_rng`-based exemplar sampler (`cv2`'s RNG is
+never used for this, per D-11 / the project's determinism rules), `tune_split="val"` /
+`eval_split="test"`, and the default `"seeded-random"` exemplar-selection mode. Only `voting_mode`,
+`min_inliers`, and `nms_iou` are ever overridden — every other `SparseGeoConfig` field stays at its
+shipped default in every one of the 12 tuning runs.
+
 **Where it ran.** At the user's explicit direction, the sweep ran on a rented vast.ai CPU box
 (offer `45169473`, $0.048/hr, 40 vCPUs) — this is classical SIFT/RANSAC/Hough-voting, no GPU-bound
 step. Code shipped via `git archive HEAD | gzip` (no push to origin). The floor-plans-500 dataset is
