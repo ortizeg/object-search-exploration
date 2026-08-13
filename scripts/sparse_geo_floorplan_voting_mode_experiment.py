@@ -216,10 +216,12 @@ def run_experiment(name: str, dataset: str, grid: Sequence[dict[str, object]]) -
 
 
 def _cell_dict(
-    condition_label: str, voting_mode: str, grid_name: str, dataset: str, elapsed_s: float
+    condition_label: str, voting_mode: str, grid_name: str, dataset: str
 ) -> dict[str, Any]:
     grid = _grid(voting_mode, _GRIDS[grid_name])
+    cell_started = perf_counter()
     report = run_experiment(f"{grid_name}--{condition_label.replace('/', '-')}", dataset, grid)
+    elapsed_s = perf_counter() - cell_started
     (entry,) = report["methods"]
     return {
         "condition": condition_label,
@@ -308,16 +310,7 @@ def sweep() -> int:
     for grid_name in ("committed", "sp-matched"):
         for condition_label, voting_mode in _CONDITIONS:
             for dataset in _DATASETS:
-                cell_started = perf_counter()
-                cells.append(
-                    _cell_dict(
-                        condition_label,
-                        voting_mode,
-                        grid_name,
-                        dataset,
-                        perf_counter() - cell_started,
-                    )
-                )
+                cells.append(_cell_dict(condition_label, voting_mode, grid_name, dataset))
     reconciliation = _reconcile(cells)
     reconciliation["source"] = "docs/reports/sparse-geo-improvement.md"
     summary = {
