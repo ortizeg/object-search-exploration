@@ -33,7 +33,11 @@ models/
 # tree: split manifests in dataset_splits/ and the offline test fixtures in tests/fixtures/.
 # Leading slash anchors this to the REPO-ROOT datasets/ only, so the committed dataset_splits/
 # manifests (kept out of conf/ so Hydra does not see a `datasets` config group) are untouched.
+# Both forms are needed: a trailing-slash pattern only matches a real directory, never a
+# symlink (git's documented behavior) -- and local research spikes symlink a sibling
+# checkout's already-converted datasets/ in rather than re-fetching it, same as models/.
 /datasets/
+/datasets
 
 # --- local data stores ------------------------------------------------------
 runs.db
