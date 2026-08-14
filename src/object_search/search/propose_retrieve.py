@@ -44,6 +44,17 @@ inferencer docstrings and reused verbatim:
   :func:`~object_search.inference.fastsam.decode_fastsam`. "Everything mode" wants overlapping
   proposals, so the FastSAM-internal NMS is deliberately loose; over-segmentation is collapsed by
   a **second** NMS *after* retrieval, below.
+- **Optional SAHI-style proposal tiling** (``proposal_tiling``, default **off**). When on, the
+  scene is cut into overlapping ``tile_side`` x ``tile_side`` tiles in **native image pixels**
+  (step ``round(tile_side * (1 - tile_overlap))``, final tile clamped to the edge, not padded),
+  each tile gets its own FastSAM pass (and is therefore magnified by ``1024 / tile_side`` by the
+  fixed letterbox), the untiled whole-image pass is unioned in when
+  ``tile_include_full_image`` is set ("SAHI + FI"), and the union is merged by
+  **intersection-over-SMALLER at ``tile_merge_ios``** -- not IoU, because a tile-edge-truncated
+  fragment is nearly *contained* in the whole-object box and so has high IoS but low IoU.
+  ``max_proposals`` is applied after the merge, so the budget is global. On a scene that fits
+  inside one tile this is an exact identity. See
+  :func:`~object_search.search.proposals.propose_tiled`.
 - **DINOv2 region embeddings** -- ``pixel_values`` f32 NCHW, **RGB**, scale ``1/255``, mean
   ``[0.485, 0.456, 0.406]``, std ``[0.229, 0.224, 0.225]``, **bicubic** resize with
   **snap-to-multiple(14)** and **NO centre-crop**. Each proposal's box crop is embedded on its own.
@@ -83,11 +94,21 @@ Post-processing (exact)
 
 Latency (EVAL-11)
 -----------------
-The proposal stage dominates -- that is a *finding*, not a defect, and it is exactly why the
-latency breakdown must attribute **proposal time and embedding time separately**. Both are model
-forward passes, so ``inference_ms`` carries their sum, but ``diagnostics.metrics`` reports
-``proposal_ms`` and ``embedding_ms`` as distinct numbers (and a note states which dominates), so
-the finding is legible rather than buried in one total.
+**Which stage dominates is domain-dependent, which is exactly why the breakdown is reported.** Both
+stages are model forward passes, so ``inference_ms`` carries their sum, but ``diagnostics.metrics``
+reports ``proposal_ms`` and ``embedding_ms`` as distinct numbers (and a note states which dominates
+and over how many tiles), so the finding is legible rather than buried in one total.
+
+- On the **chipset/textured** regimes the **proposal** stage dominates (~200 ms proposal vs ~45 ms
+  embedding on the 1600x1200 chipset) -- few, large objects, so few proposals to embed.
+- On **CAD floor plans** the **embedding** stage dominates, by a lot: measured 1.4 s proposal vs
+  5.9 s embedding mean, and 1.4 s vs 14.2 s on a 1478x958 plan (quick task ``260812-m8m``,
+  EXPERIMENTS.md B3). Each proposal is embedded by its **own** DINOv2 forward pass, so embedding
+  cost scales linearly with the proposal count -- and a plan yields ~50 of them.
+
+That asymmetry is what makes ``n_tiles`` / ``n_proposals_pre_merge`` / ``merged_by_tiling`` worth
+reporting alongside the two times: tiling's true cost is not only its extra FastSAM passes, it is
+also the larger merged proposal count those passes feed into the dominant embedding stage.
 
 Known failure modes
 -------------------
@@ -167,7 +188,12 @@ from object_search.schemas import (
 )
 from object_search.search import dino_dense
 from object_search.search.common import calibration, nms
-from object_search.search.proposals import Proposal, default_backend, propose
+from object_search.search.proposals import (
+    Proposal,
+    default_backend,
+    propose,
+    propose_tiled_with_stats,
+)
 from object_search.search.registry import register_method
 
 # -- Method-level constants (properties of the METHOD, not of a query, so not config fields) --
@@ -255,6 +281,62 @@ class ProposeRetrieveConfig(BaseModel):
         default=0,
         ge=0,
         description="random_state for the gmm calibrator (its only genuinely stochastic step).",
+    )
+
+    # -- SAHI-style proposal tiling (quick task 260812-m8m). Every field below is a NO-OP at its
+    # default, so the chipset/textured/synthetic/real regimes are byte-identical by construction.
+    proposal_tiling: bool = Field(
+        default=False,
+        description=(
+            "Run the proposal backend over overlapping tiles of the scene (SAHI-style) instead of "
+            "one whole-image pass, then merge across tiles by intersection-over-smaller. OFF by "
+            "default. Its lever is proposal BUDGET: FastSAM's everything-mode proposal count "
+            "scales with image area, not with instance count, so a crowded scene is starved -- N "
+            "tiles buy roughly N times the budget, and each tile is magnified by the fixed 1024 "
+            "letterbox. A domain knob for large, densely-populated scenes (CAD floor plans); on a "
+            "scene that already fits inside one tile it is an exact identity."
+        ),
+    )
+    tile_side: int = Field(
+        default=1024,
+        ge=64,
+        description=(
+            "Tile edge length in NATIVE IMAGE PIXELS (not model input pixels), used when "
+            "proposal_tiling is on. FastSAM letterboxes every tile to a fixed 1024 square, so a "
+            "tile of side S magnifies each symbol by 1024/S. A scene whose width and height are "
+            "both <= this yields exactly one tile equal to the whole image (tiling is an identity)."
+        ),
+    )
+    tile_overlap: float = Field(
+        default=0.2,
+        ge=0.0,
+        lt=0.9,
+        description=(
+            "Fraction of tile_side that consecutive tiles share. SAHI's verified default is 0.2. "
+            "The overlap band is what lets an instance straddling a tile boundary be seen "
+            "untruncated by at least one tile, so it should comfortably exceed the typical "
+            "instance size."
+        ),
+    )
+    tile_merge_ios: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Cross-tile merge threshold on intersection-over-SMALLER (IoS), SAHI's default match "
+            "metric and threshold. NOT IoU: a tile-edge-truncated fragment is nearly CONTAINED in "
+            "the whole-object box, so it has high IoS and low IoU, and an IoU merge would keep "
+            "both. A later proposal whose IoS against a kept one exceeds this is dropped."
+        ),
+    )
+    tile_include_full_image: bool = Field(
+        default=True,
+        description=(
+            "Union the untiled whole-image pass in with the tiled passes before merging (SAHI's "
+            "'SAHI + FI' / perform_standard_pred, whose default is also True). Recovers instances "
+            "too large for any single tile's overlap band, at the cost of exactly one extra "
+            "forward pass. Ignored when the scene already fits inside one tile."
+        ),
     )
 
 
@@ -459,9 +541,25 @@ def search(
 
     # 1. propose(image, config) -> proposals. The proposal unit (07-01); loose FastSAM-internal NMS
     #    keeps overlapping "everything-mode" regions -- over-segmentation is collapsed in step 6.
+    #    With proposal_tiling on, the SAME unit runs per tile (propose_tiled, a peer of propose)
+    #    and the tiles are merged by IoS; every other step below is untouched by the choice.
     fastsam_config = FastSAMConfig(conf_thres=config.proposal_conf)
     t_propose = perf_counter()
-    proposals: list[Proposal] = propose(image, fastsam_config, backend=backend)  # type: ignore[arg-type]
+    if config.proposal_tiling:
+        tiled = propose_tiled_with_stats(
+            image,
+            fastsam_config,
+            backend=backend,  # type: ignore[arg-type]
+            tile_side=config.tile_side,
+            overlap=config.tile_overlap,
+            merge_ios=config.tile_merge_ios,
+            include_full_image=config.tile_include_full_image,
+        )
+        proposals: list[Proposal] = tiled.proposals
+        n_tiles, n_pre_merge = tiled.n_tiles, tiled.n_pre_merge
+    else:
+        proposals = propose(image, fastsam_config, backend=backend)  # type: ignore[arg-type]
+        n_tiles, n_pre_merge = 1, len(proposals)
     proposal_ms = (perf_counter() - t_propose) * 1000.0
     proposal_boxes = tuple(p.box for p in proposals)
 
@@ -473,10 +571,18 @@ def search(
         )
         return _empty_or_error(
             SearchOutcome.EMPTY,
-            f"FastSAM returned no proposals above conf {config.proposal_conf:.2f}.",
+            f"FastSAM returned no proposals above conf {config.proposal_conf:.2f} "
+            f"over {n_tiles} tile(s).",
             threshold=None,
             latency=latency,
-            metrics={"n_proposals": 0.0, "proposal_ms": proposal_ms, "embedding_ms": 0.0},
+            metrics={
+                "n_proposals": 0.0,
+                "n_tiles": float(n_tiles),
+                "n_proposals_pre_merge": float(n_pre_merge),
+                "merged_by_tiling": 0.0,
+                "proposal_ms": proposal_ms,
+                "embedding_ms": 0.0,
+            },
         )
 
     # 2. embed_regions(image, proposal boxes) -> (N, D) normalized proposal embeddings.
@@ -553,6 +659,10 @@ def search(
         "threshold": threshold,
         "similarity_floor": float(config.similarity_floor),
         "n_proposals": float(len(proposals)),
+        # EVAL-11: the cost of tiling is reported, never hidden. Untiled these are 1 / n / 0.
+        "n_tiles": float(n_tiles),
+        "n_proposals_pre_merge": float(n_pre_merge),
+        "merged_by_tiling": float(n_pre_merge - len(proposals)),
         "n_accepted_pre_nms": float(len(accepted)),
         "n_matches": float(len(matches)),
         "n_candidates": float(len(candidates)),
@@ -576,9 +686,10 @@ def search(
             f"to {len(matches)} match(es)"
         ),
         (
-            f"latency: proposal {proposal_ms:.1f}ms "
+            f"latency: proposal {proposal_ms:.1f}ms over {n_tiles} tile(s) "
             f"{'dominates' if proposal_ms >= embedding_ms else 'trails'} "
-            f"embedding {embedding_ms:.1f}ms (EVAL-11)"
+            f"embedding {embedding_ms:.1f}ms (EVAL-11); "
+            f"{n_pre_merge} proposal(s) pre-merge -> {len(proposals)} after the IoS merge"
         ),
     )
 

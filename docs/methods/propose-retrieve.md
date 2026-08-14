@@ -47,6 +47,23 @@ mode" *wants* overlapping proposals, because a missed object cannot be recovered
 duplicate can. Over-segmentation is collapsed by a **second** NMS after retrieval (step 6), not
 here.
 
+**Optional SAHI-style tiling (`proposal_tiling`, default off).** When on, `propose_tiled` runs the
+same backend over overlapping `tile_side` × `tile_side` tiles in **native image pixels** — step
+`round(tile_side × (1 − tile_overlap))`, the final tile **clamped to the image edge rather than
+padded** — offsets each tile's boxes into full-image coordinates, unions in the untiled whole-image
+pass when `tile_include_full_image` is set ("SAHI + FI"), and merges the union by
+**intersection-over-SMALLER (IoS) at `tile_merge_ios`**. IoS, not IoU: a symbol truncated by a tile
+edge is nearly *contained* in the whole-object box found by an overlapping tile, so it has high IoS
+and **low** IoU, and an IoU merge would keep both. `max_proposals` is applied **after** the merge, so
+the budget stays global. On a scene that already fits inside one tile this is an **exact identity**,
+which is why the chipset/textured/synthetic regimes are unaffected by construction.
+
+The lever is **proposal budget**, not just magnification: FastSAM's everything-mode proposal count
+scales with image *area* (r = +0.59 on 84 floor plans) and barely with instance count (r = +0.22), so
+a crowded plan gets ~40 proposals for ~15 symbols and the proposal stage caps recall at 0.27 before
+retrieval runs. N tiles buy roughly N× the budget, and each tile is magnified by `1024 / tile_side`
+by FastSAM's fixed letterbox. See [the floor-plan report](../reports/propose-retrieve-floorplans-improvement.md).
+
 ### 2. Embed the proposal regions
 
 `embed_regions(image, [p.box for p in proposals], config)` → an `(N, D)` matrix, one **L2-normalized**
@@ -107,10 +124,15 @@ double-counted (METHOD-04c).
 
 `Diagnostics` carries the **full proposal set** as `proposals` (the UI's debug overlay, Phase 7
 success criterion 4) plus `metrics` (threshold, proposal/accepted/match counts, `collapsed_by_nms`,
-score max/mean). `LatencyBreakdown.inference_ms` carries the summed model time, but the metrics
-report **`proposal_ms` and `embedding_ms` as distinct numbers** and a note states which dominates —
-because **the proposal stage dominates**, and that is the whole point of the EVAL-11 breakdown
-(measured ~200 ms proposal vs ~45 ms embedding on the 1600×1200 chipset). A run that clears nothing
+score max/mean, and the tiling cost: `n_tiles`, `n_proposals_pre_merge`, `merged_by_tiling` — `1`,
+`n`, `0` when tiling is off). `LatencyBreakdown.inference_ms` carries the summed model time, but the
+metrics report **`proposal_ms` and `embedding_ms` as distinct numbers** and a note states which
+dominates and over how many tiles. **Which stage dominates is domain-dependent** — that is the whole
+point of the EVAL-11 breakdown. On the chipset the **proposal** stage dominates (~200 ms vs ~45 ms
+embedding); on CAD floor plans the **embedding** stage dominates by a lot (measured 1.4 s proposal vs
+5.9 s embedding mean, 1.4 s vs 14.2 s on a 1478×958 plan), because every proposal gets its own
+DINOv2 forward pass and a plan yields ~50 of them. That asymmetry is why tiling's cost must be read
+as *both* extra FastSAM passes *and* a larger merged proposal count feeding the dominant stage. A run that clears nothing
 returns `outcome=EMPTY` with a note; an absent weight returns `outcome=ERROR` with a
 `model_unavailable` note — never a silent empty and never a raise (METHOD-04c).
 
@@ -129,6 +151,18 @@ box **NMS** at `iou_thres` with deterministic `(-score, y1, x1)` tie-break; undo
 Masks are decoded only when requested (`sigmoid(coeff @ protos)`, reshaped, then **cropped to each
 box** — mandatory, or the prototype-combination mask bleeds outside the detection); Milestone 1 uses
 boxes only.
+
+**Tiled FastSAM proposals** (`propose_tiled`, only when `proposal_tiling` is on): the scene is cut
+into overlapping `tile_side` tiles in native pixels with step `round(tile_side × (1 − tile_overlap))`
+and the final tile **clamped to the image edge** (not padded — padding would letterbox grey into the
+model's field of view for whichever symbols land there). **Each tile then goes through the exact
+FastSAM preprocessing above**, i.e. it is letterboxed to the same fixed 1024 square, which is what
+magnifies a symbol by `1024 / tile_side`. Tile boxes are offset into full-image coordinates and
+clipped to the scene; `return_masks=True` is **rejected with a `ValueError`** because FastSAM masks
+come back in tile-local coordinates and mapping them back is out of scope — silently returning
+tile-local masks would be a correctness bug. Tiling adds **no randomness**: tile order is `(y0, x0)`
+and the merge order is the canonical `(−objectness, y, x)`, so there is deliberately **no seed
+parameter** for it.
 
 **DINOv2 region embeddings** (`DINOv2Inferencer`, shared with Method 3): input `pixel_values`, f32,
 NCHW, **RGB**; scale `1/255`, mean `[0.485, 0.456, 0.406]`, std `[0.229, 0.224, 0.225]`; **bicubic**
@@ -166,6 +200,11 @@ it cannot drift from the code.
 | `similarity_floor` | `0.7` | Absolute cosine floor on the calibrated accept threshold (ignored when a fixed `retrieval_threshold` is given). The gmm cut may rise above this but never below it: the floor stops a low gmm cut from admitting background, and rescues the degenerate single-mode case (a uniform lattice of identical instances, where the bare gmm/ratio fallback rejects every true match). Anchored on the exemplar self-cosine (=1.0). |
 | `max_candidates` | `50` | How many top-scoring proposals (with raw scores) to keep as sub-threshold candidates for an offline PR sweep (EVAL-08), regardless of the threshold. |
 | `seed` | `0` | `random_state` for the gmm calibrator (its only genuinely stochastic step). |
+| `proposal_tiling` | `false` | Run the proposal backend over overlapping tiles (SAHI-style) instead of one whole-image pass, merging across tiles by intersection-over-smaller. **Off by default.** Its lever is proposal **budget**: FastSAM's proposal count scales with image area, not instance count, so a crowded scene is starved — N tiles buy ~N× the budget, and each tile is magnified by the fixed 1024 letterbox. A domain knob for large, densely-populated scenes (CAD floor plans); an exact identity on a scene that fits in one tile. |
+| `tile_side` | `1024` | Tile edge in **native image pixels** (not model input pixels). FastSAM letterboxes every tile to a fixed 1024 square, so a tile of side S magnifies each symbol by `1024/S`. A scene whose width and height are both ≤ this yields exactly one tile equal to the whole image. |
+| `tile_overlap` | `0.2` | Fraction of `tile_side` shared by consecutive tiles (SAHI's verified default). The overlap band is what lets an instance straddling a tile boundary be seen untruncated by at least one tile, so it should comfortably exceed the typical instance size. |
+| `tile_merge_ios` | `0.5` | Cross-tile merge threshold on intersection-over-**smaller** (SAHI's default metric and threshold). **Not IoU** — a tile-edge-truncated fragment is nearly contained in the whole-object box, so it has high IoS and low IoU and an IoU merge would keep both. |
+| `tile_include_full_image` | `true` | Union the untiled whole-image pass in before merging (SAHI's `perform_standard_pred`, "SAHI + FI"). Recovers instances too large for any tile's overlap band, at exactly one extra forward pass. Ignored when the scene fits in one tile. |
 
 ## Licence — FastSAM is AGPL-3.0 (a real sharing constraint, stated plainly)
 

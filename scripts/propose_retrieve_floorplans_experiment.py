@@ -51,16 +51,37 @@ and recall are logged separately per trial, never F1 alone: a proposal-stage cha
 by flooding the scene with low-objectness regions shows up as a precision collapse, and pooling to
 F1 first would hide it.
 
-Usage (each entry is one experiment; run them one at a time, they take minutes to hours):
+Running trials in PARALLEL -- why `ptrial` and `trial` exist
+------------------------------------------------------------
+`b1` measured ~54 min per 56-plan val pass on the box's CPU, so its 12-trial grid took ~11 h
+sequentially. It also measured each process holding only ~3-4.6 of the box's 72 cores: a "slow"
+sweep leaves the machine ~85 % idle. Every trial is an independent process over the same read-only
+data, so the sweep is embarrassingly parallel.
+
+`ptrial` (one proposal-stage config) and `trial` (one full-search config) are therefore
+**single-trial entry points**: the sweep is driven by launching ~12 of them concurrently and
+collecting their JSON, rather than by a sequential loop inside `run_domain_tuning`. That is a
+SCHEDULING change, not an algorithmic one -- each trial calls exactly the same library scorers, so
+its numbers are comparable one-for-one with `b1`'s.
+
+Usage (each entry is one experiment; the b-series take minutes to hours):
 
     pixi run python scripts/propose_retrieve_floorplans_experiment.py b0
-    pixi run python scripts/propose_retrieve_floorplans_experiment.py b1 floorplans-door
+    pixi run python scripts/propose_retrieve_floorplans_experiment.py b1 --dataset floorplans-door
     pixi run python scripts/propose_retrieve_floorplans_experiment.py b2
     pixi run python scripts/propose_retrieve_floorplans_experiment.py b3
+
+    # proposal stage only, one geometry (no embedding -- cheap):
+    ... ptrial --name t1b-s512-o20-fi1 --splits val --tile-side 512 --tile-overlap 0.2
+    # one full-search config on one split (the parallel sweep primitive):
+    ... trial --name t1c-s512 --split val --config '{"proposal_tiling": true, "tile_side": 512}'
+    # latency of one config, sampled across the plan-area distribution:
+    ... probe --name t1c-latency --config '{"proposal_tiling": true, "tile_side": 512}'
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import statistics
 import sys
@@ -88,7 +109,7 @@ from object_search.inference import FastSAMConfig
 from object_search.provenance import current_git_sha, repo_root
 from object_search.schemas.geometry import BBox
 from object_search.search import propose_retrieve
-from object_search.search.proposals import propose
+from object_search.search.proposals import propose, propose_tiled_with_stats
 
 # Where every raw JSON report lands: the quick task's own directory, never docs/benchmark/.
 _OUT_DIR = Path(".planning/quick/260812-m8m-improve-propose-retrieve-recall-on-floor/runs")
@@ -180,13 +201,23 @@ def proposal_stage_recall(
     conf: float = 0.4,
     seed: int = 0,
     limit: int | None = None,
+    only_ids: Sequence[str] | None = None,
+    tile_side: int | None = None,
+    tile_overlap: float = 0.2,
+    tile_merge_ios: float = 0.5,
+    tile_full_image: bool = True,
 ) -> dict[str, Any]:
     """Run the PROPOSAL stage alone over a split and measure how much of the GT it covers.
 
-    For each plan: run `propose` with a `FastSAMConfig` (no embedding, no retrieval, no threshold),
-    then record `n_proposals`, `n_gt`, proposal recall under both denominators, the plan's pixel
-    dimensions, and the wall-clock of the proposal call. Aggregated into crowding buckets (per-plan)
-    and symbol-size buckets (per-GT-box).
+    For each plan: run the proposal stage with a `FastSAMConfig` (no embedding, no retrieval, no
+    threshold), then record `n_proposals`, `n_gt`, proposal recall under both denominators, the
+    plan's pixel dimensions, and the wall-clock of the proposal call. Aggregated into crowding
+    buckets (per-plan) and symbol-size buckets (per-GT-box).
+
+    With `tile_side` set, the SAME measurement runs through `propose_tiled` instead of `propose` --
+    so a tiled geometry's proposal-stage ceiling is directly comparable with B0's untiled one,
+    measured by the same code on the same boxes. `n_tiles` and `n_pre_merge` come back per plan, so
+    the recall gain and its cost are read off one table (EVAL-11).
 
     Args:
         dataset: Dataset key, e.g. ``"floorplans-door"``.
@@ -194,6 +225,11 @@ def proposal_stage_recall(
         conf: FastSAM objectness gate (`ProposeRetrieveConfig.proposal_conf`'s default is 0.4).
         seed: Exemplar-sampler seed (D-11), so the excluded exemplar matches the eval's draw.
         limit: Stop after this many plans per split -- for the cost probe, never for a reported table.
+        only_ids: Restrict to these image ids (the single-plan tracer, T1a).
+        tile_side: Tile edge in native pixels; ``None`` runs the untiled path (B0's measurement).
+        tile_overlap: Fraction of ``tile_side`` shared by consecutive tiles.
+        tile_merge_ios: Cross-tile IoS merge threshold.
+        tile_full_image: Union the whole-image pass in ("SAHI + FI").
 
     Returns:
         ``{"rows": [...], "by_crowding": {...}, "by_size": {...}, "overall": {...}}``.
@@ -205,9 +241,12 @@ def proposal_stage_recall(
             "Run `pixi run -e export fetch-models --only fastsam-s`."
         )
 
+    keep = set(only_ids) if only_ids is not None else None
     rows: list[dict[str, Any]] = []
     for split in splits:
         ids = research_image_ids(dataset, split)  # type: ignore[arg-type]
+        if keep is not None:
+            ids = [i for i in ids if i in keep]
         for image_id in ids if limit is None else ids[:limit]:
             sidecar = repo_root() / _RESEARCH_ROOT / dataset / split / f"{image_id}.gt.json"
             gt = load_research_ground_truth(sidecar)
@@ -220,8 +259,22 @@ def proposal_stage_recall(
                 continue
 
             exemplar = sample_exemplars(gt, count=1, seed=seed)[0]
+            fastsam_config = FastSAMConfig(conf_thres=conf)
             started = perf_counter()
-            proposals = propose(image, FastSAMConfig(conf_thres=conf), backend=backend)
+            if tile_side is None:
+                proposals = propose(image, fastsam_config, backend=backend)
+                n_tiles, n_pre_merge = 1, len(proposals)
+            else:
+                tiled = propose_tiled_with_stats(
+                    image,
+                    fastsam_config,
+                    backend=backend,
+                    tile_side=tile_side,
+                    overlap=tile_overlap,
+                    merge_ios=tile_merge_ios,
+                    include_full_image=tile_full_image,
+                )
+                proposals, n_tiles, n_pre_merge = tiled
             proposal_ms = (perf_counter() - started) * 1000.0
             proposal_boxes = [p.box for p in proposals]
 
@@ -242,6 +295,8 @@ def proposal_stage_recall(
                     "n_gt": len(gt.boxes),
                     "n_gt_excl_exemplar": len(excl),
                     "n_proposals": len(proposal_boxes),
+                    "n_tiles": n_tiles,
+                    "n_proposals_pre_merge": n_pre_merge,
                     "n_matched": sum(matched),
                     "proposal_recall": sum(matched) / len(matched),
                     "proposal_recall_excl_exemplar": (sum(excl) / len(excl)) if excl else None,
@@ -268,6 +323,19 @@ def proposal_stage_recall(
         "splits": list(splits),
         "proposal_conf": conf,
         "seed": seed,
+        "tiling": (
+            None
+            if tile_side is None
+            else {
+                "tile_side": tile_side,
+                "tile_overlap": tile_overlap,
+                "tile_merge_ios": tile_merge_ios,
+                "tile_include_full_image": tile_full_image,
+            }
+        ),
+        "mean_n_tiles": _mean([float(r["n_tiles"]) for r in rows]),
+        "mean_n_proposals_pre_merge": _mean([float(r["n_proposals_pre_merge"]) for r in rows]),
+        "mean_proposal_ms": _mean([float(r["proposal_ms"]) for r in rows]),
         "git_sha": current_git_sha(),
         "rows": rows,
         "by_crowding": _aggregate_by_crowding(rows),
@@ -400,6 +468,13 @@ def _aggregate_by_size(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 def _log_proposal_stage(report: dict[str, Any]) -> None:
     """Log the two bucket tables -- the shape the report quotes."""
+    logger.info(
+        "--- proposal-stage: tiling={} | mean_n_tiles={} mean_pre_merge={} mean_proposal_ms={} ---",
+        report.get("tiling") or "OFF (untiled)",
+        _fmt(report.get("mean_n_tiles")),
+        _fmt(report.get("mean_n_proposals_pre_merge")),
+        _fmt(report.get("mean_proposal_ms")),
+    )
     logger.info("--- proposal-stage recall by CROWDING bucket ({}) ---", report["dataset"])
     for bucket in _CROWDING_BUCKETS:
         entry = report["by_crowding"][bucket]
@@ -682,12 +757,63 @@ def tile_count_forecast(
     return forecast
 
 
+def run_trial(
+    dataset: str,
+    split: str,
+    config: propose_retrieve.ProposeRetrieveConfig,
+    *,
+    name: str,
+    exemplar_count: int = 1,
+) -> dict[str, Any]:
+    """ONE (config, split) evaluation -- the primitive a parallel sweep launches N copies of.
+
+    A thin wrapper over `final_metrics` (and therefore over the committed `run_research_benchmark`),
+    plus the config it ran and its wall clock, dumped to `runs/<name>.json`. It exists so a sweep is
+    N independent OS processes on a 72-core box instead of a sequential loop inside
+    `run_domain_tuning` -- see the module docstring. Precision and recall are logged separately,
+    never F1 alone.
+
+    **This never selects anything.** Choosing between trials is done by reading the val JSONs; a
+    `split="test"` trial is only ever run once per finalist, after the val argmax is frozen.
+    """
+    started = perf_counter()
+    block = final_metrics(dataset, split, config=config, exemplar_count=exemplar_count)
+    overall = block["overall"]
+    payload = {
+        "git_sha": current_git_sha(),
+        "name": name,
+        "dataset": dataset,
+        "split": split,
+        "exemplar_count": exemplar_count,
+        "config": config.model_dump(),
+        "overall": overall,
+        "slices": block["slices"],
+        "coverage": block["coverage"],
+        "per_image": block["per_image"],
+        "wall_clock_s": perf_counter() - started,
+    }
+    logger.info(
+        "trial[{}] {}/{}: P={} R={} F1={} ({:.1f} min)",
+        name,
+        dataset,
+        split,
+        _fmt(overall.get("precision")),
+        _fmt(overall.get("recall")),
+        _fmt(overall.get("f1")),
+        payload["wall_clock_s"] / 60.0,
+    )
+    _write(f"{name}.json", payload)
+    return payload
+
+
 def cost_probe(
     dataset: str = "floorplans-door",
     split: str = "val",
     *,
     n_plans: int = 5,
     tile_multipliers: Sequence[int] = (4, 9, 16),
+    config: propose_retrieve.ProposeRetrieveConfig | None = None,
+    name: str = "b3",
 ) -> dict[str, Any]:
     """Wall-clock the proposal stage and a full search on this box, then extrapolate a tiled sweep.
 
@@ -709,7 +835,10 @@ def cost_probe(
     backend = propose_retrieve._get_backend()
     if backend is None:
         raise RuntimeError("the fastsam-s weight is absent; cannot probe cost.")
-    config = propose_retrieve.ProposeRetrieveConfig()
+    # `config=None` probes the shipped defaults (B3). Passing a tiled config re-probes the SAME
+    # measurement for that geometry, which is how the tiled latency multiplier stops being an
+    # extrapolation and becomes a measurement.
+    config = config if config is not None else propose_retrieve.ProposeRetrieveConfig()
 
     # Order the split by plan area, then take evenly spaced quantiles, so the sample spans the
     # distribution (smallest -> largest) instead of whatever happens to sort first by filename.
@@ -737,8 +866,20 @@ def cost_probe(
             continue
         exemplar = sample_exemplars(gt, count=1, seed=0)[0]
 
+        fastsam_config = FastSAMConfig(conf_thres=config.proposal_conf)
         started = perf_counter()
-        proposals = propose(image, FastSAMConfig(conf_thres=config.proposal_conf), backend=backend)
+        if config.proposal_tiling:
+            proposals = propose_tiled_with_stats(
+                image,
+                fastsam_config,
+                backend=backend,
+                tile_side=config.tile_side,
+                overlap=config.tile_overlap,
+                merge_ios=config.tile_merge_ios,
+                include_full_image=config.tile_include_full_image,
+            ).proposals
+        else:
+            proposals = propose(image, fastsam_config, backend=backend)
         proposal_s = perf_counter() - started
 
         started = perf_counter()
@@ -757,6 +898,8 @@ def cost_probe(
                 "full_search_s": search_s,
                 "proposal_ms": metrics.get("proposal_ms"),
                 "embedding_ms": metrics.get("embedding_ms"),
+                "n_tiles": metrics.get("n_tiles"),
+                "n_proposals_pre_merge": metrics.get("n_proposals_pre_merge"),
             }
         )
         logger.info(
@@ -817,6 +960,7 @@ def cost_probe(
     payload = {
         "git_sha": current_git_sha(),
         "runtime": "CPUExecutionProvider (onnxruntime CPU build)",
+        "config": config.model_dump(),
         "dataset": dataset,
         "split": split,
         "n_val_plans": n_val,
@@ -848,39 +992,85 @@ def cost_probe(
             entry["per_plan_s"],
             entry["val_sweep_s_per_trial"] / 60.0,
         )
-    _write("b3--cost-probe.json", payload)
+    _write(f"{name}--cost-probe.json", payload)
     return payload
 
 
 # ------------------------------------------------------------------------------------ runner
 
 
-def main(argv: Sequence[str]) -> int:
-    experiments = ("b0", "b1", "b2", "b3")
-    if not argv or argv[0] not in experiments:
-        logger.error(
-            "usage: propose_retrieve_floorplans_experiment.py {{{}}} [dataset]",
-            "|".join(experiments),
-        )
-        return 2
-    experiment = argv[0]
-    dataset = argv[1] if len(argv) > 1 else "floorplans-door"
-    if dataset not in _DATASETS:
-        logger.error("unknown dataset {!r}; expected one of {}", dataset, _DATASETS)
-        return 2
+def _parser() -> argparse.ArgumentParser:
+    """One flat parser: the experiment name is positional, everything else is an optional flag.
 
-    if experiment == "b0":
+    Deliberately argparse (stdlib) rather than Typer/Hydra -- this is a lab bench, and every
+    invocation is quoted verbatim in EXPERIMENTS.md, so the command line must be readable and
+    stable, not composed.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("experiment", choices=("b0", "b1", "b2", "b3", "ptrial", "trial", "probe"))
+    parser.add_argument("--dataset", default="floorplans-door", choices=_DATASETS)
+    parser.add_argument(
+        "--name", default=None, help="Output stem under runs/ (required for trials)"
+    )
+    parser.add_argument("--split", default="val", choices=_SPLITS, help="trial/probe: which split")
+    parser.add_argument(
+        "--splits", default=None, help="ptrial: comma-separated splits (default: val,test)"
+    )
+    parser.add_argument("--exemplar-count", type=int, default=1)
+    # ptrial: proposal-stage geometry (omit --tile-side for the untiled B0 measurement).
+    parser.add_argument("--proposal-conf", type=float, default=0.4)
+    parser.add_argument("--tile-side", type=int, default=None)
+    parser.add_argument("--tile-overlap", type=float, default=0.2)
+    parser.add_argument("--tile-merge-ios", type=float, default=0.5)
+    parser.add_argument("--no-full-image", action="store_true", help="ptrial: disable SAHI + FI")
+    parser.add_argument("--only-ids", default=None, help="ptrial: comma-separated image ids (T1a)")
+    # trial/probe: a full ProposeRetrieveConfig as JSON, validated by the frozen model itself.
+    parser.add_argument("--config", default="{}", help="trial/probe: JSON config overrides")
+    return parser
+
+
+def main(argv: Sequence[str]) -> int:
+    args = _parser().parse_args(argv)
+    dataset: str = args.dataset
+
+    if args.experiment == "b0":
         report = proposal_stage_recall(dataset)
         _log_proposal_stage(report)
         _write(f"b0--{dataset}.json", report)
-    elif experiment == "b1":
+    elif args.experiment == "b1":
         tuned_vs_default(dataset)
         for split in _SPLITS:
             final_metrics(dataset, split)
-    elif experiment == "b2":
+    elif args.experiment == "b2":
         regime_check()
-    else:
+    elif args.experiment == "b3":
         cost_probe(dataset)
+    elif args.experiment == "ptrial":
+        if not args.name:
+            logger.error("ptrial requires --name (the runs/<name>.json stem)")
+            return 2
+        splits = tuple(args.splits.split(",")) if args.splits else _SPLITS
+        report = proposal_stage_recall(
+            dataset,
+            splits,
+            conf=args.proposal_conf,
+            only_ids=tuple(args.only_ids.split(",")) if args.only_ids else None,
+            tile_side=args.tile_side,
+            tile_overlap=args.tile_overlap,
+            tile_merge_ios=args.tile_merge_ios,
+            tile_full_image=not args.no_full_image,
+        )
+        _log_proposal_stage(report)
+        _write(f"{args.name}.json", report)
+    elif args.experiment == "trial":
+        if not args.name:
+            logger.error("trial requires --name (the runs/<name>.json stem)")
+            return 2
+        config = propose_retrieve.ProposeRetrieveConfig(**json.loads(args.config))
+        run_trial(dataset, args.split, config, name=args.name, exemplar_count=args.exemplar_count)
+    else:  # probe
+        config = propose_retrieve.ProposeRetrieveConfig(**json.loads(args.config))
+        cost_probe(dataset, args.split, config=config, name=args.name or "probe")
     return 0
 
 
