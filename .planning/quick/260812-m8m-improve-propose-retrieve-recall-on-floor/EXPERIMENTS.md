@@ -365,3 +365,264 @@ floor-plan change must leave untouched, and it is now a session-local measuremen
 quoted number. It also establishes that the CPU execution provider reproduces the committed
 (GPU-era) regime numbers — which is why a B1 doors difference, if one appears, should be attributed
 to the coverage difference (28/28 vs 13/14) before it is attributed to the runtime.
+
+---
+
+## B1-final — session-local final baseline (tuned vs default) — **COMPLETE**
+
+**Supersedes the "B1 — IN FLIGHT, NOT COMPLETE" entry above.** That entry is left exactly as
+recorded, per the append-only rule; the numbers below are the finished runs.
+
+- **SHA:** `0cb906d4eeeacd7930bf8fa7a0111b4ac689fda1`
+- **Commands:** `pixi run python scripts/propose_retrieve_floorplans_experiment.py b1 floorplans-door`
+  and `… b1 floorplans-window` (launched concurrently, `nohup`)
+- **Artifacts:** `runs/b1--floorplans-door.json`, `runs/b1--floorplans-window.json`
+  (also `/root/b1_door.log`, `/root/b1_window.log` on the box)
+- **Runtime:** CPU execution provider, all 28 test plans scored (`n_scored` 28/28), 1 exemplar.
+- **Wall clock:** ~12 h 40 m each, run concurrently — matching the B3-CORRECTION projection
+  (≈11.6 h), not the original B3 probe's ≈84 min. The corrected probe was right; the original was
+  biased low by ~7.7×.
+
+### floorplans-door
+
+| | precision | recall | F1 |
+|---|---|---|---|
+| **VAL** (winning trial) | 0.591 | 0.307 | **0.404** |
+| **TEST tuned** | 0.604 | 0.399 | **0.481** |
+| **TEST default** | 0.604 | 0.399 | **0.481** |
+
+Recall by symbol size — **val**: small 0.160, medium 0.459, large 0.750.
+**test**: small 0.393, medium 0.415, large 0.286.
+
+Every val trial (all 12, P and R separately — never F1 alone):
+
+| similarity_floor | nms_iou | precision | recall | F1 |
+|---|---|---|---|---|
+| 0.40 | 0.3 | 0.166 | 0.353 | 0.226 |
+| 0.40 | 0.5 | 0.156 | 0.355 | 0.217 |
+| 0.50 | 0.3 | 0.200 | 0.349 | 0.254 |
+| 0.50 | 0.5 | 0.187 | 0.351 | 0.244 |
+| 0.60 | 0.3 | 0.307 | 0.347 | 0.326 |
+| 0.60 | 0.5 | 0.289 | 0.347 | 0.315 |
+| **0.70** | **0.3** | **0.591** | **0.307** | **0.404** ← argmax |
+| 0.70 | 0.5 | 0.572 | 0.307 | 0.400 |
+| 0.80 | 0.3 | 0.838 | 0.157 | 0.265 |
+| 0.80 | 0.5 | 0.814 | 0.157 | 0.264 |
+| 0.85 | 0.3 | 0.935 | 0.082 | 0.150 |
+| 0.85 | 0.5 | 0.935 | 0.082 | 0.150 |
+
+### floorplans-window
+
+| | precision | recall | F1 |
+|---|---|---|---|
+| **VAL** (winning trial) | 0.119 | 0.054 | **0.074** |
+| **TEST tuned** | 0.119 | 0.103 | **0.110** |
+| **TEST default** | 0.119 | 0.103 | **0.110** |
+
+Recall by symbol size — **val**: small 0.020, medium 0.140, large 0.500.
+**test**: small 0.062, medium 0.185, large 0.000.
+Val argmax is again `{similarity_floor: 0.7, nms_iou: 0.3}` (val F1 0.074, next best 0.073 at
+nms 0.5, then 0.068 at floor 0.6).
+
+### Does this reproduce the committed 0.459 doors row? No — it is HIGHER, and both numbers stand
+
+| source | coverage | runtime | P | R | **F1** |
+|---|---|---|---|---|---|
+| committed `docs/eval/floorplans-findings.md` | 13/14 | GPU-era | 0.55 | 0.39 | **0.459** |
+| **this session (B1-final)** | **28/28** | CPU | 0.604 | 0.399 | **0.481** |
+
+This is the session-to-session measurement drift `docs/reports/dino-dense-floorplans-improvement.md`
+documents for its own method, and it was **pre-registered** in the B1 entry above before the runs
+landed. Per the plan, **0.481 is this session's delta reference** for every step-1/2/3 comparison;
+0.459 is stated alongside it wherever the committed row is cited, never silently replaced.
+B2 already established that the CPU EP reproduces the committed regime numbers to within rounding,
+so the difference is attributable to coverage (28/28 vs 13/14), not to the execution provider.
+
+### The finding that matters most for the rest of this plan
+
+**For BOTH datasets the tuned and default TEST rows are byte-identical**, because the val-argmax
+winner `{similarity_floor: 0.7, nms_iou: 0.3}` **IS** the shipped `ProposeRetrieveConfig` default.
+
+> **The committed `similarity_floor × nms_iou` grid buys exactly nothing on this domain.** The
+> retrieval-stage knobs are already at their floor-plan optimum. Twelve val trials × two datasets
+> ≈ 25 h of CPU produced a delta of 0.000.
+
+Combined with B0 — door TEST final recall 0.399 sits essentially **at** the pooled proposal-stage
+ceiling of 0.405 — this is independent confirmation that **the proposal stage is the only remaining
+lever**. The retrieval stage is not leaving recall on the table; there is nothing left for it to
+retrieve.
+
+Two consequences, both acted on:
+
+1. **Later sweeps hold `similarity_floor`/`nms_iou` near 0.7/0.3 rather than re-crossing the full
+   6×2 grid**, since that cross is measured-inert here. Where tiling changes the proposal
+   *distribution* (more proposals ⇒ more chances for a moderate-cosine false positive), a narrow
+   floor sweep around the optimum is still run — the inertness was measured on the *untiled*
+   distribution and does not automatically transfer.
+2. **Trials are run as parallel processes from here on.** B3-CORRECTION measured each trial holding
+   only ~3–4.6 of the box's 72 cores (load average 8–12 with three concurrent runs — ~85 % idle).
+   The checkpoint decision was **stay CPU-only and parallelise**: no `onnxruntime-gpu` surgery on
+   the shared box, ~12 concurrent independent trial processes instead. That turns the ~11 h
+   sequential sweep that produced this entry into ~1 h of wall clock for an equivalent one.
+
+---
+
+## T1a — tiling tracer on the plans B0 measured at proposal recall 0.000
+
+- **Local SHA:** `41b8431` (the box's `/root/repo` is an rsync of the source tree, not a clone, so
+  it has no `.git` and the harness records `git_sha: "unknown"` — the local SHA is stated here
+  instead, as B0 already does).
+- **Command:** `pixi run python scripts/propose_retrieve_floorplans_experiment.py ptrial
+  --name t1a-tracer-s512 --splits val --tile-side 512 --tile-overlap 0.2 --tile-merge-ios 0.5`
+  (`tile_include_full_image=True`)
+- **Artifact:** `runs/t1a-tracer-s512.json`
+- **Scope:** the four plans B0 measured at proposal recall **0.000**, plus `22_png` (the most crowded
+  val plan, B0 recall 0.059). Proposal stage only — no embedding, no retrieval.
+
+| plan | size | n_gt | B0 n_prop | B0 recall | tiles | pre-merge | **tiled n_prop** | **tiled recall** |
+|---|---|---|---|---|---|---|---|---|
+| `65_png.rf.y2pckOMkZpYvXHhC2AZE` | 4000×1685 | 19 | 83 | 0.000 | 41 | 422 | 187 | **0.000** |
+| `4061_png.rf.4VhzLHqSK6GM2tgWBh6K` | 1170×742 | 11 | 50 | 0.000 | 7 | 197 | 73 | **0.273** |
+| `155_png.rf.5XBwQ9IzguztSIBPEOnz` | 818×647 | 7 | 77 | 0.000 | 5 | 260 | 65 | **0.000** |
+| `4_png.rf.g6FJloai36FKwgawnlGA` | 513×436 | 7 | 30 | 0.000 | 3 | 88 | **15** | **0.000** |
+| `22_png.rf.soRS3vbM0bF4DeDClZai` | 482×507 | 17 | 61 | 0.059 | 1 | 61 | 61 | 0.059 |
+
+### The tracer gate fired, and it is recorded rather than smoothed over
+
+The plan's tracer criterion was explicit: *"ONE plan (the worst one from B0: 4000×1685, 18 doors,
+proposal recall 0.00) end-to-end tiled, before any sweep. If its proposal recall does not move off
+0.00, stop and diagnose the tiling geometry before spending a sweep."*
+
+**It did not move.** `65_png` received **41 tiles** and **187 merged proposals** for 19 doors and
+still matched **zero** of them at IoU ≥ 0.5. Three of the four zero-recall plans stayed at exactly
+0.000. Only `4061_png` moved (0.000 → 0.273).
+
+**Deviation, recorded honestly:** the 12-config T1b sweep was launched concurrently with this tracer
+rather than gated behind it, so the sweep was spent before the gate could stop it. That was a
+process error. It cost box time, not correctness — and T1b's result (below) independently confirms
+what the gate was trying to say, so the finding is unaffected. The gate is re-honoured from here on:
+no further sweep is launched until the mechanism T1a exposed is understood.
+
+### Two mechanisms visible in five plans
+
+1. **`22_png` (482×507) returned a byte-identical result to B0** — 1 tile, 61 proposals, recall
+   0.059. Both dimensions are ≤ 512, so `_tile_origins` returned the single whole-image tile and
+   `propose_tiled_with_stats`'s step-0 short circuit ran the untiled path. This is the **identity
+   property empirically confirmed on real data**, which is the same property that makes the
+   chipset/textured/synthetic guardrail a no-op by construction.
+2. **`4_png` came back with FEWER proposals than the untiled baseline: 30 → 15**, from **88
+   pre-merge**. Tiling ran three passes, produced 88 candidate proposals, and the IoS merge deleted
+   **83 %** of them, landing below the untiled count. A proposal stage that runs 3× the forward
+   passes and returns half the proposals is not a budget increase — it is a budget *reduction*.
+   This is the thread T1b pulls.
+
+`65_png` remains the strongest single argument for a non-FastSAM proposal source: 187 proposals over
+19 doors at 41 different magnifications, zero matches. No tiling geometry fixes a backend that does
+not consider a CAD door symbol an object.
+
+---
+
+## T1b — proposal-stage geometry sweep (floorplans-door **VAL**, 56 plans, 12 configs)
+
+- **Local SHA:** `41b8431`
+- **Commands:** `… ptrial --name t1b-s{512,768,1024}-o{02,03}-fi{0,1} --splits val --tile-side S
+  --tile-overlap O [--no-full-image]`, twelve `nohup`-detached processes, each
+  `taskset -c N-M`-pinned to 4 cores with `OMP_NUM_THREADS=4`.
+- **Artifacts:** `runs/t1b-s*-o*-fi*.json` (12 files)
+- **Baseline row** is B0 **recomputed on the val split alone**, from B0's own per-plan rows, so the
+  comparison is like-for-like (B0's headline table pools val+test; T1b is val-only).
+
+Proposal-stage recall, mean-per-plan within each crowding bucket:
+
+| geometry | mean tiles | pre-merge | merged n_prop | 1–3 | 4–10 | **11+** | all (mean) | all (pooled) | small | medium | large |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **B0 baseline (untiled)** | 1.0 | — | 46.5 | 0.905 | 0.595 | **0.171** | 0.498 | 0.374 | 0.220 | 0.537 | 0.750 |
+| 512 / 0.2 / FI=off | 7.9 | 145.3 | 61.4 | 0.857 | 0.531 | **0.180** | 0.459 | 0.353 | 0.216 | 0.493 | 0.750 |
+| 512 / 0.2 / FI=on | 8.8 | 187.4 | 60.6 | 0.857 | 0.556 | **0.214** | 0.484 | 0.378 | 0.238 | 0.520 | 0.812 |
+| 512 / 0.3 / FI=off | 9.9 | 178.1 | 62.0 | 0.857 | 0.546 | **0.186** | 0.469 | 0.361 | 0.223 | 0.498 | 0.812 |
+| 512 / 0.3 / FI=on | 10.8 | 220.3 | 61.5 | 0.857 | 0.571 | **0.237** | 0.500 | 0.395 | 0.255 | 0.537 | 0.812 |
+| 768 / 0.2 / FI=off | 4.3 | 132.6 | 52.8 | 0.810 | 0.548 | **0.225** | 0.477 | 0.378 | 0.241 | 0.524 | 0.688 |
+| 768 / 0.2 / FI=on | 4.9 | 163.1 | 53.3 | 0.810 | 0.563 | **0.239** | 0.490 | 0.393 | 0.252 | 0.546 | 0.688 |
+| 768 / 0.3 / FI=off | 4.4 | 134.0 | 53.2 | 0.810 | 0.566 | **0.225** | 0.487 | 0.383 | 0.245 | 0.533 | 0.688 |
+| **768 / 0.3 / FI=on** | 5.0 | 164.5 | 53.6 | 0.810 | 0.580 | **0.247** ← best 11+ | 0.502 | 0.402 | 0.259 | 0.559 | 0.688 |
+| **1024 / 0.2 / FI=off** | 2.5 | 94.1 | 52.9 | 0.905 | 0.583 | **0.224** | **0.508** ← best all | 0.391 | 0.234 | 0.559 | 0.750 |
+| 1024 / 0.2 / FI=on | 2.9 | 114.4 | 53.0 | 0.905 | 0.580 | **0.222** | 0.506 | 0.389 | 0.234 | 0.555 | 0.750 |
+| 1024 / 0.3 / FI=off | 2.5 | 99.4 | 53.4 | 0.905 | 0.581 | **0.212** | 0.503 | 0.385 | 0.227 | 0.555 | 0.750 |
+| 1024 / 0.3 / FI=on | 2.9 | 119.8 | 53.4 | 0.905 | 0.578 | **0.210** | 0.501 | 0.383 | 0.227 | 0.550 | 0.750 |
+
+### Finding 1 — the IoS merge is a BUDGET CLAMP, and it is the reason tiling did nothing
+
+The premise from B0 was: *"N tiles buy roughly N× the budget."* Measured, they do not:
+
+| geometry | FastSAM passes/plan | pre-merge total | post-merge total | merge kill rate | **merged budget vs untiled** |
+|---|---|---|---|---|---|
+| 1024 / 0.2 / FI=off | 2.5× | 5 267 | 2 961 | 43.8 % | **1.14×** |
+| 768 / 0.3 / FI=on | 5.0× | 9 214 | 3 001 | 67.4 % | **1.15×** |
+| 512 / 0.2 / FI=off | 7.9× | 8 137 | 3 436 | 57.8 % | **1.32×** |
+| 512 / 0.3 / FI=on | 10.8× | 12 335 | 3 443 | 72.1 % | **1.32×** |
+
+> **Across a 4.3× range in forward passes (2.5 → 10.8 per plan), the merged proposal budget is
+> pinned in the range 1.14–1.33× baseline.** The harder you tile, the harder the merge deletes.
+> Pre-merge counts scale with tile count exactly as predicted (5 267 → 12 335); the merge removes
+> the entire increase.
+
+The mechanism is `_merge_tiled_proposals`'s use of **IoS**. IoS is `intersection / min(area)`, so a
+small box **fully contained** in a larger one scores IoS = **1.0** and is suppressed whenever the
+larger box was kept first. FastSAM everything-mode routinely emits **nested** proposals — a room,
+and the door inside that room. The untiled `propose()` path does no merging at all, so those nested
+proposals all survive; the tiled path deletes them. **The proposals being deleted are structurally
+the small nested ones, which on this dataset are the doors.**
+
+This is a real defect in transplanting SAHI's postprocess into an everything-mode segmenter, and it
+is a *different* claim from the one the module docstring already makes. `proposals.py`'s step-0
+comment correctly reasons that the single-tile short circuit is needed because "the merge is a
+CROSS-TILE deduplicator, and with one pass there is nothing cross-tile to deduplicate." The measured
+finding is stronger: the merge is applied to the **union of all tiles including within-tile
+proposals**, so it suppresses nested proposals *within* a single tile too — which is over-segmentation
+collapsing, explicitly the post-retrieval NMS's job, not the merge's. SAHI's own setting does not hit
+this because SAHI merges *class detections*, where nesting is rare and meaningless.
+
+### Finding 2 — the pre-registered null control wins the aggregate
+
+R0 pre-registered this test: *"1024 is kept in the sweep precisely as the near-null control — if it
+'wins', tiling is not what is helping."* On the aggregate mean recall it **does win**: `1024/0.2/FI=off`
+scores **0.508**, the best of all twelve, from only 2.5 passes/plan with **55/84 plans left entirely
+untiled**. The R0 test fires.
+
+The nuance the aggregate hides, and which the crowding read was specified to expose: the crowded
+(11+) bucket does have a genuine best at a real tiling geometry, `768/0.3/FI=on` at **0.247 vs 0.171**
+(**+0.076**). But it is bought, not free — **every tiled geometry regresses the sparse and mid
+buckets**:
+
+| geometry | 1–3 | 4–10 | 11+ | net (all, mean) |
+|---|---|---|---|---|
+| baseline | 0.905 | 0.595 | 0.171 | 0.498 |
+| 768 / 0.3 / FI=on | **−0.095** | **−0.015** | **+0.076** | **+0.004** |
+
+A +0.076 crowded-bucket gain against a −0.095 sparse-bucket loss nets **+0.004** overall. Tiling as
+currently merged is, on this dataset, **a redistribution of recall across crowding buckets, not an
+increase.**
+
+### Finding 3 — SAHI + FI is the one unambiguously positive knob
+
+`tile_include_full_image=True` beats `False` at matched side/overlap in **every** 512 and 768 pair
+(11+ bucket: 0.180→0.214, 0.186→0.237, 0.225→0.239, 0.225→0.247), for exactly one extra forward
+pass. It is only inverted at 1024, where tiling is near-null anyway. This is consistent with the
+merge diagnosis: the full-image pass contributes the *large-context* proposals that survive the merge
+as the "kept first" boxes, and it re-supplies whole-object boxes for symbols truncated at tile edges.
+
+### Latency — reported, but explicitly NOT a clean measurement
+
+`mean_proposal_ms` for these runs ranges 70–217 s/plan, versus B0's 1.44 s/plan. **Do not read that
+as a ~100× tiling cost.** These twelve processes were each pinned to **4 of 72 cores**
+(`OMP_NUM_THREADS=4`) and run concurrently, whereas B0 ran unpinned. The pinning alone is ~16× of
+it. The honest cost proxy from this entry is the **forward-pass multiplier** (`mean tiles`: 2.5–10.8×)
+plus the merged-proposal multiplier that drives the dominant embedding stage (1.14–1.33×). A clean
+wall-clock number belongs to T1c, run unpinned on an idle box, and is not claimed here.
+
+### What this entry does NOT yet settle
+
+Whether tiling is genuinely a dead lever, or whether it is a **live lever behind a broken merge**.
+Findings 1 and 2 are consistent with both readings. That is a single measurable question — does
+proposal recall recover when the merge stops deleting nested boxes? — and T1e answers it before any
+decision is taken on step 1.
