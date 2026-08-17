@@ -626,3 +626,129 @@ Whether tiling is genuinely a dead lever, or whether it is a **live lever behind
 Findings 1 and 2 are consistent with both readings. That is a single measurable question — does
 proposal recall recover when the merge stops deleting nested boxes? — and T1e answers it before any
 decision is taken on step 1.
+
+---
+
+## T1e — does loosening the IoS merge threshold rescue the deleted nested boxes? **Yes, partly**
+
+- **Local SHA:** `82344c7` (the box's `/root/repo` is an rsync of the source tree, not a clone, so
+  the harness records `git_sha: "unknown"`; the local SHA is stated here instead, as B0 and T1a do).
+- **Commands:** `… ptrial --name t1e-s{512,768}-o{02,03}-fi1-ios{080,095,099} --splits val
+  --tile-side S --tile-overlap O --tile-merge-ios X`, five `nohup`-detached processes, each
+  `taskset -c N-M`-pinned to 4 cores with `OMP_NUM_THREADS=4`.
+- **Artifacts:** `runs/t1e-s512-o02-fi1-ios{080,095,099}.json`,
+  `runs/t1e-s768-o03-fi1-ios{095,099}.json`
+- **Scope:** floorplans-door **VAL** (56 plans), proposal stage only. The `merge_ios = 0.5` rows are
+  the already-recorded T1b runs at the identical geometry, restated here so the comparison is
+  like-for-like rather than cross-entry.
+
+T1b's Finding 1 was that the IoS merge is a budget clamp which deletes FastSAM's naturally nested
+proposals (a room, and the door inside it). The default threshold is SAHI's 0.5. This entry sweeps it.
+
+| geometry | `merge_ios` | mean tiles | pre-merge | merged n_prop | 1–3 | 4–10 | **11+** | all (mean) | all (pooled) | small | medium | large |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **B0 baseline (untiled)** | — | 1.0 | — | 46.5 | 0.905 | 0.595 | **0.171** | 0.498 | 0.374 | 0.220 | 0.537 | 0.750 |
+| 512 / 0.2 / FI=on | 0.50 (T1b) | 8.8 | 187.4 | 60.6 | 0.857 | 0.556 | **0.214** | 0.484 | 0.378 | 0.238 | 0.520 | 0.812 |
+| 512 / 0.2 / FI=on | 0.80 | 8.8 | 187.4 | 62.5 | 0.857 | 0.574 | **0.218** | 0.495 | 0.387 | 0.248 | 0.528 | 0.812 |
+| 512 / 0.2 / FI=on | 0.95 | 8.8 | 187.4 | 66.0 | 0.857 | 0.606 | **0.228** | 0.516 | 0.410 | 0.280 | 0.541 | 0.812 |
+| 512 / 0.2 / FI=on | 0.99 | 8.8 | 187.4 | 76.5 | 0.857 | 0.622 | **0.226** | 0.524 | 0.416 | 0.277 | 0.559 | 0.812 |
+| 768 / 0.3 / FI=on | 0.50 (T1b) | 5.0 | 164.5 | 53.6 | 0.810 | 0.580 | **0.247** | 0.502 | 0.402 | 0.259 | 0.559 | 0.688 |
+| 768 / 0.3 / FI=on | 0.95 | 5.0 | 164.5 | 57.6 | 0.857 | 0.605 | **0.268** | 0.528 | 0.431 | 0.298 | 0.572 | 0.750 |
+| **768 / 0.3 / FI=on** | **0.99** | 5.0 | 164.5 | 66.8 | 0.857 | 0.615 | **0.280** ← best | **0.538** ← best | **0.440** | **0.312** | 0.576 | 0.750 |
+
+### Finding 1 — loosening the threshold helps, monotonically, on every metric that matters
+
+Answering T1b's open question plainly: **yes, proposal recall recovers when the merge stops deleting
+nested boxes — and it recovers in exactly the buckets the diagnosis said were leaking.** At
+`768/0.3/FI=on`, moving `merge_ios` 0.5 → 0.99:
+
+| bucket | untiled B0 | tiled @ ios 0.5 | tiled @ ios 0.99 | vs untiled |
+|---|---|---|---|---|
+| 11+ (crowded) | 0.171 | 0.247 | **0.280** | **+0.109** |
+| 4–10 | 0.595 | 0.580 | 0.615 | +0.020 |
+| 1–3 (sparse) | 0.905 | 0.810 | 0.857 | −0.048 |
+| **small symbols** | 0.220 | 0.259 | **0.312** | **+0.092** |
+| all (mean) | 0.498 | 0.502 | **0.538** | **+0.040** |
+| all (pooled) | 0.374 | 0.402 | **0.440** | **+0.066** |
+
+Two things changed relative to T1b's reading:
+
+1. **The crowded-bucket gain grew by half again** (+0.076 → +0.109), and the small-symbol bucket —
+   where doors actually live — gained **+0.092 (a 42 % relative lift)**.
+2. **The sparse-bucket regression halved** (−0.095 → −0.048). T1b's headline objection was that
+   tiling *redistributes* recall rather than increasing it (+0.076 crowded bought with −0.095
+   sparse, netting +0.004). At the loosened threshold that trade is no longer a wash: **+0.109
+   against −0.048, netting +0.040 mean / +0.066 pooled.**
+
+### Finding 2 — the T1b null control no longer wins, which reverses T1b's verdict
+
+R0 pre-registered the test: *"1024 is kept in the sweep precisely as the near-null control — if it
+'wins', tiling is not what is helping."* In T1b the near-null `1024/0.2/FI=off` **did** win the
+aggregate at 0.508, and that is why T1b's provisional read was "tiling is not the fix".
+
+| config | all (mean) | 11+ |
+|---|---|---|
+| untiled B0 baseline | 0.498 | 0.171 |
+| T1b winner — near-null control `1024/0.2/FI=off` @ ios 0.5 | 0.508 | 0.224 |
+| **T1e winner — real tiling `768/0.3/FI=on` @ ios 0.99** | **0.538** | **0.280** |
+
+A genuinely tiled geometry now beats the near-null control on the aggregate **and** on the crowded
+bucket. The R0 test no longer fires. **The correct reading of T1b was therefore the second one it
+offered — tiling is a live lever that was sitting behind a broken merge, not a dead lever** — and
+the earlier "SAHI-style tiling does not help" conclusion is superseded by this entry. It is left
+standing above, per the append-only rule, precisely because the sequence of readings is the record.
+
+### Finding 3 — the clamp is still binding at 0.99, and the mechanism says exactly why
+
+The merge is still deleting the majority of proposals even at the loosest threshold tested:
+
+| geometry | `merge_ios` | pre-merge total | post-merge total | kill rate | merged budget vs untiled |
+|---|---|---|---|---|---|
+| 512 / 0.2 / FI=on | 0.50 | 10 497 | 3 395 | 67.7 % | 1.30× |
+| 512 / 0.2 / FI=on | 0.95 | 10 497 | 3 698 | 64.8 % | 1.42× |
+| 512 / 0.2 / FI=on | 0.99 | 10 497 | 4 284 | **59.2 %** | 1.65× |
+| 768 / 0.3 / FI=on | 0.50 | 9 214 | 3 001 | 67.4 % | 1.15× |
+| 768 / 0.3 / FI=on | 0.99 | 9 214 | 3 740 | **59.4 %** | 1.44× |
+
+`_ios` is `intersection / min(area)`, so a box **fully contained** in a kept box scores IoS =
+**exactly 1.0**. `_merge_tiled_proposals` matches on a strict `>` (SAHI's convention, verified in R0
+and implemented that way), so a fully nested proposal is suppressed at **every threshold below
+1.0** — 0.99 included. Loosening from 0.5 to 0.99 only rescues the *partially* overlapping boxes;
+the strictly nested ones, which is what an everything-mode segmenter emits most of, are deleted
+identically at 0.5 and at 0.99.
+
+That predicts a specific, cheap, decisive endpoint: at **`merge_ios = 1.0`** the strict `>` can never
+fire, the merge is disabled outright, and the full pre-merge budget (3.5× untiled) survives. Every
+metric above is still climbing monotonically at 0.99 with no sign of a plateau, so the sweep is not
+finished. **T1f measures that endpoint**, plus a geometry re-check at the loosened threshold (the
+T1b geometry ranking was established under the clamp and does not automatically survive it).
+
+### Finding 4 — what the threshold cannot fix, and the identity property re-confirmed
+
+Per-plan, on the five plans T1a singled out:
+
+| plan | size | n_gt | B0 | 512 @ 0.5 | 512 @ 0.99 | 768 @ 0.5 | **768 @ 0.99** |
+|---|---|---|---|---|---|---|---|
+| `65_png` | 4000×1685 | 19 | 0.000 | 0.000 | 0.053 | 0.053 | **0.105** |
+| `4061_png` | 1170×742 | 11 | 0.000 | 0.273 | 0.273 | 0.273 | 0.273 |
+| `155_png` | 818×647 | 7 | 0.000 | 0.000 | 0.000 | 0.143 | 0.143 |
+| `4_png` | 513×436 | 7 | 0.000 | 0.000 | 0.000 | 0.000 | **0.000** |
+| `22_png` | 482×507 | 17 | 0.059 | 0.059 | 0.059 | 0.059 | 0.059 |
+
+- `65_png`, the worst plan in the dataset, finally moves off 0.000 — **the T1a tracer gate that
+  fired now passes** — but only to 0.105. Two of 19 doors.
+- **`4_png` is 0.000 at every geometry and every threshold**, with 20–30 proposals over a 513×436
+  plan. No merge threshold, and no tile size, changes a backend that does not consider a CAD door
+  symbol an object. This remains the single strongest argument for the step-3 contour backend, and
+  it is now measured across seven configurations rather than one.
+- **`22_png` returns byte-identical numbers (0.059 / 61 proposals) in all seven runs** — both its
+  dimensions are ≤ 512, so `_tile_origins` yields the single whole-image tile and the step-0 short
+  circuit bypasses the merge entirely. The identity property that makes the chipset/textured/
+  synthetic guardrail a no-op **by construction** is re-confirmed here across the whole `merge_ios`
+  sweep, not just at the default.
+
+### Consequence for step 1
+
+Step 1 is **not** reverted. It is carried forward to T1f for the endpoint measurement, and the
+step-1 finalist will be the argmax over `{geometry × merge_ios}` on VAL — with the sparse-bucket
+regression reported alongside the crowded-bucket gain in every case, never netted away.
