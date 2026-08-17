@@ -1042,7 +1042,11 @@ def main(argv: Sequence[str]) -> int:
         for split in _SPLITS:
             final_metrics(dataset, split)
     elif args.experiment == "b2":
-        regime_check()
+        # --name passthrough, matching ptrial/trial. Without it this branch wrote a FIXED
+        # `b2--regimes.json`, so re-running the guardrail (T1d) would clobber the B2 baseline
+        # artifact it is supposed to be compared against -- an append-only notebook cannot be
+        # backed by an artifact its own re-run overwrites.
+        regime_check(name=args.name or "b2")
     elif args.experiment == "b3":
         cost_probe(dataset)
     elif args.experiment == "ptrial":

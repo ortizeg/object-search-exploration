@@ -752,3 +752,16 @@ Per-plan, on the five plans T1a singled out:
 Step 1 is **not** reverted. It is carried forward to T1f for the endpoint measurement, and the
 step-1 finalist will be the argmax over `{geometry × merge_ios}` on VAL — with the sparse-bucket
 regression reported alongside the crowded-bucket gain in every case, never netted away.
+
+---
+
+## H1 — harness fix: the `b2` guardrail entry point could not be re-run without clobbering B2
+
+`main()`'s `b2` branch called `regime_check()` with no `--name` passthrough, so it always wrote the
+fixed stems `b2--regimes.json` / `b2--regimes-raw.json` — unlike `ptrial`/`trial`, which both take
+`--name`. Re-running the guardrail for T1d would therefore have **overwritten the B2 baseline
+artifact it is meant to be compared against**, which an append-only notebook cannot tolerate. Fixed
+to `regime_check(name=args.name or "b2")`, matching the `ptrial`/`trial` pattern; the default is
+unchanged so the original B2 command still reproduces byte-for-byte. Verified before running T1d
+that the box's `b2--regimes.json` was still the pristine original (`md5 18ddc9e6…`, mtime Aug 12,
+per-regime F1 identical to the B2 entry above) — no prior run had clobbered it.
