@@ -983,3 +983,183 @@ It was **re-launched** rather than reported from the val run alone, because a gu
 have passed" is not a guardrail. Its result is recorded in T2-final below.
 
 ---
+
+## T2 — `proposal_conf`, run as a CONTROLLED experiment against tiling (the confound check)
+
+- **SHA:** `79fd33e`
+- **Commands:** eight `nohup`-detached, 4-core-pinned processes —
+  - **T2a (tiled arm):** `… ptrial --name t2a-scout-conf0{10,20,30,50} --splits val --tile-side 768
+    --tile-overlap 0.3 --tile-merge-ios 1.0 --proposal-conf C`
+  - **T2b (untiled control arm):** `… ptrial --name t2b-untiled-conf0{10,20,30,50} --splits val
+    --proposal-conf C` (no `--tile-side`, so the untiled path)
+- **Artifacts:** `runs/t2a-scout-conf0{10,20,30,50}.json`, `runs/t2b-untiled-conf0{10,20,30,50}.json`
+- **Scope:** floorplans-door **VAL** (56 plans), proposal stage only.
+
+### Why this entry is a controlled experiment and not the sweep the plan specified
+
+The plan specifies step 2 as *"sweep `proposal_conf` on top of step 1's winner"* — i.e. tiling is
+assumed helpful and held fixed underneath. A single-plan observation during T1f made that assumption
+unsafe. On val plan `109_png` (603×451, 12 doors — **below the 768 tile, so tiling at 768 is a
+provable identity there**):
+
+| `109_png` config | tiles | n_prop | proposal recall |
+|---|---|---|---|
+| B0, untiled, `conf 0.40` | 1 | 27 | 0.083 |
+| **tiled 512/0.2, `conf 0.40`** | 3 | **79 (2.9×)** | **0.083 (+0.000)** |
+| **untiled, `conf 0.30`** | 1 | **46 (1.7×)** | **0.333 (+0.250)** |
+| untiled, `conf 0.10` | 1 | 103 (3.8×) | 0.417 |
+| tiled 768/0.3, `conf 0.10` | 1 | 103 | 0.417 *(identity confirmed)* |
+
+Tiling bought 2.9× the proposals for **exactly zero** recall; the objectness gate bought 1.7× the
+proposals for **+0.250**. If that generalises, the plan's "step 1 = tiling, step 2 = conf" ordering
+is backwards and step 1's measured gain is substantially a `proposal_conf` confound wearing a tiling
+costume — both levers ultimately act by putting more proposals on the table.
+
+So step 2 was run as **two matched arms at identical `proposal_conf` values**, tiled and untiled,
+which makes the attribution answerable from data instead of assumed. This is the deviation from the
+plan's literal instruction, taken deliberately and recorded here.
+
+### The two arms
+
+| geometry | conf | tiles | n_prop | 1–3 | 4–10 | **11+** | all (mean) | all (pooled) | small | medium | large | proposal s/plan |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **B0 baseline untiled** | 0.40 | 1.0 | 46.5 | 0.905 | 0.595 | **0.171** | 0.498 | 0.374 | 0.220 | 0.537 | 0.750 | 1.4 |
+| untiled | 0.50 | 1.0 | 33.7 | 0.905 | 0.488 | 0.108 | 0.418 | 0.290 | 0.138 | 0.445 | 0.750 | 42.6 |
+| **tiled 768/0.3** | 0.50 | 5.0 | 123.7 | 0.905 | 0.580 | 0.185 | 0.494 | 0.376 | 0.248 | 0.507 | 0.750 | 161.3 |
+| untiled | 0.30 | 1.0 | 65.9 | 1.000 | 0.691 | 0.277 | 0.597 | 0.476 | 0.348 | 0.607 | 0.875 | 37.9 |
+| **tiled 768/0.3** | 0.30 | 5.0 | 223.8 | 1.000 | 0.761 | 0.423 | 0.682 | 0.583 | 0.450 | 0.725 | 0.875 | 172.1 |
+| untiled | 0.20 | 1.0 | 95.3 | 1.000 | 0.777 | 0.433 | 0.694 | 0.592 | 0.465 | 0.729 | 0.875 | 48.9 |
+| **tiled 768/0.3** | 0.20 | 5.0 | 317.7 | 1.000 | 0.821 | 0.556 | 0.758 | 0.676 | 0.546 | 0.821 | 0.875 | 172.5 |
+| **untiled** | **0.10** | 1.0 | 161.2 | 1.000 | 0.886 | **0.639** | **0.821** | 0.751 | 0.638 | 0.882 | 0.875 | 36.1 |
+| **tiled 768/0.3** | **0.10** | 5.0 | 520.8 | 1.000 | 0.898 | **0.695** | **0.846** | 0.787 | 0.684 | 0.908 | 0.875 | 188.1 |
+
+### Finding 1 — tiling's independent contribution is real, positive, and small
+
+At matched `proposal_conf`, tiling is **not** a pure confound. It adds recall at every conf tested:
+
+| conf | untiled n_prop | tiled n_prop | proposal ratio | Δ mean | Δ small | Δ 11+ | latency ratio |
+|---|---|---|---|---|---|---|---|
+| 0.50 | 33.7 | 123.7 | 3.67× | **+0.076** | +0.110 | +0.077 | 3.78× |
+| 0.30 | 65.9 | 223.8 | 3.40× | **+0.085** | +0.103 | +0.145 | 4.54× |
+| 0.20 | 95.3 | 317.7 | 3.33× | **+0.064** | +0.082 | +0.122 | 3.53× |
+| 0.10 | 161.2 | 520.8 | 3.23× | **+0.024** | +0.046 | +0.056 | 5.22× |
+
+So the honest statement is *not* "tiling did nothing". It is that tiling contributes **+0.024 to
++0.085 mean proposal recall for 3.2–3.7× the proposals and 3.5–5.2× the proposal latency**, and its
+contribution **shrinks as the gate opens** (+0.085 at conf 0.30 → +0.024 at conf 0.10). The two
+levers are substitutes competing for the same resource, not complements.
+
+### Finding 2 — at MATCHED PROPOSAL BUDGET, the objectness gate strictly dominates tiling
+
+Because both levers act by spending proposal budget, the fair comparison holds that budget fixed.
+Sorting every measured config by proposals-per-plan:
+
+| n_prop | config | mechanism | mean | pooled | small | **11+** | proposal s/plan |
+|---|---|---|---|---|---|---|---|
+| 33.7 | untiled `conf 0.50` | conf | 0.418 | 0.290 | 0.138 | 0.108 | 42.6 |
+| 46.5 | untiled `conf 0.40` (B0) | baseline | 0.498 | 0.374 | 0.220 | 0.171 | 1.4 |
+| 65.9 | untiled `conf 0.30` | conf | 0.597 | 0.476 | 0.348 | 0.277 | 37.9 |
+| 95.3 | untiled `conf 0.20` | conf | 0.694 | 0.592 | 0.465 | 0.433 | 48.9 |
+| 123.7 | tiled `conf 0.50` | tile+conf | 0.494 | 0.376 | 0.248 | 0.185 | 161.3 |
+| **161.2** | **untiled `conf 0.10`** | **conf** | **0.821** | **0.751** | **0.638** | **0.639** | **36.1** |
+| **164.5** | **tiled `conf 0.40`** (T1f) | **tile** | **0.588** | 0.476 | 0.330 | **0.292** | **103.3** |
+| 223.8 | tiled `conf 0.30` | tile+conf | 0.682 | 0.583 | 0.450 | 0.423 | 172.1 |
+| 317.7 | tiled `conf 0.20` | tile+conf | 0.758 | 0.676 | 0.546 | 0.556 | 172.5 |
+| 520.8 | tiled `conf 0.10` | tile+conf | 0.846 | 0.787 | 0.684 | 0.695 | 188.1 |
+
+The two bolded rows are the decisive pair — **161.2 vs 164.5 proposals per plan, a 2 % difference in
+budget**, one bought by opening the gate and one bought by tiling:
+
+> **At an equal proposal budget, opening the objectness gate beats tiling by +0.233 mean recall
+> (0.821 vs 0.588), +0.308 on small symbols (0.638 vs 0.330), and +0.347 in the crowded bucket
+> (0.639 vs 0.292) — while costing about a THIRD of the proposal-stage latency (36.1 s vs 103.3 s
+> per plan).**
+
+The domination is not marginal and it is not confined to that pair. `untiled conf 0.20` (95.3
+proposals, mean 0.694) beats `tiled conf 0.50` (123.7 proposals, mean 0.494) with **23 % fewer**
+proposals. `untiled conf 0.10` (161.2, 0.821) beats `tiled conf 0.30` (223.8, 0.682) with **28 %
+fewer**. Every untiled point lies above the tiled frontier. The only tiled config that beats the best
+untiled one is `tiled conf 0.10` — **+0.025 mean for 3.2× the proposals and 5.2× the latency**.
+
+### Finding 3 — the plain attribution, stated as the data has it
+
+**The objectness gate is the primary lever; tiling is a strictly less efficient way to buy the same
+thing.** Step 1's headline result — T1f's mean recall 0.498 → 0.588 — is reproduced *and beaten* by
+changing one existing config field from `0.4` to `0.3` (0.498 → 0.597), with **no tiling, no new
+code, 2.5× fewer proposals and a third of the latency**.
+
+That is a direct correction to this notebook's own step-1 framing. B0's "Consequence for step 1"
+concluded that tiling's live lever is budget — correct — but did not ask the follow-up question:
+*is tiling the cheapest source of budget?* It is not, and `proposal_conf` was sitting in the shipped
+config the entire time. The T1b/T1e/T1f arc (three entries, ~30 h of CPU, a merge-threshold bug hunt
+and a 273-line `propose_tiled` implementation) chased a mechanism that a pre-existing scalar
+outperforms. Recorded plainly because the repo's discipline is iterate/measure/**revert**, and the
+measurement here points at the code written in this very quick task.
+
+The mechanism is consistent with T1f Finding 1: magnification does nothing, so a tile is just a
+smaller area over which FastSAM's area-proportional budget is re-spent — while `proposal_conf` lifts
+the budget on the *whole* plan without paying for 5 extra forward passes or re-detecting the same
+room boundary in every tile. Tiling's residual +0.024…+0.085 is the genuinely new information a tile
+adds (a symbol seen without its surrounding context), and that is worth exactly what it measures.
+
+### Finding 4 — this REFUTES T1e Finding 4, the strongest argument for step 3
+
+T1e Finding 4 stated, of the four plans B0 measured at proposal recall 0.000:
+
+> *"`4_png` is 0.000 at every geometry and every threshold… No merge threshold, and no tile size,
+> changes a backend that does not consider a CAD door symbol an object. This remains the single
+> strongest argument for the step-3 contour backend."*
+
+That inference was sound on tiling evidence and is **wrong**. Those symbols were never invisible to
+FastSAM — they were scoring **below the 0.4 objectness gate**:
+
+| plan | size | n_gt | B0 `conf 0.40` | best TILED @ `conf 0.40` | **untiled `conf 0.20`** | **untiled `conf 0.10`** | tiled `conf 0.10` |
+|---|---|---|---|---|---|---|---|
+| `4_png` | 513×436 | 7 | 0.000 | **0.000** (every geometry) | 0.429 | **0.857** | 0.857 |
+| `155_png` | 818×647 | 7 | 0.000 | 0.143 | 0.571 | **0.714** | 0.857 |
+| `4061_png` | 1170×742 | 11 | 0.000 | 0.273 | 0.455 | **0.909** | 1.000 |
+| `65_png` | 4000×1685 | 19 | 0.000 | 0.105 | 0.053 | **0.053** | **0.263** |
+| `22_png` | 482×507 | 17 | 0.059 | 0.059 (identity) | 0.059 | **0.176** | 0.176 |
+
+**Three of the four zero-recall plans are essentially solved by lowering the gate alone.** `4_png`
+goes 0.000 → 0.857 (6 of 7 doors) — a plan that was immovable across *seven* tiling configurations —
+with 118 proposals from a single untiled pass. "FastSAM does not consider a CAD door symbol an
+object" was a conclusion drawn from a knob that was never turned.
+
+Two plans resist and they resist differently, which matters for step 3:
+
+- **`65_png`** (4000×1685, the resolution outlier) is the one plan where **tiling is the lever that
+  works**: 0.053 untiled vs **0.263** tiled at conf 0.10, a 5× gain, because at 4000 px wide the
+  1024 letterbox genuinely is destroying the symbol. Tiling's real niche on this dataset is a single
+  extreme-resolution plan — which is exactly what B0 said when it called failure mode (2) "a
+  single-plan anecdote".
+- **`22_png`** (482×507, 17 doors) is immovable under *both* levers (0.059 → 0.176 at conf 0.10, with
+  274 proposals for 17 doors). Sub-tile-sized, extremely crowded, and neither budget nor
+  magnification touches it. This is the residual case that still argues for a different proposal
+  mechanism.
+
+### Finding 5 — do the crowded and sparse buckets prefer different conf values? No
+
+The plan asks this explicitly. They do not: recall is **monotone increasing as conf falls in every
+bucket**, with no crossover, on both arms. The sparse (1–3) bucket saturates at 1.000 by conf 0.30
+and stops changing; the crowded (11+) bucket is still climbing steeply at 0.10 (0.277 → 0.433 →
+0.639). So the gate is not a bucket-dependent trade at the **proposal** stage — lower is
+monotonically better there for every bucket.
+
+That is precisely why this entry cannot select a finalist. Proposal recall is a **ceiling**, and it
+is monotone in a knob whose whole cost is false positives that the *retrieval* stage must then
+reject. The selection has to be made on end-to-end F1, where precision finally pushes back — which
+is T3.
+
+### Latency (EVAL-11)
+
+Untiled conf 0.10 costs **36.1 s/plan** of proposal stage vs 42.6 s at conf 0.50 and 48.9 s at conf
+0.20 — i.e. **flat**, because a single FastSAM forward pass costs the same regardless of the
+threshold applied to its output; only the cheap post-filter changes. (These are contended,
+4-core-pinned numbers; B0's clean single-process figure is 1.44 s/plan.) **Opening the gate is
+free at the proposal stage.** The real cost lands downstream: every surviving proposal gets its own
+DINOv2 forward pass, so 161.2 vs 46.5 proposals is a ~3.5× multiplier on the *dominant* embedding
+stage (B3's finding). Tiling by contrast pays on **both** stages — 5× the FastSAM passes *and* 3.2×
+the embeddings.
+
+---
