@@ -765,3 +765,221 @@ to `regime_check(name=args.name or "b2")`, matching the `ptrial`/`trial` pattern
 unchanged so the original B2 command still reproduces byte-for-byte. Verified before running T1d
 that the box's `b2--regimes.json` was still the pristine original (`md5 18ddc9e6…`, mtime Aug 12,
 per-regime F1 identical to the B2 entry above) — no prior run had clobbered it.
+
+---
+
+## RUNTIME NOTE — the original box was lost; entries below ran on a new one
+
+Entries **B0 through H1 above** ran on vast.ai contract `47510440`. That box **disappeared from the
+account entirely** — not a permission error, not a stopped container: gone, with its working state.
+Everything already committed to this notebook survives because the JSON artifacts had been pulled
+back to `runs/` and committed; nothing above is re-derived or re-estimated here.
+
+**Every entry from T1f onward ran on vast.ai contract `48124756`** (`ssh -p 14756 root@ssh6.vast.ai`,
+RTX 3090 host but **ONNX Runtime is again the CPU build**, 56 cores, ~$0.14/hr). One material
+improvement: `/root/repo` on the new box is a real **git clone** (restored from a bundle at
+`79fd33e`), not the previous rsync-of-a-source-tree. So `current_git_sha()` now resolves, and every
+artifact below carries a true `git_sha: 79fd33e0c1b8af1deec494a074d74f83f890e7ce` rather than the
+`"unknown"` that forced T1a/T1b/T1e to state a local SHA in prose.
+
+---
+
+## T1f — the `merge_ios = 1.0` endpoint, and the geometry re-check at a loosened merge
+
+- **SHA:** `79fd33e` (recorded by the harness, verified in every artifact)
+- **Commands:** `… ptrial --name t1f-s{512,768,1024}-o{02,03}-fi1-ios{099,100} --splits val
+  --tile-side S --tile-overlap O --tile-merge-ios X`, five `nohup`-detached processes,
+  `taskset`-pinned to 4 cores each with `OMP_NUM_THREADS=4`.
+- **Artifacts:** `runs/t1f-s768-o03-fi1-ios100.json`, `runs/t1f-s512-o02-fi1-ios100.json`,
+  `runs/t1f-s768-o02-fi1-ios{099,100}.json`, `runs/t1f-s1024-o02-fi1-ios099.json`
+- **Scope:** floorplans-door **VAL** (56 plans), proposal stage only. T1e rows restated for
+  like-for-like comparison.
+
+T1e Finding 3 made a falsifiable mechanistic prediction: because `_merge_tiled_proposals` matches on
+a **strict `>`**, a fully-nested box (IoS exactly 1.0) is suppressed at every threshold *below* 1.0,
+so at `merge_ios = 1.0` the merge should be **disabled outright** and the full pre-merge budget
+should survive. That is testable in one line of arithmetic:
+
+| geometry | `merge_ios` | pre-merge total | post-merge total | **kill rate** |
+|---|---|---|---|---|
+| 768 / 0.3 / FI=on | 0.99 | 9 214 | 3 740 | 59.4 % |
+| **768 / 0.3 / FI=on** | **1.00** | 9 214 | **9 214** | **0.0 %** |
+| 512 / 0.2 / FI=on | 1.00 | 10 497 | 10 497 | **0.0 %** |
+| 768 / 0.2 / FI=on | 1.00 | 9 135 | 9 135 | **0.0 %** |
+
+**The prediction holds exactly.** At 1.0 the kill rate is 0.0 % — not "low", zero — on all three
+geometries. The mechanism T1b diagnosed and T1e half-fixed is now fully characterised.
+
+### Recall at the endpoint
+
+| geometry | `merge_ios` | mean tiles | pre-merge | merged n_prop | 1–3 | 4–10 | **11+** | all (mean) | all (pooled) | small | medium | large |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **B0 baseline (untiled)** | — | 1.0 | — | 46.5 | 0.905 | 0.595 | **0.171** | 0.498 | 0.374 | 0.220 | 0.537 | 0.750 |
+| 768 / 0.3 / FI=on | 0.99 (T1e) | 5.0 | 164.5 | 66.8 | 0.857 | 0.615 | **0.280** | 0.538 | 0.440 | 0.312 | 0.576 | 0.750 |
+| **768 / 0.3 / FI=on** | **1.00** | 5.0 | 164.5 | **164.5** | 0.952 | 0.677 | **0.292** | **0.588** | 0.476 | 0.330 | 0.633 | 0.812 |
+| 512 / 0.2 / FI=on | 0.99 (T1e) | 8.8 | 187.4 | 76.5 | 0.857 | 0.622 | **0.226** | 0.524 | 0.416 | 0.277 | 0.559 | 0.812 |
+| 512 / 0.2 / FI=on | **1.00** | 8.8 | 187.4 | **187.4** | 0.905 | 0.685 | **0.290** | 0.586 | **0.482** | **0.351** | 0.620 | 0.812 |
+| 768 / 0.2 / FI=on | 0.99 | 4.9 | 163.1 | 66.2 | 0.857 | 0.616 | **0.272** | 0.535 | 0.436 | 0.305 | 0.576 | 0.750 |
+| 768 / 0.2 / FI=on | **1.00** | 4.9 | 163.1 | **163.1** | 0.952 | 0.678 | **0.284** | 0.585 | 0.472 | 0.323 | 0.633 | 0.812 |
+| 1024 / 0.2 / FI=on | 0.99 | 2.9 | 114.4 | 62.6 | 0.905 | 0.627 | **0.235** | 0.536 | 0.421 | 0.284 | 0.568 | 0.750 |
+
+**The climb continues but flattens.** 768/0.3 moves mean recall 0.538 → 0.588 and the crowded bucket
+0.280 → 0.292 — the crowded bucket, the one the whole diagnosis is about, gains only **+0.012** for
+a **2.5× increase in surviving proposals** (66.8 → 164.5). The sparse-bucket regression that T1b
+complained about is fully repaired (0.905 → 0.952, now *above* baseline), but that bucket was never
+the problem.
+
+### Finding 1 — magnification is measured to do NOTHING, which kills SAHI's stated premise here
+
+With the merge disabled, two geometries differ in magnification by exactly 2× and can be compared
+directly, because at `ios=1.0` nothing is deleted and the only difference is tile geometry:
+
+| geometry | magnification (`1024 / S`) | tiles/plan | n_prop | mean recall | small | 11+ |
+|---|---|---|---|---|---|---|
+| 512 / 0.2 / FI=on | **2.00×** | 8.8 | 187.4 | **0.586** | 0.351 | 0.290 |
+| 768 / 0.2 / FI=on | **1.33×** | 4.9 | 163.1 | **0.585** | 0.323 | 0.284 |
+
+> **A 2× difference in pixels-per-symbol produces a 0.001 difference in mean proposal recall.**
+
+R0's caveat said the two levers (magnification and budget) "happen to point the same way, so
+SAHI-style tiling remains the right instrument". At the endpoint they can finally be separated, and
+**only budget is real**. The residual 512-vs-768 gap in the `small` bucket (0.351 vs 0.323) tracks
+the 15 % higher proposal count (187.4 vs 163.1), not the 50 % higher magnification. SAHI's premise —
+*small objects lost to downscaling* — is **measured false for this dataset**. What tiling buys here
+is proposals, nothing else. That reframes step 1 entirely and sets up the step-2 question: if budget
+is the only lever, is tiling even the cheapest way to buy it?
+
+### Finding 2 — the geometry ranking collapses once the merge is disabled
+
+At `ios=0.5` (T1b) the twelve geometries spread over 0.459–0.508 mean recall and the choice of tile
+side looked consequential. At `ios=1.0` the three surviving geometries land at **0.585, 0.586,
+0.588** — a spread of 0.003, i.e. nothing. **The T1b geometry ranking was an artifact of the merge
+bug**: different tile counts fed the clamp different amounts of nested overlap, so the clamp deleted
+different fractions. With the clamp gone, tile geometry stops mattering. This retro-justifies not
+re-running the full 12-config geometry sweep at the loosened threshold — the axis is inert.
+
+`768 / 0.3 / FI=on @ ios 1.00` is carried forward as the step-1 geometry on the tie-break of fewest
+forward passes among the top three (5.0 tiles vs 8.8 for 512/0.2, at the same recall).
+
+### Finding 3 — per-plan, the plans of record
+
+| plan | size | n_gt | B0 | 768/.3 @0.99 | **768/.3 @1.00** | 512/.2 @1.00 |
+|---|---|---|---|---|---|---|
+| `65_png` | 4000×1685 | 19 | 0.000 | 0.105 (262p) | **0.105** (549p) | 0.105 (422p) |
+| `4061_png` | 1170×742 | 11 | 0.000 | 0.273 (71p) | **0.273** (138p) | 0.273 (197p) |
+| `155_png` | 818×647 | 7 | 0.000 | 0.143 (79p) | **0.143** (230p) | 0.000 (260p) |
+| `4_png` | 513×436 | 7 | 0.000 | 0.000 (30p) | **0.000** (30p) | 0.000 (88p) |
+| `22_png` | 482×507 | 17 | 0.059 | 0.059 (61p) | **0.059** (61p) | 0.059 (61p) |
+
+Note `65_png`: **549 proposals for 19 doors and still recall 0.105.** And `155_png` at 512/0.2 gets
+260 proposals and scores **0.000** while the same plan at 768/0.3 with *fewer* proposals (230) scores
+0.143 — proposals alone are clearly not sufficient either. `4_png` and `22_png` remain immovable
+under every tiling configuration tested, which at this point in the session was still the strongest
+argument for the step-3 contour backend. **T2 overturns that reading** — see below.
+
+---
+
+## T1c — step 1 END-TO-END on VAL (does the proposal-stage gain convert to F1?)
+
+- **SHA:** `79fd33e`
+- **Commands:** `… trial --dataset floorplans-door --split val --name
+  t1c-s768-o03-fi1-ios{099,100}-val --config '{"proposal_tiling": true, "tile_side": 768,
+  "tile_overlap": 0.3, "tile_include_full_image": true, "tile_merge_ios": X}'`
+- **Artifacts:** `runs/t1c-s768-o03-fi1-ios{099,100}-val.json`
+- **Scope:** floorplans-door **VAL**, 56/56 scored, 0 errors, 1 exemplar, `similarity_floor` 0.7 /
+  `nms_iou` 0.3 (the B1-final val argmax, held fixed).
+
+Proposal-stage recall is a **ceiling**, not a result. This is the first entry that runs the full
+pipeline with tiling on.
+
+| config | n_prop | P | R | **F1** | small | medium | large | abstentions |
+|---|---|---|---|---|---|---|---|---|
+| **B1-final baseline (untiled, conf 0.4)** | 46.5 | **0.591** | 0.307 | **0.404** | 0.160 | 0.459 | 0.750 | — |
+| tiled 768/0.3/FI @ `ios 0.99` | 66.8 | 0.563 | 0.340 | **0.424** | 0.213 | 0.467 | 0.750 | 5 |
+| tiled 768/0.3/FI @ `ios 1.00` | 164.5 | 0.487 | **0.380** | **0.426** | 0.241 | 0.520 | 0.812 | 5 |
+
+### Finding 1 — the gain is real, small, and bought with precision
+
+Recall moves **+0.073** (0.307 → 0.380) and every symbol-size bucket improves. But precision falls
+**−0.104** (0.591 → 0.487), so F1 moves only **+0.022** (0.404 → 0.426). Reported as P and R
+separately per the plan's rule, precisely because F1 alone hides that this is a trade, not a
+free win.
+
+Note the transfer ratio: proposal-stage mean recall rose +0.090 (0.498 → 0.588) and final recall rose
++0.073 — consistent with B0's measured ~0.82 proposal-to-final transfer. The retrieval stage is
+converting the extra proposals at the expected rate; it is not the bottleneck, exactly as B1-final
+concluded.
+
+### Finding 2 — the crowded bucket barely moves end-to-end
+
+The benchmark's own crowding slices (cuts `2-5` / `6-15` / `16+`, which differ from the
+proposal-stage `1-3` / `4-10` / `11+` cuts — stated so the two are not confused):
+
+| slice | @ ios 0.99 | @ ios 1.00 |
+|---|---|---|
+| `2-5` | R 0.704 / P 0.594 / F1 0.644 | R 0.778 / P 0.467 / F1 0.583 |
+| `6-15` | R 0.367 / P 0.667 / F1 0.474 | R 0.405 / P 0.574 / F1 0.475 |
+| **`16+`** | R 0.115 / P 0.231 / F1 **0.154** | R 0.146 / P 0.241 / F1 **0.182** |
+
+The most crowded slice ends at **F1 0.182**. Step 1 does not fix crowded plans; it nudges them.
+
+### Latency (EVAL-11) — the honest cost of step 1
+
+| config | tiles/plan | median plan | mean plan | worst plan | val wall clock |
+|---|---|---|---|---|---|
+| baseline (B3-CORRECTION) | 1.0 | — | ~57.6 s | — | ~54 min |
+| tiled @ `ios 0.99` | 5.0 | 111.7 s | 203.0 s | 1 203 s | **190.7 min** |
+| tiled @ `ios 1.00` | 5.0 | **30.1 s** | **224.5 s** | **2 754 s (46 min!)** | **209.9 min** |
+
+**~3.9× the baseline wall clock for +0.022 F1.** The distribution is violently skewed: at `ios 1.00`
+the *median* plan is faster (30.1 s) than at `ios 0.99` (111.7 s) while the *mean* is higher — one
+plan (`65_png`, 4000×1685, 549 proposals each needing its own DINOv2 forward pass) takes **46
+minutes by itself**. This is the B3 finding compounding: the embedding stage dominates and scales
+linearly with proposal count, so disabling the merge moves cost straight onto the embedding stage.
+
+These runs were 4-core-pinned and contended (10+ concurrent processes), so absolute seconds are not
+clean wall-clocks; the **ratios** and the tile/proposal multipliers are the honest cost proxies.
+
+---
+
+## T1d — guardrail re-check: did anything leak into the default path?
+
+- **SHA:** `79fd33e`
+- **Commands:** `… b2 --name t1d` (regimes); `… trial --dataset floorplans-window --split val
+  --name t1d-window-val --config '{}'`; same for `--split test --name t1d-window-test`.
+- **Artifacts:** `runs/t1d--regimes.json`, `runs/t1d--regimes-raw.json`, `runs/t1d-window-val.json`,
+  `runs/t1d-window-test.json`
+
+### Regimes — byte-identical to B2, all six
+
+| regime | n | B2 F1 | **T1d F1** | delta |
+|---|---|---|---|---|
+| EASY (chipset) | 10 | 0.9274 | 0.9274 | **+0.0000** |
+| TEXTURED (plain) | 16 | 0.9591 | 0.9591 | **+0.0000** |
+| VARIED (scale/rotation) | 16 | 0.9385 | 0.9385 | **+0.0000** |
+| CLUTTERED | 16 | 0.8209 | 0.8209 | **+0.0000** |
+| synthetic | 2 | 0.9091 | 0.9091 | **+0.0000** |
+| real-objects | 30 | 0.8683 | 0.8683 | **+0.0000** |
+| **overall** | 90 | 0.8987 | **0.8987** | **+0.0000** |
+
+90/90 scored, 0 errors. Not "within rounding" — **identical to four decimal places on every regime**.
+
+### floorplans-window — identical at the default config
+
+| | P | R | F1 |
+|---|---|---|---|
+| B1-final window VAL (`floor 0.7 / nms 0.3` = the shipped default) | 0.119 | 0.054 | **0.074** |
+| **T1d window VAL (default config)** | 0.119 | 0.054 | **0.074** |
+
+The config dumped into the artifact confirms why: `proposal_tiling: false`, `tile_merge_ios: 0.5`,
+`tile_side: 1024` — every field added by commit `41b8431` sits at its no-op default, so `search()`
+takes the untiled branch and the result is identity **by construction**, which is what the
+`tests/test_propose_retrieve.py` byte-identity test asserts in CI without weights.
+
+**Process note, recorded rather than smoothed over:** the first `t1d-window-test` process died
+silently at 19:49 box time with no traceback and no artifact — the log simply stops mid-run. Cause
+undetermined (the box was running 18 concurrent processes at the time; most likely a resource kill).
+It was **re-launched** rather than reported from the val run alone, because a guardrail that "would
+have passed" is not a guardrail. Its result is recorded in T2-final below.
+
+---
