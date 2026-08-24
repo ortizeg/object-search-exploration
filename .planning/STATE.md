@@ -33,7 +33,20 @@ which method actually works, on which kind of image, and at what latency.
 Phase: 1 of 8 (Foundation)
 Plan: 2 of 2 in current phase
 Status: Both Phase 1 plans executed; INFRA-07 (branch protection) deferred — private-repo 403
-Last activity: 2026-08-09 — Quick task 260808-w8c: two further, independently-motivated levers on
+Last activity: 2026-08-24 — Quick task 260812-m8m: propose-retrieve floor-plan ablation. Root cause
+was FastSAM proposal-stage recall collapsing on crowded plans (0.74/0.51/0.27 by crowding bucket);
+SAHI-style tiling (this task's own implementation, commit 41b8431) was built, then measured and
+REJECTED — at matched proposal budget, lowering the existing proposal_conf field (0.4 -> 0.10, no
+tiling) beat the best tiling config by +0.233 mean recall at 1/3 the latency, and SAHI's stated
+magnification premise measured inert for this domain (independently corroborating
+dino-dense-floorplans-improvement.md's Pass 4, which separately rejected tiling on the same
+dataset). Opening the objectness gate exposed a second bottleneck (retrieval/calibration, not
+proposal supply) in the crowded bucket, deferred as a lead for a future pass. Shipped as an
+additive _TUNING_GRIDS entry (proposal_conf=0.10, similarity_floor=0.70 — the latter already the
+default) with zero new config fields and zero shipped-default changes. Doors test F1 0.459 -> 0.597
+(P=0.536, R=0.674, all three size buckets improve). All four gates green, 93.82% coverage.
+
+Prior activity: 2026-08-09 — Quick task 260808-w8c: two further, independently-motivated levers on
 260808-dla's contrastive-crop recipe, sequenced so the cheap one was measured before any GPU spend.
 Lever A (crop context-margin padding) was tested inference-only against the already-trained checkpoint
 (zero retraining, moved to a vast.ai GPU after a local CPU sweep proved too slow): helps door at
@@ -102,6 +115,7 @@ Progress: [█████████░] 88%
 | 260808-w8c | Crop-margin sweep (split result, not adopted) + rotation-augment fix v2 — best door F1 0.253/0.433, window dips slightly to 0.204 | 2026-08-09 | (pending) | [260808-w8c](./quick/260808-w8c-crop-context-margin-padding-rotation-mir/) |
 | 260810-gx5 | Wire 2 orphan mkdocs pages (dino-dense/owlv2 floor-plans improvement reports) into nav; third target (floorplans-results.md) is gitignored, not a real orphan | 2026-08-10 | 90ea3a1 | [260810-gx5](./quick/260810-gx5-fix-3-orphan-mkdocs-pages-by-wiring-them/) |
 | 260810-h6e | Fix 7 broken internal doc links flagged by strict mkdocs build (6 samples/ dir links -> index.md, 1 anchor typo) | 2026-08-10 | 1530fd9 | [260810-h6e](./quick/260810-h6e-fix-broken-relative-links-flagged-by-str/) |
+| 260812-m8m | propose-retrieve floor-plan ablation: SAHI-style tiling measured-and-rejected (matched-budget objectness gate beats it, 1/3 latency); ships existing proposal_conf tuned low instead. Doors test F1 0.459->0.597, windows coverage-corrected to 0.110/28-28 | 2026-08-24 | d46be10 | [260812-m8m](./quick/260812-m8m-improve-propose-retrieve-recall-on-floor/) |
 
 ## Performance Metrics
 
