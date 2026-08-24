@@ -1163,3 +1163,289 @@ stage (B3's finding). Tiling by contrast pays on **both** stages — 5× the Fas
 the embeddings.
 
 ---
+
+## T3 — the end-to-end selection grid: `proposal_conf` × `similarity_floor`, UNTILED, on VAL
+
+- **SHA:** `79fd33e` (recorded by the harness in all ten artifacts)
+- **Commands:** ten `nohup`-detached, 4-core-pinned processes —
+  `… trial --dataset floorplans-door --split val --name t3-untiled-c0CC-f0FF-val
+  --config '{"proposal_conf": C, "similarity_floor": F}'`
+- **Artifacts:** `runs/t3-untiled-c0{10,20,30}-f0{70,75,80,85}-val.json` (10 files)
+- **Scope:** floorplans-door **VAL** (56 plans), **56/56 scored, 0 errors** in every trial, 1
+  exemplar, `nms_iou` 0.3, `proposal_tiling: false` (verified in each artifact's dumped config).
+
+T2 closed with the reason this grid exists: proposal recall is a **ceiling** and is monotone in
+`proposal_conf`, so the gate cannot be selected at the proposal stage — only end-to-end F1, where
+precision finally pushes back, can pick it. T2 also established that tiling is the *more expensive*
+way to buy the same proposals, so this grid runs **untiled**.
+
+`similarity_floor` is swept jointly rather than held at its default because B1-final's inertness
+finding was measured on the **untiled, `conf 0.4`** proposal distribution. Opening the gate changes
+that distribution (46.5 → 161.2 proposals/plan), and a floor's job is to reject the moderate-cosine
+false positives that extra proposals bring — so its optimum genuinely might move. Sweeping it is how
+that is established rather than assumed.
+
+| `proposal_conf` | `similarity_floor` | P | R | **F1** | abstentions | val wall clock |
+|---|---|---|---|---|---|---|
+| **0.10** | **0.70** | 0.5258 | **0.5598** | **0.5423** ← val argmax | 0 | 289.4 min |
+| 0.10 | 0.75 | 0.6407 | 0.4061 | 0.4971 | 1 | 411.2 min |
+| 0.10 | 0.80 | 0.8093 | 0.2979 | 0.4355 | 6 | 410.7 min |
+| 0.10 | 0.85 | 0.9259 | 0.1423 | 0.2467 | 20 | 412.0 min |
+| 0.20 | 0.70 | 0.5501 | 0.4478 | 0.4937 | 1 | 276.0 min |
+| 0.20 | 0.75 | 0.6565 | 0.3264 | 0.4360 | 2 | 278.4 min |
+| 0.20 | 0.80 | 0.8188 | 0.2315 | 0.3609 | 8 | 242.5 min |
+| 0.30 | 0.70 | 0.5752 | 0.3700 | 0.4503 | 2 | 196.2 min |
+| 0.30 | 0.75 | 0.6948 | 0.2808 | 0.4000 | 5 | 243.9 min |
+| 0.30 | 0.80 | 0.8387 | 0.1973 | 0.3195 | 11 | 238.2 min |
+| *B1-final baseline (`conf 0.4`, floor 0.70)* | — | *0.591* | *0.307* | *0.404* | — | *~54 min* |
+
+Wall clocks are contended and 4-core-pinned across ten concurrent processes; they are not clean
+single-process measurements and are recorded for scheduling only.
+
+### Finding 1 — the surface is monotone on both axes, so the argmax is not a knife-edge
+
+Two clean monotonicities, each holding at **every** level of the other axis:
+
+- **F1 falls as `similarity_floor` rises**, at all three conf values (0.542 → 0.497 → 0.436 → 0.247;
+  0.494 → 0.436 → 0.361; 0.450 → 0.400 → 0.320). Precision climbs to 0.93 and recall collapses to
+  0.14; the floor is buying precision the pooled metric does not want at this operating point.
+- **`conf 0.10` beats 0.20 beats 0.30**, at every floor (0.542 > 0.494 > 0.450 at floor 0.70;
+  0.497 > 0.436 > 0.400 at 0.75; 0.436 > 0.361 > 0.320 at 0.80).
+
+The argmax therefore sits in a **corner** of the swept region, not on a ridge between competing
+trials — the neighbouring cells are 0.494 (conf 0.20) and 0.497 (floor 0.75), both clearly below.
+This is the opposite of the `owlv2` doors experience recorded in
+`docs/reports/owlv2-floorplans-improvement.md`, where a val-argmax over 56 plans was unstable across
+adjacent grid values and failed to generalise. A monotone surface is the well-behaved case.
+
+A corner argmax does raise the obvious question — is the true optimum outside the grid, at
+`conf < 0.10` or `floor < 0.70`? Recorded honestly as **not measured**: `similarity_floor` below 0.70
+was already swept at `conf 0.4` in B1-final and lost badly there (floor 0.60 → val F1 0.326, floor
+0.40 → 0.226), and `conf < 0.10` was not run. The selected point may be a boundary rather than an
+interior optimum; the shipped grid entry is the best **measured** configuration, not a claimed global
+one.
+
+### Finding 2 — the finalist, and why `similarity_floor` stays at its shipped default
+
+**Finalist: `proposal_conf = 0.10`, `similarity_floor = 0.70`.**
+
+`0.70` is the **existing shipped `ProposeRetrieveConfig` default**. The floor sweep re-confirms, on
+the *new* proposal distribution, what B1-final measured on the old one: the shipped floor is already
+this domain's optimum. So exactly **one** field moves from its default, and it is a field that
+already exists and is already documented — this ships with zero new config fields.
+
+### Finding 3 — the bottleneck has MOVED from the proposal stage to retrieval/calibration
+
+This is the finding the next improvement pass should start from. At the finalist config the
+proposal stage is no longer the constraint, and the retrieval/calibration stage now is:
+
+| crowding | proposal-stage recall (T2, untiled `conf 0.10`) | end-to-end recall (T3 finalist) |
+|---|---|---|
+| sparse | `1–3`: **1.000** | `2-5`: 0.8519 |
+| middle | `4–10`: **0.8863** | `6-15`: 0.6268 |
+| **crowded** | `11+`: **0.6395** | `16+`: **0.2615** |
+| all | mean 0.8212 / pooled 0.7514 | 0.5598 |
+
+**The two bucketings use different cuts** (`1–3`/`4–10`/`11+` at the proposal stage vs the
+benchmark's `2-5`/`6-15`/`16+`), so the rows are not exactly matched — stated so the comparison is
+not over-read. The gap is far too large to be a cut artifact: in the crowded bucket the proposal
+stage puts **0.639** of the doors on the table and the pipeline returns **0.262** — a ~41 % transfer,
+against the **~0.82** proposal-to-final transfer B0 measured overall and T1c re-confirmed. Pooled,
+transfer is 0.5598 / 0.7514 = **0.745**, already below B0's 0.82 and dragged down almost entirely by
+the crowded bucket.
+
+B1-final's conclusion — *"the retrieval stage is not leaving recall on the table; there is nothing
+left for it to retrieve"* — was true **at `conf 0.4`**, where final recall 0.399 sat essentially at
+the 0.405 proposal ceiling. It is no longer true. Opening the gate raised the ceiling to 0.751 pooled
+and the pipeline now delivers 0.560 of it. **DINOv2 embedding + gmm calibration is the new binding
+constraint on crowded plans**, and it is where the next floor-plan lever should be aimed — not at the
+proposal stage, which is why Task 4's contour backend is not attempted (see the go/no-go entry
+below).
+
+---
+
+## T3-final — the ONE test read for the finalist
+
+- **SHA:** `79fd33e`
+- **Command:** `… trial --dataset floorplans-door --split test --name t3-final-c010-f070-test
+  --config '{"proposal_conf": 0.1, "similarity_floor": 0.7}'`
+- **Artifact:** `runs/t3-final-c010-f070-test.json`
+- **Scope:** floorplans-door **TEST**, **28/28 scored, 0 errors, 0 abstentions**, 1 exemplar,
+  `proposal_tiling: false`, `nms_iou` 0.3. Wall clock **2 137.9 s = 35.6 min** on 8 pinned cores.
+
+The test split is read **exactly once** for this finalist, per the plan's rule. Nothing below was
+used to choose anything.
+
+| | P | R | **F1** | abstentions | coverage |
+|---|---|---|---|---|---|
+| committed `docs/eval/floorplans-findings.md` (GPU-era) | 0.55 | 0.39 | **0.459** | — | 13/14 |
+| **B1-final session-local baseline** (`conf 0.4`) | 0.6039 | 0.3991 | **0.4806** | 3 | 28/28 |
+| **T3-final finalist** (`conf 0.10`, floor 0.70) | 0.5358 | **0.6738** | **0.5970** | **0** | 28/28 |
+| **delta vs B1-final** | **−0.0681** | **+0.2747** | **+0.1163** | −3 | — |
+
+**+0.116 F1 absolute (+24 % relative) over the session-local baseline**, and **+0.138 (+30 %)** over
+the committed 0.459 row. Both baselines are stated; neither is silently replaced.
+
+The win is a **recall** win: recall +0.275 (0.399 → 0.674) against a precision cost of −0.068
+(0.604 → 0.536). Reported separately per the plan's rule, because a pooled F1 alone would hide that
+this is a trade. It is a favourable one — recall gains four times what precision gives up — but it is
+a trade, and a workflow that cares more about precision than recall should not take it.
+
+**Abstentions fall 3 → 0.** Three test plans previously returned nothing at all; every plan now
+returns something. That is a product-visible change the F1 delta does not express.
+
+### Recall by symbol size — every bucket improves, and the profile flattens
+
+| symbol size | n GT | B1-final baseline | **T3-final** | delta |
+|---|---|---|---|---|
+| small | 84 | 0.393 | **0.6310** | **+0.238** |
+| medium | 135 | 0.415 | **0.7111** | **+0.296** |
+| large | 14 | 0.286 | **0.5714** | **+0.286** |
+
+All three buckets improve and the **large** bucket doubles — there is no bucket that pays for the
+others. The baseline profile was flat-and-low (0.39/0.42/0.29); the new one is higher everywhere and
+peaks in the medium bucket, where 58 % of test doors live. Note `large` is **n = 14 boxes** on this
+split, so its +0.286 is four extra matches and should not be over-read.
+
+### By crowding (benchmark cuts) — the crowded bucket is still the weak one
+
+| slice | n plans | P | R | F1 |
+|---|---|---|---|---|
+| `2-5` | 8 | 0.4615 | 0.6923 | 0.5538 |
+| `6-15` | 18 | 0.5467 | 0.7069 | **0.6165** |
+| `16+` | **2** | 0.5517 | 0.4848 | 0.5161 |
+
+The `16+` test slice is **two plans** — directional only. It is nonetheless a large move on the
+matching val slice (T3 val `16+`: F1 0.2822 at the finalist), and T1c's tiled runs left the same
+slice at F1 0.154–0.182.
+
+### Latency (EVAL-11) — the honest cost, and what is NOT comparable
+
+| | mean/plan | p50/plan | worst plan | total wall clock |
+|---|---|---|---|---|
+| B1-final baseline (`conf 0.4`, 28 test plans) | 91.5 s | 23.6 s | 1 737.5 s | — (12 h 40 m incl. 12 val trials) |
+| **T3-final (`conf 0.10`)** | **76.3 s** | **13.2 s** | **1 558.5 s** | **35.6 min** |
+| T1c tiled @ ios 1.00 (val, for contrast) | 224.5 s | 30.1 s | 2 754 s | 209.9 min |
+
+**Do not read the finalist as faster than the baseline.** Both are contended multi-process numbers
+taken under different loads, and a lower gate puts **3.5× more proposals** (46.5 → 161.2/plan)
+through the DINOv2 embedding stage, which B3 measured as the dominant cost. The structurally honest
+statement is the one the mechanism supports:
+
+> **`proposal_conf` is free at the FastSAM stage and pays only at the embedding stage** — one forward
+> pass costs the same regardless of the threshold applied to its output (T2 measured proposal-stage
+> time flat at 36–49 s/plan across `conf` 0.10–0.50), so the cost is ~3.5× on embeddings alone.
+> **Tiling pays on both stages** — ~5× the FastSAM passes *and* ~3.2× the embeddings — which is why
+> T1c measured it at 3.9× baseline wall clock for +0.022 F1.
+
+---
+
+## T1d-window-final — the guardrail test read, relaunched and clean
+
+- **SHA:** `79fd33e`
+- **Command:** `… trial --dataset floorplans-window --split test --name t1d-window-test
+  --config '{}'` (DEFAULT config)
+- **Artifact:** `runs/t1d-window-test.json`
+- **Scope:** floorplans-window **TEST**, 28/28 scored, 0 errors, 9 abstentions.
+
+This is the re-launch of the process that died silently mid-run during T1d (recorded there rather
+than smoothed over — a guardrail that "would have passed" is not a guardrail).
+
+| | P | R | F1 | abstentions |
+|---|---|---|---|---|
+| B1-final window TEST (baseline) | 0.1194 | 0.1026 | **0.1103** | 9 |
+| **T1d window TEST (this run)** | 0.1194 | 0.1026 | **0.1103** | 9 |
+| delta | **+0.0000** | **+0.0000** | **+0.0000** | 0 |
+
+**Identical to four decimal places**, including the abstention count and the per-size recall profile
+(small 0.0619, medium 0.1852, large 0.0000). Combined with T1d's six regimes (also +0.0000 on every
+one), the guardrail is complete and clean: **nothing from this quick task leaked into the default
+path.**
+
+It is identity **by construction** and the artifact's dumped config says why — `proposal_tiling:
+false`, `proposal_conf: 0.4`, `similarity_floor: 0.7`, every tiling field at its no-op default. The
+finalist ships as an additive **tuning-grid** entry, not as a changed default, so this property
+survives the shipped change: `floorplans-window` and the four chipset/textured/synthetic regimes are
+untouched unless a domain-tuning run deliberately selects the new grid cell for them.
+
+---
+
+## STEP-3 GO/NO-GO VERDICT — Task 4 (contour/blob backend) NOT attempted
+
+Recorded per the plan's requirement that the criterion be evaluated on VAL and the verdict written
+into this notebook **before** Task 4 begins. The plan's criterion: attempt step 3 only if **(a)**
+crowded-bucket proposal recall is still < 0.50 after steps 1+2, **or** **(b)** the combined val F1
+gain is < +0.05 absolute.
+
+| criterion | threshold | measured | fired? |
+|---|---|---|---|
+| **(a)** crowded-bucket recall < 0.50 | < 0.50 | end-to-end `16+` val recall **0.131** at the mid-sweep operating point (`conf 0.10`, floor 0.75); **0.2615** at the final finalist (`conf 0.10`, floor 0.70) | **YES** |
+| **(b)** val F1 gain < +0.05 | < +0.05 | **+0.093** at the mid-sweep point; **+0.138** at the finalist (0.404 → 0.542) | **NO** |
+
+Criterion (a) fired. Criterion (b) did not, and is not close — the finalist's val gain is nearly
+**3×** the threshold that would have triggered step 3 on those grounds.
+
+**Verdict: Task 4 is deliberately SKIPPED, on evidence, despite criterion (a) firing.**
+
+The criterion is a trigger, not an instruction to build. The plan's own text conditions it on the
+lever still being the right one (*"AND the step-1/2 latency cost has not already become the binding
+constraint … if [that is so], adding a second backend on top is not the next lever — record that and
+stop"*), and the plan's overriding instruction is to let the numbers decide. They decide against it,
+for one specific reason:
+
+> **A contour backend supplies MORE PROPOSALS, and the proposal stage is no longer the binding
+> stage.** At the finalist operating point the proposal stage delivers crowded-bucket recall
+> **0.639** (T2, untiled `conf 0.10`) while the pipeline end-to-end returns only **0.2615** (T3).
+> The doors are already being proposed; they are being lost in retrieval/calibration. Adding a
+> second source of proposals attacks a stage with ~0.38 of headroom already sitting unconsumed.
+
+Three further pieces of evidence, all measured in this notebook, point the same way:
+
+1. **The premise for a contour backend was refuted.** T1e Finding 4 argued from `4_png` (proposal
+   recall 0.000 across seven tiling configurations) that *"FastSAM does not consider a CAD door
+   symbol an object"* — the single strongest argument for a non-FastSAM proposer. **T2 Finding 4
+   refuted it**: `4_png` reaches **0.857** on the conf gate alone (6 of 7 doors, 118 proposals, one
+   untiled pass). Those symbols were never invisible to FastSAM; they were scoring below a 0.4 gate
+   that had never been turned. Three of the four zero-recall plans are essentially solved this way.
+2. **What genuinely resists is not a proposal-supply problem either.** Two plans still resist, and
+   differently: `65_png` (4000×1685) responds to **tiling**, not to a new backend, and `22_png`
+   (482×507, 17 doors) is immovable under both levers at **274 proposals for 17 doors** — a plan
+   drowning in proposals is not short of them.
+3. **Cost.** Steps 1+2 already multiply the dominant embedding stage ~3.5×. Layering a second
+   proposal source on top compounds exactly the cost the plan named as a stop condition.
+
+**This is a measured, evidence-based skip under the plan's "let the numbers decide" instruction, not
+an omission.** The plan states the outcome must be a recorded measurement in every branch, and it is:
+the criterion, the numbers on both sides of it, and the mechanism that overrides it are all above.
+
+The lead it replaces is more valuable than the backend would have been, and is carried into the
+report's *Measured and deferred* section: **retrieval/calibration on crowded plans is the next
+lever** (T3 Finding 3) — the DINOv2 region embedding and the gmm cut, not the proposer.
+
+---
+
+## CORRECTION — artifact custody: `runs/` is GITIGNORED, not committed
+
+The "RUNTIME NOTE" entry above states that the pre-`T1f` artifacts survived the loss of contract
+`47510440` "because the JSON artifacts had been pulled back to `runs/` **and committed**". The second
+half of that is **factually wrong** and is corrected here rather than edited above, per the
+append-only rule.
+
+`.gitignore:95` carries the rule `.planning/quick/*/runs/`, and `git ls-files` over that directory
+returns **zero tracked files** — none of this quick task's 55 run artifacts is, or ever was, in git.
+They survived because they were rsynced into this worktree's working tree, which is not the same
+thing.
+
+This is the repo's deliberate convention, not a defect: raw per-run JSON is environment-dependent
+and regenerable, and is ignored for the same reason `docs/benchmark/`'s tuning dumps are. The
+committed, reviewable record is **this notebook** plus
+`scripts/propose_retrieve_floorplans_experiment.py`, which is what "every number traces to committed
+code" means in this task — the *code and the command* are committed and re-runnable, not the output
+bytes. The artifacts were **not** force-added past the ignore rule to make the earlier sentence true.
+
+Practical consequence, stated plainly so a future reader is not misled: **the artifacts are local to
+this worktree and are not recoverable from git.** Every number in this notebook and in
+`docs/reports/propose-retrieve-floorplans-improvement.md` is reproducible by re-running the recorded
+command against the committed split, but the specific JSON files are not archived.
+
+---
