@@ -104,6 +104,16 @@ Deferred deliberately (mirrored in ``docs/methods/sparse-geo.md``); none is buil
   histograms, which would unlock ``single-4dof`` voting for a learned backend.
 - **LoFTR / RoMa dense matching** with correspondence-field clustering for low-texture objects
   (a research spike -- the ONNX export is awkward).
+
+Candidate next lead (not yet investigated), from ``propose-retrieve``'s floor-plans pass
+(``docs/reports/propose-retrieve-floorplans-improvement.md``, 2026-08-24): that pass's root cause
+was an under-tuned upstream threshold -- domain tuning swept a retrieval-stage knob
+(``similarity_floor``) but never the proposal-stage confidence gate, which turned out to be the
+actual binding constraint. This method's still-unexplained correspondence-to-peak funnel collapse
+(``docs/ROBUSTNESS-BACKLOG.md``) has the same shape: only ``min_inliers`` has ever been
+domain-tuned. Worth checking whether an intermediate Hough-voting threshold is similarly
+under-tuned before assuming the collapse is a hard ceiling -- not a proven transfer, just the
+closest-matching next thing to check.
 """
 
 from __future__ import annotations

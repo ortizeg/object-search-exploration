@@ -118,4 +118,5 @@ nav:
       - OWLv2 floor-plan fine-tune: reports/owlv2-floorplans-finetune.md
       - OWLv2 (real-objects): reports/owlv2-oneshot-real-objects-improvement.md
       - Propose–retrieve: reports/propose-retrieve-improvement.md
+      - "Propose–retrieve (floor-plans)": reports/propose-retrieve-floorplans-improvement.md
   - Robustness backlog: ROBUSTNESS-BACKLOG.md

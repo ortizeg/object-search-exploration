@@ -89,6 +89,13 @@ def test_config_defaults_match_the_locked_decisions() -> None:
     assert cfg.similarity_floor == 0.7
     assert cfg.max_candidates == 50
     assert cfg.seed == 0
+    # Tiling ships OFF, so the chipset/textured/synthetic/real regimes are byte-identical by
+    # construction rather than by measurement. Its geometry defaults mirror SAHI's verified ones.
+    assert cfg.proposal_tiling is False
+    assert cfg.tile_side == 1024
+    assert cfg.tile_overlap == 0.2
+    assert cfg.tile_merge_ios == 0.5
+    assert cfg.tile_include_full_image is True
 
 
 def test_config_is_frozen_and_schema_drives_the_form() -> None:
@@ -102,6 +109,11 @@ def test_config_is_frozen_and_schema_drives_the_form() -> None:
         "retrieval_threshold",
         "nms_iou",
         "similarity_floor",
+        "proposal_tiling",
+        "tile_side",
+        "tile_overlap",
+        "tile_merge_ios",
+        "tile_include_full_image",
     ):
         assert schema["properties"][field].get("description")
 
@@ -286,6 +298,96 @@ def test_uniform_lattice_is_not_rejected_by_the_similarity_floor(
     assert result.outcome is SearchOutcome.OK
     assert len(result.matches) == len(boxes)  # every identical instance is found, not zero
     assert result.diagnostics.metrics["threshold"] == pytest.approx(0.7)  # the floor decided
+
+
+# ---------------- model-free: proposal tiling defaults OFF and cannot perturb the untiled path
+
+
+class _RecordingProposalBackend:
+    """A stub proposal backend that returns fixed TILE-LOCAL boxes and records each call's shape."""
+
+    def __init__(self, boxes: list[BBox]) -> None:
+        self._boxes = boxes
+        self.shapes: list[tuple[int, int]] = []
+
+    def propose(self, image: npt.NDArray[np.uint8], config: object) -> list:
+        from object_search.inference import Proposal
+
+        self.shapes.append((int(image.shape[0]), int(image.shape[1])))
+        return [Proposal(box=b, mask=None, objectness=0.9) for b in self._boxes]
+
+
+def _lattice_boxes() -> list[BBox]:
+    return [BBox(x=x, y=y, w=20, h=20) for y in (5, 55) for x in (5, 55)]
+
+
+def test_default_config_leaves_search_on_the_untiled_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the shipped defaults, search makes ONE whole-image proposal call -- byte-identical to
+    the pre-tiling behaviour -- even on a scene far larger than tile_side."""
+    boxes = _lattice_boxes()
+    scene = np.full((1200, 1200, 3), 50, dtype=np.uint8)
+    backend = _RecordingProposalBackend(boxes)
+    monkeypatch.setattr(propose_retrieve, "_get_backend", lambda: backend)
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: _StubInferencer(fill=1.0))
+
+    result = search(scene, ExemplarBox(box=boxes[0]), ProposeRetrieveConfig())
+
+    assert backend.shapes == [(1200, 1200)]  # one pass, over the whole scene
+    assert result.outcome is SearchOutcome.OK
+    assert len(result.matches) == len(boxes)
+    # The EVAL-11 tiling metrics exist on the untiled path too, reading as the no-op they describe.
+    assert result.diagnostics.metrics["n_tiles"] == 1.0
+    assert result.diagnostics.metrics["n_proposals_pre_merge"] == float(len(boxes))
+    assert result.diagnostics.metrics["merged_by_tiling"] == 0.0
+
+
+def test_tiling_on_a_scene_that_fits_one_tile_is_byte_identical_to_untiled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression guard for the four non-floor-plan regimes: those scenes fit inside a 1024
+    tile, so even with tiling switched ON the result is identical -- no IoS merge runs, because
+    with a single pass there is nothing CROSS-tile to merge."""
+    boxes = _lattice_boxes()
+    scene = np.full((120, 120, 3), 50, dtype=np.uint8)
+    exemplar = ExemplarBox(box=boxes[0])
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: _StubInferencer(fill=1.0))
+
+    monkeypatch.setattr(propose_retrieve, "_get_backend", lambda: _RecordingProposalBackend(boxes))
+    untiled = search(scene, exemplar, ProposeRetrieveConfig())
+    monkeypatch.setattr(propose_retrieve, "_get_backend", lambda: _RecordingProposalBackend(boxes))
+    tiled = search(scene, exemplar, ProposeRetrieveConfig(proposal_tiling=True))
+
+    assert [(m.box, m.score, m.is_exemplar) for m in tiled.matches] == [
+        (m.box, m.score, m.is_exemplar) for m in untiled.matches
+    ]
+    assert tiled.threshold_applied == untiled.threshold_applied
+    for key in ("n_proposals", "n_tiles", "n_proposals_pre_merge", "merged_by_tiling", "n_matches"):
+        assert tiled.diagnostics.metrics[key] == untiled.diagnostics.metrics[key]
+
+
+def test_tiling_on_a_large_scene_runs_one_pass_per_tile_plus_the_full_image_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turning tiling on routes step 1 through propose_tiled and REPORTS the cost (EVAL-11)."""
+    boxes = _lattice_boxes()
+    scene = np.full((1200, 1200, 3), 50, dtype=np.uint8)
+    backend = _RecordingProposalBackend(boxes)
+    monkeypatch.setattr(propose_retrieve, "_get_backend", lambda: backend)
+    monkeypatch.setattr(dino_dense, "_get_inferencer", lambda: _StubInferencer(fill=1.0))
+
+    config = ProposeRetrieveConfig(proposal_tiling=True, tile_side=512, tile_overlap=0.2)
+    result = search(scene, ExemplarBox(box=boxes[0]), config)
+
+    # 3 x 3 tile grid over 1200 px at side 512 / step 410, plus the SAHI + FI whole-image pass.
+    assert len(backend.shapes) == 10
+    assert result.diagnostics.metrics["n_tiles"] == 10.0
+    assert (1200, 1200) in backend.shapes
+    assert result.diagnostics.metrics["n_proposals_pre_merge"] == 40.0
+    assert result.diagnostics.metrics["merged_by_tiling"] > 0.0
+    assert result.outcome is SearchOutcome.OK
+    assert any("tile(s)" in note for note in result.diagnostics.notes)
 
 
 # ================================================== real-model behaviour (skipped in CI)
