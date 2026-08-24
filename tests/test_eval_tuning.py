@@ -21,6 +21,7 @@ from object_search.eval.tuning import (
 )
 from object_search.provenance import repo_root
 from object_search.schemas.geometry import BBox
+from object_search.search import get_method
 
 _FIXTURE_ROOT = repo_root() / "tests" / "fixtures" / "research" / "floorplans"
 _VAL_IDS = ("fp-val-1", "fp-val-2")
@@ -178,13 +179,55 @@ def test_real_ncc_grid_is_multi_knob() -> None:
     for overrides in _TUNING_GRIDS["mosse"]:
         assert set(overrides) in (mosse_base_keys, mosse_cardinal_keys)
     assert any(set(overrides) == mosse_cardinal_keys for overrides in _TUNING_GRIDS["mosse"])
-    # sparse-geo / propose-retrieve / owlv2 each pair a primary knob with a second one.
+    # The committed propose-retrieve grid pairs similarity_floor with nms_iou in its base block,
+    # PLUS an additive proposal_conf x similarity_floor block from the floor-plan domain
+    # investigation (260812-m8m), where the PROPOSAL stage rather than retrieval caps recall.
+    pr_base_keys = {"similarity_floor", "nms_iou"}
+    pr_conf_keys = pr_base_keys | {"proposal_conf"}
+    for overrides in _TUNING_GRIDS["propose-retrieve"]:
+        assert set(overrides) in (pr_base_keys, pr_conf_keys)
+    assert any(set(overrides) == pr_conf_keys for overrides in _TUNING_GRIDS["propose-retrieve"])
+    # sparse-geo / owlv2 each pair a primary knob with a second one.
     for overrides in _TUNING_GRIDS["sparse-geo"]:
         assert set(overrides) == {"min_inliers", "nms_iou"}
-    for overrides in _TUNING_GRIDS["propose-retrieve"]:
-        assert set(overrides) == {"similarity_floor", "nms_iou"}
     for overrides in _TUNING_GRIDS["owlv2-oneshot"]:
         assert set(overrides) == {"max_box_area_frac", "query_iou_frac"}
+
+
+def test_propose_retrieve_grid_is_additive_and_carries_the_floorplan_finalist() -> None:
+    """The floor-plan block ADDS to the committed grid; it never replaces or narrows it.
+
+    The shipping rule for quick task 260812-m8m was a grid-only change: `proposal_conf`'s SHIPPED
+    default (0.4) must stay reachable through the original block, so domain tuning can only match
+    or beat the previous result on any dataset -- and the four chipset/textured/synthetic regimes
+    stay byte-identical because no default moved. Guards both halves of that.
+    """
+    grid = _TUNING_GRIDS["propose-retrieve"]
+    base = [o for o in grid if "proposal_conf" not in o]
+    additive = [o for o in grid if "proposal_conf" in o]
+
+    # The pre-existing 6 floors x 2 nms block survives untouched and entire.
+    assert len(base) == 12
+    assert {(o["similarity_floor"], o["nms_iou"]) for o in base} == {
+        (floor, nms) for floor in (0.4, 0.5, 0.6, 0.7, 0.8, 0.85) for nms in (0.3, 0.5)
+    }
+    # The additive block is the measured 3 conf x 3 floor cross, every cell traceable to a val run.
+    assert len(additive) == 9
+    assert {o["proposal_conf"] for o in additive} == {0.1, 0.2, 0.3}
+    assert {o["similarity_floor"] for o in additive} == {0.7, 0.75, 0.8}
+    # Every additive cell opens the gate; none re-states or exceeds the shipped default of 0.4.
+    assert all(float(str(o["proposal_conf"])) < 0.4 for o in additive)
+    # The measured floorplans-door finalist (test F1 0.481 -> 0.597) is reachable.
+    assert {"proposal_conf": 0.1, "similarity_floor": 0.7, "nms_iou": 0.3} in grid
+    # Tiling is deliberately NOT swept: at a matched proposal budget the objectness gate beat it
+    # by +0.233 mean proposal recall at a third of the latency, so no tiled cell could ever win.
+    assert all("proposal_tiling" not in o for o in grid)
+
+    # Every entry validates through the method's own frozen config model (extra="forbid" catches a
+    # typo'd key at import-test time rather than after a multi-hour sweep).
+    config_model = get_method("propose-retrieve").config_model
+    for overrides in grid:
+        config_model(**overrides)
 
 
 # ------------------------------------------------ size-representative exemplar selection

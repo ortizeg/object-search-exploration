@@ -180,8 +180,72 @@ def _mosse_grid() -> tuple[dict[str, object], ...]:
     )
 
 
+# ``propose-retrieve``-only ADDITIVE block from the floor-plan domain investigation (quick task
+# 260812-m8m, see EXPERIMENTS.md in that quick task's directory and
+# docs/reports/propose-retrieve-floorplans-improvement.md). FastSAM's everything-mode proposal COUNT
+# scales with image AREA (r = +0.59 over 84 plans), not with instance count (r = +0.22), so a
+# crowded CAD plan gets ~46 proposals for ~15 doors and the PROPOSAL stage caps recall at 0.405
+# before retrieval ever runs. `proposal_conf` (FastSAM's objectness gate, default 0.4) is the
+# lever that lifts that cap, and it had never been tuned for this domain: lowering it to 0.10 takes
+# proposal-stage recall 0.498 -> 0.821 and floorplans-door test F1 0.481 -> 0.597 (+24% relative),
+# almost all of it recall (0.399 -> 0.674) for a precision cost of 0.604 -> 0.536.
+#
+# Swept jointly with `similarity_floor` rather than alone, because opening the gate changes the
+# proposal distribution the floor has to reject false positives from (46.5 -> 161.2 proposals/plan),
+# so the floor's optimum genuinely might move. Measured: it does not -- the argmax floor is 0.70,
+# the SHIPPED default, on both the old and the new distribution. F1 is monotone on both axes
+# (falling in floor at every conf, and 0.10 > 0.20 > 0.30 at every floor), so the argmax is a
+# corner of the swept region, not an unstable ridge -- unlike the owlv2 doors experience in
+# docs/reports/owlv2-floorplans-improvement.md. `floor 0.85` is omitted (measured worst by a wide
+# margin, val F1 0.247) and `nms_iou` is fixed at the tighter 0.3, which won every pair in B1's
+# 6x2 sweep; both were held fixed in the investigation's own grid rather than re-crossed here.
+#
+# Additive, not a replacement: the pre-existing similarity_floor x nms_iou entries stay untouched
+# and available (they include the shipped default at conf 0.4), so this can only match or beat the
+# previous grid on any dataset, never regress it. It ships as a GRID entry and NOT as a changed
+# `ProposeRetrieveConfig.proposal_conf` default deliberately -- a lower gate trades textured
+# precision for recall, which the general-case pass already measured and declined
+# (docs/reports/propose-retrieve-improvement.md's closing note), so this stays a domain lever that a
+# floor-plan tuning run opts into, leaving the chipset/textured/synthetic regimes byte-identical.
+#
+# NOT part of this block, and deliberately so: the SAHI-style tiling fields
+# (`proposal_tiling` et al.) built in this same quick task. At a MATCHED proposal budget the
+# objectness gate beat tiling by +0.233 mean proposal recall at a THIRD of the latency, so no tiled
+# cell would ever win this grid. See the report for the full measured-and-rejected record.
+_PROPOSE_RETRIEVE_FLOOR: tuple[float, ...] = (0.4, 0.5, 0.6, 0.7, 0.8, 0.85)
+_PROPOSE_RETRIEVE_NMS: tuple[float, ...] = (0.3, 0.5)
+_PROPOSE_RETRIEVE_CONF: tuple[float, ...] = (0.1, 0.2, 0.3)
+_PROPOSE_RETRIEVE_DOMAIN_FLOOR: tuple[float, ...] = (0.7, 0.75, 0.8)
+
+
+def _propose_retrieve_grid() -> tuple[dict[str, object], ...]:
+    """``propose-retrieve``'s grid: the original ``similarity_floor`` x ``nms_iou`` sweep, PLUS an
+    additive ``proposal_conf`` x ``similarity_floor`` block (see the module comment above
+    ``_PROPOSE_RETRIEVE_FLOOR``).
+
+    Additive, not a replacement: the shipped ``proposal_conf`` (0.4) stays available through the
+    original block, so this can only match or beat the pre-existing grid, never regress it. Every
+    one of the nine additive cells traces to a committed val run in quick task 260812-m8m.
+    """
+    # Both blocks are annotated ``dict[str, object]`` rather than inferred: every value here is a
+    # float, so mypy would infer the invariant ``dict[str, float]`` and reject the wider return
+    # type that `_TUNING_GRIDS` and `tune_method`'s ``grid=`` parameter share with every other grid.
+    base: tuple[dict[str, object], ...] = tuple(
+        {"similarity_floor": floor, "nms_iou": nms}
+        for floor in _PROPOSE_RETRIEVE_FLOOR
+        for nms in _PROPOSE_RETRIEVE_NMS
+    )
+    domain: tuple[dict[str, object], ...] = tuple(
+        {"proposal_conf": conf, "similarity_floor": floor, "nms_iou": 0.3}
+        for conf in _PROPOSE_RETRIEVE_CONF
+        for floor in _PROPOSE_RETRIEVE_DOMAIN_FLOOR
+    )
+    return base + domain
+
+
 _NCC_GRID: tuple[dict[str, object], ...] = _ncc_grid()
 _MOSSE_GRID: tuple[dict[str, object], ...] = _mosse_grid()
+_PROPOSE_RETRIEVE_GRID: tuple[dict[str, object], ...] = _propose_retrieve_grid()
 
 _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
     "ncc": _NCC_GRID,
@@ -197,12 +261,10 @@ _TUNING_GRIDS: Mapping[str, tuple[dict[str, object], ...]] = {
     # stricter. Single knob (the letterbox fix is Task 4; dense-feature acceptance is the trade).
     "dino-dense": tuple({"retain_frac": v} for v in (0.5, 0.6, 0.7, 0.8, 0.9)),
     # propose-retrieve -- similarity_floor (min cosine to a retrieved proposal embedding; higher ->
-    # stricter, widened from 0.4) crossed with nms_iou (collapses FastSAM over-segmentation).
-    "propose-retrieve": tuple(
-        {"similarity_floor": floor, "nms_iou": nms}
-        for floor in (0.4, 0.5, 0.6, 0.7, 0.8, 0.85)
-        for nms in (0.3, 0.5)
-    ),
+    # stricter, widened from 0.4) crossed with nms_iou (collapses FastSAM over-segmentation), PLUS
+    # an additive proposal_conf x similarity_floor block for the floor-plan domain, where the
+    # PROPOSAL stage (not retrieval) is what caps recall -- see above `_PROPOSE_RETRIEVE_FLOOR`.
+    "propose-retrieve": _PROPOSE_RETRIEVE_GRID,
     # owlv2-oneshot -- max_box_area_frac (drop boxes bigger than this fraction of the image; the
     # whole-frame-box filter) crossed with query_iou_frac (how wide the query-patch set is), the two
     # knobs that most move floor-plan precision/recall. retain_frac stays at the method default.
