@@ -109,6 +109,8 @@ nav:
       - NCC: reports/ncc-improvement.md
       - MOSSE: reports/mosse-improvement.md
       - Sparse-geo: reports/sparse-geo-improvement.md
+      - "Sparse-geo (real-objects, SuperPoint spike)": reports/sparse-geo-real-objects-superpoint-spike.md
+      - "Sparse-geo (floor-plans, voting-mode confound)": reports/sparse-geo-floorplans-voting-mode-confound.md
       - DINO dense: reports/dino-dense-improvement.md
       - "DINO dense (floor-plans)": reports/dino-dense-floorplans-improvement.md
       - OWLv2: reports/owlv2-improvement.md
