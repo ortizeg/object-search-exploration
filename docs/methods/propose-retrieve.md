@@ -58,11 +58,32 @@ and **low** IoU, and an IoU merge would keep both. `max_proposals` is applied **
 the budget stays global. On a scene that already fits inside one tile this is an **exact identity**,
 which is why the chipset/textured/synthetic regimes are unaffected by construction.
 
-The lever is **proposal budget**, not just magnification: FastSAM's everything-mode proposal count
-scales with image *area* (r = +0.59 on 84 floor plans) and barely with instance count (r = +0.22), so
-a crowded plan gets ~40 proposals for ~15 symbols and the proposal stage caps recall at 0.27 before
-retrieval runs. N tiles buy roughly N× the budget, and each tile is magnified by `1024 / tile_side`
-by FastSAM's fixed letterbox. See [the floor-plan report](../reports/propose-retrieve-floorplans-improvement.md).
+The lever is **proposal budget**, not magnification: FastSAM's everything-mode proposal count scales
+with image *area* (r = +0.59 on 84 floor plans) and barely with instance count (r = +0.22), so a
+crowded plan gets ~46 proposals for ~15 symbols and the proposal stage caps recall at 0.27 before
+retrieval runs.
+
+> **Measured, and NOT recommended for CAD floor plans** — see
+> [the floor-plan report](../reports/propose-retrieve-floorplans-improvement.md). Three findings, in
+> the order they were measured:
+>
+> - **Magnification does nothing here.** At a disabled merge, 512-tiles (2.00× magnification) and
+>   768-tiles (1.33×) scored **0.586 vs 0.585** mean proposal recall — a 2× difference in
+>   pixels-per-symbol worth 0.001. SAHI's stated premise (small objects lost to downscaling) does not
+>   apply to this domain.
+> - **N tiles do NOT buy N× the budget** at the default `tile_merge_ios` of 0.5. Across a 4.3× range
+>   in forward passes (2.5 → 10.8 tiles/plan) the *merged* proposal count stayed pinned at
+>   **1.14–1.33×** baseline: IoS is `intersection / min(area)`, so a proposal fully **contained** in
+>   a kept one scores exactly 1.0 and is deleted — and the contained ones are precisely the small
+>   nested symbols being hunted. The merge is a budget clamp on an everything-mode segmenter.
+> - **`proposal_conf` buys the same budget more cheaply.** At a *matched* proposal budget the
+>   objectness gate beat tiling by **+0.233** mean proposal recall, **+0.347** in the crowded bucket,
+>   for about a **third** of the proposal-stage latency — and tiling pays on both the FastSAM and the
+>   embedding stage, where the gate pays only on embeddings.
+>
+> Tiling is kept as an opt-in because it is an exact identity on single-tile scenes and *is* the
+> right lever for one measured extreme-resolution case (a 4000×1685 plan: proposal recall 0.053
+> untiled → 0.263 tiled). For floor plans generally, tune `proposal_conf` instead.
 
 ### 2. Embed the proposal regions
 
@@ -157,7 +178,9 @@ into overlapping `tile_side` tiles in native pixels with step `round(tile_side �
 and the final tile **clamped to the image edge** (not padded — padding would letterbox grey into the
 model's field of view for whichever symbols land there). **Each tile then goes through the exact
 FastSAM preprocessing above**, i.e. it is letterboxed to the same fixed 1024 square, which is what
-magnifies a symbol by `1024 / tile_side`. Tile boxes are offset into full-image coordinates and
+magnifies a symbol by `1024 / tile_side` (a real mechanical effect whose *benefit* measured inert on
+floor plans — see the [Algorithm §1 note](#1-propose-regions-fastsam-everything-mode)). Tile boxes
+are offset into full-image coordinates and
 clipped to the scene; `return_masks=True` is **rejected with a `ValueError`** because FastSAM masks
 come back in tile-local coordinates and mapping them back is out of scope — silently returning
 tile-local masks would be a correctness bug. Tiling adds **no randomness**: tile order is `(y0, x0)`
@@ -264,7 +287,21 @@ Deferred deliberately (mirrored verbatim from the module docstring and
   a size prior fights the scale-invariance this method exists to provide.
 - **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
+  **Considered and NOT built (2026-08-24)** — a contour/blob proposer for line-art plans was scoped,
+  its go/no-go criterion fired, and it was still skipped on evidence: with `proposal_conf` tuned, the
+  proposal stage stopped being the binding stage (crowded-bucket proposal recall 0.639 vs end-to-end
+  0.262), and its motivating claim — that FastSAM cannot see CAD door symbols — was refuted (the plan
+  of record went 0.000 → 0.857 on the gate alone). See
+  [the floor-plan report](../reports/propose-retrieve-floorplans-improvement.md).
 - **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
+- **SAHI-style proposal tiling (`proposal_tiling` et al.) — BUILT AND MEASURED, off by default, NOT
+  RECOMMENDED for CAD floor plans.** At a matched proposal budget the existing `proposal_conf` gate
+  beat it by **+0.233 mean proposal recall at a third of the latency**, and SAHI's magnification
+  premise measured **inert** here (a 2× difference in pixels-per-symbol moved recall by 0.001). Kept
+  as an opt-in rather than reverted: it is an exact identity on single-tile scenes and *is* the right
+  lever for one measured extreme-resolution case (4000×1685 plan, 0.053 → 0.263). See the
+  [Algorithm §1 note](#1-propose-regions-fastsam-everything-mode) and
+  [the floor-plan report](../reports/propose-retrieve-floorplans-improvement.md).
 
 ## Sample runs
 

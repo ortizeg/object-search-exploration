@@ -55,6 +55,17 @@ inferencer docstrings and reused verbatim:
   ``max_proposals`` is applied after the merge, so the budget is global. On a scene that fits
   inside one tile this is an exact identity. See
   :func:`~object_search.search.proposals.propose_tiled`.
+
+  **Measured, and NOT recommended for CAD floor plans.** The magnification this path buys is
+  measured **inert** on that domain -- a 2x difference in pixels-per-symbol (512- vs 768-tiles at a
+  disabled merge) moved mean proposal recall by **0.001** -- so what tiling actually buys is
+  proposal *budget*, and ``proposal_conf`` buys the same budget more cheaply: at a matched budget
+  the gate scored **+0.233** mean proposal recall for about a **third** of the proposal-stage
+  latency. Note also that at SAHI's default ``tile_merge_ios`` of 0.5 the IoS merge acts as a
+  **budget clamp**, suppressing the *nested* proposals an everything-mode segmenter emits constantly
+  (a room, and the door inside it) -- which is a different situation from SAHI's own, where the
+  merge sees class detections and nesting is rare. See
+  ``docs/reports/propose-retrieve-floorplans-improvement.md``.
 - **DINOv2 region embeddings** -- ``pixel_values`` f32 NCHW, **RGB**, scale ``1/255``, mean
   ``[0.485, 0.456, 0.406]``, std ``[0.229, 0.224, 0.225]``, **bicubic** resize with
   **snap-to-multiple(14)** and **NO centre-crop**. Each proposal's box crop is embedded on its own.
@@ -158,7 +169,27 @@ Deferred deliberately (mirrored in ``docs/methods/propose-retrieve.md`` and
   provide; do not add it.
 - **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
+  **Considered and NOT built (2026-08-24).** A classical contour/blob proposer for line-art floor
+  plans was scoped, its pre-stated go/no-go criterion fired, and it was still skipped on evidence:
+  once ``proposal_conf`` was tuned for the domain the proposal stage stopped being the binding stage
+  (crowded-bucket proposal recall 0.639 vs end-to-end 0.262), and its motivating claim -- that
+  FastSAM does not consider a CAD door symbol an object -- was refuted outright (the plan of record
+  went proposal recall 0.000 -> 0.857 on the gate alone). A second proposal source attacks a stage
+  that already has ~0.38 of unconsumed headroom. See
+  ``docs/reports/propose-retrieve-floorplans-improvement.md``.
 - **MobileSAM everything-mode** with a ported ``SamAutomaticMaskGenerator`` as a second backend.
+- **SAHI-style proposal tiling (``proposal_tiling`` et al.) -- BUILT AND MEASURED, off by default,
+  NOT RECOMMENDED for CAD floor plans.** Implemented as ``propose_tiled`` / ``_tile_origins`` /
+  ``_merge_tiled_proposals`` in ``proposals.py``. Measured on floorplans-door/window across seven
+  geometries and five merge thresholds: at a **matched proposal budget** the existing
+  ``proposal_conf`` gate beat it by **+0.233 mean proposal recall at a third of the latency**, and
+  SAHI's magnification premise measured **inert** here (a 2x difference in pixels-per-symbol moved
+  recall by 0.001). Kept as a documented opt-in rather than reverted: it is an exact identity on any
+  scene fitting in one tile, and it *is* the right lever for one measured extreme-resolution case (a
+  4000x1685 plan, proposal recall 0.053 untiled -> 0.263 tiled). Separately, the IoS merge acts as a
+  **budget clamp** at SAHI's default 0.5 threshold, because it suppresses the nested proposals an
+  everything-mode segmenter emits constantly (a room, and the door inside it). See
+  ``docs/reports/propose-retrieve-floorplans-improvement.md``.
 """
 
 from __future__ import annotations

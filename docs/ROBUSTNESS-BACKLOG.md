@@ -117,7 +117,33 @@ docstring (mirrored verbatim so the two cannot drift).
   the exemplar before embedding, cutting both cost and false positives.
 - **Multi-crop / test-time augmentation embeddings** for pose-robust region descriptors.
 - **Alternative proposal sources (RPN, selective search)** for images where SAM over-segments.
+  **Considered and NOT built (2026-08-24)** — a classical contour/blob proposer for line-art plans
+  was scoped, its go/no-go criterion fired, and it was still skipped on evidence: the proposal stage
+  stopped being the binding stage once `proposal_conf` was tuned (crowded-bucket proposal recall
+  0.639 vs end-to-end 0.262), and its motivating claim — that FastSAM cannot see CAD door symbols —
+  was refuted (the plan of record went 0.000 → 0.857 proposal recall on the gate alone). See
+  `docs/reports/propose-retrieve-floorplans-improvement.md`.
 - **MobileSAM everything-mode** with a ported `SamAutomaticMaskGenerator` as a second backend.
+- **SAHI-style proposal tiling (`proposal_tiling` et al.) — BUILT AND MEASURED, off by default,
+  NOT RECOMMENDED for CAD floor plans.** `propose_tiled` / `_tile_origins` /
+  `_merge_tiled_proposals` in `proposals.py` run the backend over overlapping native-pixel tiles and
+  merge by intersection-over-smaller. Measured on floorplans-door/window across seven geometries and
+  five merge thresholds: at a **matched proposal budget** the existing `proposal_conf` gate beat it
+  by **+0.233 mean proposal recall at a third of the latency**, and SAHI's magnification premise
+  measured **inert** here (a 2× difference in pixels-per-symbol moved recall by 0.001). Kept as a
+  documented opt-in rather than reverted, because it is an exact identity on any scene fitting in
+  one tile and it *is* the right lever for one measured extreme-resolution case (a 4000×1685 plan,
+  proposal recall 0.053 untiled → 0.263 tiled). Note also that the IoS merge acts as a **budget
+  clamp** at SAHI's default 0.5 threshold — it suppresses the nested proposals an everything-mode
+  segmenter emits constantly. See `docs/reports/propose-retrieve-floorplans-improvement.md`.
+
+> Implemented in the floor-plans improvement pass
+> (`docs/reports/propose-retrieve-floorplans-improvement.md`): the proposal-stage diagnosis (FastSAM's
+> budget scales with image AREA, r = +0.59, not instance count, r = +0.22) and the resulting
+> **grid-only** fix — an additive `proposal_conf` × `similarity_floor` block in
+> `_TUNING_GRIDS["propose-retrieve"]` that takes floorplans-door test F1 0.481 → 0.597. No shipped
+> default changed and no config field was added, so every other regime is byte-identical. Tiling was
+> built and measured in that same pass but is NOT recommended (see above).
 
 ## `owlv2-oneshot` (Method 4 — OWLv2 image-conditioned one-shot detection)
 
