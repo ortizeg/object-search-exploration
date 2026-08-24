@@ -72,6 +72,18 @@ docstring (mirrored verbatim so the two cannot drift).
 > between correspondence and peak (55 peaks hypothesized for 157 ground-truth doors, from 2 664
 > correspondences), and per-instance funnel instrumentation is the cheapest next measurement.
 
+> **Candidate next lead (not yet investigated), from `propose-retrieve`'s floor-plans pass
+> (`docs/reports/propose-retrieve-floorplans-improvement.md`, 2026-08-24):** that pass found its
+> own root cause was an under-tuned upstream threshold — the original domain-tuning grid swept
+> `similarity_floor` (a retrieval-stage knob) but never the FastSAM proposal-stage confidence gate,
+> which turned out to be the actual binding constraint. `sparse-geo`'s correspondence→peak funnel
+> collapse has the same shape: a multi-stage pipeline (keypoints → correspondences → Hough voting →
+> peaks) where only `min_inliers` has ever been domain-tuned. Worth checking whether an
+> intermediate Hough-voting threshold (bin size, vote count, or an analogous gate before peak
+> extraction) is similarly under-tuned, before assuming the funnel collapse is a hard ceiling. Not
+> a proven transfer — sparse-geo has no literal `proposal_conf` equivalent today — but the pattern
+> match is close enough to be the next thing to check, not re-derive from scratch.
+
 ## `dino-dense` (Method 3 — DINOv2 dense-token best-part matching)
 
 Captured here and in the `dino_dense.py` docstring. The mean-pooled-prototype and thresholding
