@@ -190,6 +190,19 @@ Deferred deliberately (mirrored in ``docs/methods/propose-retrieve.md`` and
   **budget clamp** at SAHI's default 0.5 threshold, because it suppresses the nested proposals an
   everything-mode segmenter emits constantly (a room, and the door inside it). See
   ``docs/reports/propose-retrieve-floorplans-improvement.md``.
+- **Crowded-bucket retrieval/calibration gap -- INVESTIGATED (2026-08-25), no lever ships.** The
+  floor-plan pass above left a lead: proposal-stage recall 0.639 vs end-to-end recall 0.262 in the
+  11+-door bucket. A follow-on traced every GT box through propose/embed/calibrate/NMS and found
+  the retrieval-stage loss rate (of GT boxes WITH a covering proposal) triples with crowding
+  (0.095 -> 0.197 -> 0.322), that the gmm's adaptive cut is nearly inert here (the fixed
+  ``similarity_floor`` decides in nearly every case), and that true/background cosine-score
+  separation compresses with crowding (0.373 -> 0.287) -- an embedding-discriminability signature,
+  not a calibration-logic defect. Sweeping ``similarity_floor`` BELOW 0.70 at ``proposal_conf=0.10``
+  (0.55/0.60/0.65, closing the prior report's stated "not measured" gap) monotonically WORSENS
+  pooled val F1 (0.542 -> 0.480 -> 0.393 -> 0.322); ``0.70`` is confirmed the argmax across the full
+  now-measured {0.55-0.85} range. Nothing ships. See
+  ``docs/reports/propose-retrieve-floorplans-improvement.md``'s 2026-08-25 follow-on section and
+  ``.planning/quick/260825-propose-retrieve-calibration-stage/EXPERIMENTS.md``.
 """
 
 from __future__ import annotations

@@ -148,6 +148,16 @@ docstring (mirrored verbatim so the two cannot drift).
   proposal recall 0.053 untiled → 0.263 tiled). Note also that the IoS merge acts as a **budget
   clamp** at SAHI's default 0.5 threshold — it suppresses the nested proposals an everything-mode
   segmenter emits constantly. See `docs/reports/propose-retrieve-floorplans-improvement.md`.
+- **Crowded-bucket retrieval/calibration gap — INVESTIGATED (2026-08-25), no lever ships.** A
+  per-GT-box trace through propose/embed/calibrate/NMS found the retrieval-stage loss rate (of GT
+  boxes WITH a covering proposal) triples with crowding (0.095 → 0.197 → 0.322), that the gmm's
+  adaptive cut is nearly inert here (the fixed `similarity_floor` decides in nearly every case, not
+  the gmm), and that true/background cosine-score separation compresses with crowding (0.373 →
+  0.287) — an embedding-discriminability signature, not a calibration-logic defect. Sweeping
+  `similarity_floor` below 0.70 at `proposal_conf=0.10` monotonically WORSENS pooled val F1
+  (0.542 → 0.480 → 0.393 → 0.322); `0.70` is confirmed the argmax across the full now-measured
+  {0.55–0.85} range, closing the prior pass's stated "not measured" gap. Nothing ships. See
+  `docs/reports/propose-retrieve-floorplans-improvement.md`'s 2026-08-25 follow-on section.
 
 > Implemented in the floor-plans improvement pass
 > (`docs/reports/propose-retrieve-floorplans-improvement.md`): the proposal-stage diagnosis (FastSAM's

@@ -349,3 +349,79 @@ Measurement runtime: vast.ai contracts `47510440` (lost mid-session, with the en
 it already pulled back) and `48124756`, both **ONNX Runtime CPU builds** on RTX 3090 hosts. The
 guardrail regimes reproduce the committed GPU-era numbers to within rounding, which is what licenses
 comparing this session's CPU numbers against the committed table.
+
+---
+
+## Follow-on (2026-08-25) — the retrieval/calibration lead, investigated and closed as a negative result {: #follow-on-260825-calibration }
+
+This pass's own "Measured and deferred" section above named the next lead: with the proposal
+stage fixed, the transfer from proposal-stage recall to end-to-end recall had collapsed in the
+crowded bucket specifically (11+ doors: proposal recall **0.639** vs end-to-end recall **0.262**,
+a ~41% transfer against ~0.82 pooled), attributed to "DINOv2 embedding + gmm calibration" but not
+investigated further. A follow-on session did that investigation. Full record:
+`.planning/quick/260825-propose-retrieve-calibration-stage/EXPERIMENTS.md`; diagnostic harness:
+`scripts/propose_retrieve_calibration_experiment.py` (new, committed).
+
+**Method.** Trace every ground-truth box in every val plan through the actual pipeline
+(`propose` → `embed_regions` → `calibration.calibrate` → threshold → `nms.nms`) and classify each
+one as `matched` (survives to a true positive), `below_threshold` (a covering proposal exists but
+scores below the calibrated cut), `nms_suppressed` (clears the cut but loses post-retrieval NMS),
+or `no_proposal` (no covering proposal at all — a proposal-stage fact, out of scope here).
+
+**Finding 1 — the retrieval/calibration stage's own loss rate, isolated from proposal supply,
+triples with crowding:** 0.095 (sparse, 1–3 doors) → 0.197 (medium, 4–10) → **0.322** (crowded,
+11+), of GT boxes that DO have a covering proposal. `nms_suppressed` is negligible everywhere
+(≤2.1%) — NMS is not the mechanism.
+
+**Finding 2 — the gmm's adaptive component is nearly inert on this domain.** The applied threshold
+sits within 0.006 of the bare `similarity_floor` (0.70) in every crowding bucket. Re-reading the
+method's own threshold logic explains why: a degenerate fit uses the floor directly (discarding
+the ratio fallback), and a non-degenerate fit takes `max(gmm_cut, floor)` — the gmm can only ever
+raise the threshold above the floor, and empirically it almost never does here. **The fixed floor,
+not the gmm cut, is doing nearly all of the deciding** — which reframes "gmm calibration" in this
+pass's earlier framing as more precisely "the fixed `similarity_floor` clamp."
+
+**Finding 3 — true/background cosine-score separation compresses with crowding**, the DINOv2
+embedding-discriminability signature: background-proposal scores rise (0.452 → 0.513) while
+true-positive scores drift down slightly (0.825 → 0.800) from sparse to crowded, shrinking the
+margin the floor has to work with by 23% (0.373 → 0.287). The `below_threshold` population itself
+scores 0.637–0.656 across every bucket — real door crops the embedding matches only moderately,
+not noise.
+
+**The one candidate lever this motivated — `similarity_floor` below its shipped 0.70 at
+`proposal_conf=0.10` — was measured and closes the prior report's stated "not measured" gap.**
+Three val trials (floor 0.55 / 0.60 / 0.65, same `trial` scorer T3 used) extend that grid
+downward:
+
+| `similarity_floor` | val P | val R | val F1 | `16+`-bucket val F1 |
+|---|---|---|---|---|
+| 0.55 | 0.211 | 0.681 | 0.322 | 0.247 |
+| 0.60 | 0.278 | 0.670 | 0.393 | 0.282 |
+| 0.65 | 0.387 | 0.632 | 0.480 | **0.310** |
+| **0.70 (shipped, T3 argmax)** | **0.526** | 0.560 | **0.542** | 0.282 |
+
+Pooled F1 falls monotonically below 0.70, continuing the same trend T3 already measured above it
+— **0.70 is the argmax across the full now-measured {0.55–0.85} range**, closing that limitation
+cleanly. `floor=0.65` *does* win the crowded bucket in isolation (F1 0.282 → 0.310, recall
++0.123 at a precision cost of −0.047), but the same move costs the sparse bucket −0.137 F1 and
+the medium bucket −0.072 F1 — both far larger plan populations (14 and 36 plans vs 6) — so the
+pooled argmax the repo's tuning methodology optimises correctly rejects it. A crowding-conditional
+floor was not pursued: it would need to dispatch on ground truth the method cannot observe at
+inference time, and would introduce exactly the config-driven dispatch inside a method this
+repo's conventions rule out.
+
+**Hypothesis 3 (pre-embedding objectness/top-K filtering) was argued from existing evidence, not
+re-measured**: it reduces to re-raising `proposal_conf`, which this pass's own T2 already measured
+to hurt recall monotonically (`conf 0.10 > 0.20 > 0.30` at every floor) — a fresh trial would
+remove exactly the marginal-confidence proposals `proposal_conf=0.10` was shipped to rescue.
+
+**Verdict: nothing ships.** No `_TUNING_GRIDS` change, no config default change, no code change.
+Per the tune-on-val / read-test-once discipline, **test is not read** — no finalist earned it.
+The evidence points to DINOv2 embedding discriminability compressing under crowding as the actual
+crowded-bucket ceiling, not a miscalibrated threshold — a genuine fix would need an embedding-stage
+change (e.g. a crop-context or fine-tuned backbone, in the spirit of
+[`owlv2-floorplans-finetune.md`](owlv2-floorplans-finetune.md)'s work for a different method), out
+of scope for a threshold/grid-tuning pass and not attempted here.
+
+Measurement runtime: the same vast.ai instance as this report's original pass (`48124756`,
+restarted, disk state — models and datasets — reused unchanged), CPU-only ONNX Runtime.

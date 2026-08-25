@@ -302,6 +302,16 @@ Deferred deliberately (mirrored verbatim from the module docstring and
   lever for one measured extreme-resolution case (4000×1685 plan, 0.053 → 0.263). See the
   [Algorithm §1 note](#1-propose-regions-fastsam-everything-mode) and
   [the floor-plan report](../reports/propose-retrieve-floorplans-improvement.md).
+- **Crowded-bucket retrieval/calibration gap — INVESTIGATED (2026-08-25), no lever ships.** A
+  per-GT-box trace through propose/embed/calibrate/NMS found the retrieval-stage loss rate (of GT
+  boxes WITH a covering proposal) triples with crowding (0.095 → 0.197 → 0.322), that the gmm's
+  adaptive cut is nearly inert on this domain (the fixed `similarity_floor` decides in nearly every
+  case), and that true/background cosine-score separation compresses with crowding (0.373 → 0.287)
+  — an embedding-discriminability signature, not a calibration-logic defect. Sweeping
+  `similarity_floor` below 0.70 at `proposal_conf=0.10` monotonically WORSENS pooled val F1;
+  `0.70` is confirmed the argmax across the full measured {0.55–0.85} range. Nothing ships. See
+  [the follow-on section](../reports/propose-retrieve-floorplans-improvement.md#follow-on-260825-calibration)
+  of the floor-plan report.
 
 ## Sample runs
 
